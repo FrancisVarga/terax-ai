@@ -74,7 +74,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "ZFc1MGNuVnpkR1ZrSUdOdmJXMWxiblE2SUcxcGJtbHphV2R1SUhCMVlteHBZeUJyWlhrNklEZzVOelJGTUVWRU5VVXdNa1kwTlVFS1VsZFNZVGxCU21VM1pVSXdhV1pWU0dKV2JqUjRTekpFUzNWT01WSjJkV1ZYUkdSNGQwMUJiM2RVZWt4M0szWmtSR2gxU1RVNU5rVUs=",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg5NzRFMEVENUUwMkY0NUEKUldSYTlBSmU3ZUIwaWZVSGJWbjR4SzJES3VOMVJ2dWVXRGR4d01Bb3dUekx3K3ZkRGh1STU5NkUK",
       "endpoints": [
         "https://github.com/FrancisVarga/terax-ai/releases/latest/download/latest.json"
       ]
