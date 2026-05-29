@@ -29,3 +29,6 @@ dist-ssr
 # bunqueue sidecars — compiled per-platform by `pnpm build:sidecars`, not committed
 src-tauri/binaries/*
 !src-tauri/binaries/.gitkeep
+
+# Bun incremental build artifacts (e.g. .<hash>-00000000.bun-build)
+*.bun-build
