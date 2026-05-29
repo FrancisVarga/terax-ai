@@ -30,6 +30,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": [
+      "binaries/bunqueue-server",
+      "binaries/bunqueue-worker-github-create-issue",
+      "binaries/bunqueue-worker-http-request"
+    ],
     "createUpdaterArtifacts": true,
     "copyright": "Copyright 2026 Crynta",
     "license": "Apache-2.0",
