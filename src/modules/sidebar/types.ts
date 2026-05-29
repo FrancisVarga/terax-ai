@@ -1,1 +1,6 @@
-export type SidebarViewId = "explorer" | "source-control";
+export type SidebarViewId =
+  | "explorer"
+  | "source-control"
+  | "ssh-remote"
+  | "docker"
+  | "projects";

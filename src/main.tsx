@@ -17,7 +17,13 @@ if (USE_CUSTOM_WINDOW_CONTROLS) {
 }
 
 // Reap PTY sessions orphaned by a prior webview load before any tab spawns.
-await invoke("pty_close_all").catch(() => {});
+// PTY sessions live in process-wide Rust state with no per-window scoping, so
+// pty_close_all drains every window's sessions. Only the primary "main" window
+// runs it (reaping its own orphans after HMR/reload); secondary windows
+// (label "main-N") skip it so they don't kill the primary window's terminals.
+if (getCurrentWindow().label === "main") {
+  await invoke("pty_close_all").catch(() => {});
+}
 
 // Seed before first paint so default tab mounts at target cwd (no flicker).
 await initLaunchDir();

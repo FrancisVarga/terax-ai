@@ -17,11 +17,13 @@ import type { Tab } from "@/modules/tabs";
 import { TabBar } from "@/modules/tabs";
 import { NotificationBell } from "@/modules/agents";
 import {
+  ChartLineData01Icon,
   GridViewIcon,
   LayoutTwoColumnIcon,
   LayoutTwoRowIcon,
   Settings01Icon,
   SidebarLeftIcon,
+  SidebarRightIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useRef, useState, type RefObject } from "react";
@@ -40,10 +42,13 @@ type Props = {
   onNewPreview: () => void;
   onNewEditor: () => void;
   onNewGitGraph: () => void;
+  onOpenBunqueue: () => void;
+  onOpenAnalytics: () => void;
   onClose: (id: number) => void;
   /** Promote a preview (transient) tab to persistent. */
   onPin: (id: number) => void;
   onToggleSidebar: () => void;
+  onToggleRightSidebar: () => void;
   onSplit: (dir: "row" | "col") => void;
   /** Active tab is a terminal and below the per-tab pane cap. */
   canSplit: boolean;
@@ -65,9 +70,12 @@ export function Header({
   onNewPreview,
   onNewEditor,
   onNewGitGraph,
+  onOpenBunqueue,
+  onOpenAnalytics,
   onClose,
   onPin,
   onToggleSidebar,
+  onToggleRightSidebar,
   onSplit,
   canSplit,
   onActivateAgent,
@@ -111,6 +119,30 @@ export function Header({
       title="Settings"
     >
       <HugeiconsIcon icon={Settings01Icon} size={15} strokeWidth={1.75} />
+    </Button>
+  );
+
+  const rightSidebarButton = (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+      onClick={onToggleRightSidebar}
+      title="Toggle right sidebar"
+    >
+      <HugeiconsIcon icon={SidebarRightIcon} size={16} strokeWidth={1.75} />
+    </Button>
+  );
+
+  const analyticsButton = (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+      onClick={onOpenAnalytics}
+      title="Agentlytics — local AI analytics"
+    >
+      <HugeiconsIcon icon={ChartLineData01Icon} size={16} strokeWidth={1.75} />
     </Button>
   );
 
@@ -198,6 +230,8 @@ export function Header({
           onNewPreview={onNewPreview}
           onNewEditor={onNewEditor}
           onNewGitGraph={onNewGitGraph}
+          onOpenBunqueue={onOpenBunqueue}
+          onOpenAnalytics={onOpenAnalytics}
           onClose={onClose}
           onPin={onPin}
           compact={compact}
@@ -213,11 +247,19 @@ export function Header({
             onActivate={onActivateAgent}
             onActivateLocal={onActivateLocalAgent}
           />
+          {analyticsButton}
+          {rightSidebarButton}
           {settingsButton}
         </>
       )}
 
-      {!IS_MAC && settingsButton}
+      {!IS_MAC && (
+        <>
+          {analyticsButton}
+          {rightSidebarButton}
+          {settingsButton}
+        </>
+      )}
 
       {USE_CUSTOM_WINDOW_CONTROLS && (
         <>

@@ -19,6 +19,7 @@ import { AgentNotificationsBridge } from "@/modules/agents";
 import { firePendingReviewForSession } from "@/modules/agents/lib/review";
 import { useManagedAgentsStore } from "@/modules/agents/store/managedAgentsStore";
 import { Toaster } from "@/components/ui/sonner";
+import { toast } from "sonner";
 import {
   AgentRunBridge,
   AiInputBar,
@@ -46,10 +47,17 @@ import {
   GitHistoryStack,
   type GitHistorySearchHandle,
 } from "@/modules/git-history";
-import { getLaunchDir } from "@/lib/launchDir";
+import { getLaunchDir, hasExplicitLaunchDir } from "@/lib/launchDir";
 import { quoteShellArg } from "@/lib/shellQuote";
 import { useZoom } from "@/lib/useZoom";
 import { FileExplorer, type FileExplorerHandle } from "@/modules/explorer";
+import {
+  connectRemote,
+  disconnectRemote,
+  isRemote,
+  parseRemote,
+  remoteUri,
+} from "@/modules/explorer/lib/remote";
 import {
   listenFsChanged,
   parentDir,
@@ -61,6 +69,8 @@ import {
   type SearchInlineHandle,
   type SearchTarget,
 } from "@/modules/header";
+import { BunqueueStack } from "@/modules/bunqueue";
+import { CommandPopup } from "@/modules/command-popup";
 import { MarkdownStack } from "@/modules/markdown";
 import { PreviewStack, type PreviewPaneHandle } from "@/modules/preview";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
@@ -72,21 +82,47 @@ import {
   type ShortcutHandlers,
   type ShortcutId,
 } from "@/modules/shortcuts";
+import { DockerDetailStack, DockerPanel } from "@/modules/docker";
+import { AnalyticsStack } from "@/modules/agentlytics";
+import {
+  AddProjectDialog,
+  ProjectDetailStack,
+  ProjectsDashboard,
+  ProjectsPanel,
+  useProjectsStore,
+  type Project,
+} from "@/modules/projects";
 import { SidebarRail, type SidebarViewId } from "@/modules/sidebar";
+import {
+  AgentsPanel,
+  AiPanel,
+  PreviewPanel,
+  RightSidebarRail,
+  type RightSidebarViewId,
+} from "@/modules/right-sidebar";
 import {
   SourceControlPanel,
   useSourceControl,
 } from "@/modules/source-control";
+import {
+  SshRemotePanel,
+  sshCommandFor,
+  type SshHost,
+} from "@/modules/ssh-remote";
 import { StatusBar } from "@/modules/statusbar";
 import { MAX_PANES_PER_TAB, useTabs, useWorkspaceCwd } from "@/modules/tabs";
 import {
+  bindRemoteCwd,
+  buildRemoteCwdHookCommand,
   clearFocusedTerminal,
   disposeSession,
   findLeafCwd,
   hasLeaf,
   leafIds,
+  newRemoteCwdNonce,
   respawnSession,
   TerminalStack,
+  unbindRemoteCwd,
   whenSessionReady,
   writeToSession,
   type TerminalPaneHandle,
@@ -147,6 +183,12 @@ const SIDEBAR_MAX_WIDTH = 480;
 const SIDEBAR_WIDTH_STORAGE_KEY = "terax.sidebar.width";
 const SIDEBAR_VIEW_STORAGE_KEY = "terax.sidebar.view";
 
+const RIGHT_SIDEBAR_DEFAULT_WIDTH = 320;
+const RIGHT_SIDEBAR_MIN_WIDTH = 240;
+const RIGHT_SIDEBAR_MAX_WIDTH = 560;
+const RIGHT_SIDEBAR_WIDTH_STORAGE_KEY = "terax.right-sidebar.width";
+const RIGHT_SIDEBAR_VIEW_STORAGE_KEY = "terax.right-sidebar.view";
+
 function clampSidebarWidth(width: number): number {
   return Math.min(
     SIDEBAR_MAX_WIDTH,
@@ -167,13 +209,61 @@ function readSidebarWidth(): number {
 }
 
 function readSidebarView(): SidebarViewId {
+  // Windows opened for a project (carrying `?dir=`) always start on the file
+  // explorer, regardless of the cross-window persisted view.
+  try {
+    if (new URLSearchParams(window.location.search).get("dir")) {
+      return "explorer";
+    }
+  } catch {
+    // ignore
+  }
   try {
     const stored = window.localStorage.getItem(SIDEBAR_VIEW_STORAGE_KEY);
-    if (stored === "explorer" || stored === "source-control") return stored;
+    if (
+      stored === "explorer" ||
+      stored === "source-control" ||
+      stored === "ssh-remote" ||
+      stored === "docker" ||
+      stored === "projects"
+    )
+      return stored;
   } catch {
     // ignore
   }
   return "explorer";
+}
+
+function clampRightSidebarWidth(width: number): number {
+  return Math.min(
+    RIGHT_SIDEBAR_MAX_WIDTH,
+    Math.max(RIGHT_SIDEBAR_MIN_WIDTH, Math.round(width)),
+  );
+}
+
+function readRightSidebarWidth(): number {
+  try {
+    const stored = window.localStorage.getItem(
+      RIGHT_SIDEBAR_WIDTH_STORAGE_KEY,
+    );
+    const parsed = stored ? Number.parseInt(stored, 10) : NaN;
+    return Number.isFinite(parsed)
+      ? clampRightSidebarWidth(parsed)
+      : RIGHT_SIDEBAR_DEFAULT_WIDTH;
+  } catch {
+    return RIGHT_SIDEBAR_DEFAULT_WIDTH;
+  }
+}
+
+function readRightSidebarView(): RightSidebarViewId {
+  try {
+    const stored = window.localStorage.getItem(RIGHT_SIDEBAR_VIEW_STORAGE_KEY);
+    if (stored === "ai" || stored === "agents" || stored === "preview")
+      return stored;
+  } catch {
+    // ignore
+  }
+  return "ai";
 }
 
 export default function App() {
@@ -188,6 +278,10 @@ export default function App() {
     pinTab,
     newPreviewTab,
     newMarkdownTab,
+    openBunqueueTab,
+    openAnalyticsTab,
+    openProjectDetailTab,
+    openDockerDetailTab,
     openAiDiffTab,
     closeAiDiffTab,
     openGitDiffTab,
@@ -203,7 +297,9 @@ export default function App() {
     closeActivePane,
     closePaneByLeaf,
     resetWorkspace,
-  } = useTabs(getLaunchDir() ? { cwd: getLaunchDir() } : undefined);
+  } = useTabs(getLaunchDir() ? { cwd: getLaunchDir() } : undefined, {
+    focusTerminalOnLaunch: hasExplicitLaunchDir(),
+  });
 
   // Mirror `tabs` into a ref so callbacks scheduled with `setTimeout`
   // (e.g. cdInNewTab) read the latest pane state instead of a stale closure.
@@ -231,10 +327,37 @@ export default function App() {
   const explorerRef = useRef<FileExplorerHandle>(null);
   const explorerReturnFocusRef = useRef<HTMLElement | null>(null);
 
+  // On a plain launch (no project dir) both sidebars start collapsed so the
+  // projects dashboard owns the full window. A dir-launched project window
+  // keeps its normal sidebars (explorer etc.). Read once at construction so
+  // re-renders keep the panels' `defaultSize` stable (changing it would yank a
+  // sidebar the user has since opened). Toggling a rail reopens it to the
+  // stored width.
+  const startSidebarsCollapsedRef = useRef(!hasExplicitLaunchDir());
+
   const sidebarRef = useRef<PanelImperativeHandle | null>(null);
   const sidebarWidthRef = useRef(readSidebarWidth());
   const sidebarWidthWriteTimerRef = useRef(0);
   const [sidebarView, setSidebarViewState] = useState<SidebarViewId>(readSidebarView);
+
+  const rightSidebarRef = useRef<PanelImperativeHandle | null>(null);
+  const rightSidebarWidthRef = useRef(readRightSidebarWidth());
+  const rightSidebarWidthWriteTimerRef = useRef(0);
+  const [rightSidebarView, setRightSidebarViewState] =
+    useState<RightSidebarViewId>(readRightSidebarView);
+  // When set (`ssh://alias/path`), the explorer browses a remote SFTP root
+  // instead of the local workspace. Cleared by switching workspace or
+  // disconnecting.
+  const [remoteRoot, setRemoteRoot] = useState<string | null>(null);
+  // Leaf id of the ssh terminal currently driving remote cwd tracking, so we
+  // can unbind it on disconnect / shell exit. One active remote browse at a time.
+  const remoteCwdLeafRef = useRef<number | null>(null);
+  // Active SSH alias (from the remote root) so the Docker panel targets that
+  // server's daemon. `null` when browsing locally → local Docker daemon.
+  const remoteAlias = useMemo(
+    () => (remoteRoot ? (parseRemote(remoteRoot)?.alias ?? null) : null),
+    [remoteRoot],
+  );
   const persistSidebarView = useCallback((view: SidebarViewId) => {
     setSidebarViewState(view);
     try {
@@ -246,7 +369,16 @@ export default function App() {
   const toggleSidebar = useCallback(() => {
     const p = sidebarRef.current;
     if (!p) return;
-    if (p.getSize().asPercentage <= 0) p.expand();
+    // `.resize()` (not `.expand()`) so the rail reopens at the stored width even
+    // on the first toggle — panels launch collapsed with no prior size to expand to.
+    if (p.getSize().asPercentage <= 0) p.resize(`${sidebarWidthRef.current}px`);
+    else p.collapse();
+  }, []);
+  const toggleRightSidebar = useCallback(() => {
+    const p = rightSidebarRef.current;
+    if (!p) return;
+    if (p.getSize().asPercentage <= 0)
+      p.resize(`${rightSidebarWidthRef.current}px`);
     else p.collapse();
   }, []);
   const cycleSidebarView = useCallback(
@@ -284,6 +416,58 @@ export default function App() {
     return () => {
       if (sidebarWidthWriteTimerRef.current) {
         window.clearTimeout(sidebarWidthWriteTimerRef.current);
+      }
+    };
+  }, []);
+
+  const persistRightSidebarView = useCallback((view: RightSidebarViewId) => {
+    setRightSidebarViewState(view);
+    try {
+      window.localStorage.setItem(RIGHT_SIDEBAR_VIEW_STORAGE_KEY, view);
+    } catch {
+      // storage may fail in private mode
+    }
+  }, []);
+  // Selecting the active view again collapses the panel; selecting a different
+  // view (while collapsed) re-expands it. Mirrors the left rail's behavior.
+  const selectRightSidebarView = useCallback(
+    (view: RightSidebarViewId) => {
+      const panel = rightSidebarRef.current;
+      const collapsed = panel ? panel.getSize().asPercentage <= 0 : false;
+      if (collapsed) {
+        if (panel) panel.resize(`${rightSidebarWidthRef.current}px`);
+        if (view !== rightSidebarView) persistRightSidebarView(view);
+        return;
+      }
+      if (view === rightSidebarView) {
+        panel?.collapse();
+        return;
+      }
+      persistRightSidebarView(view);
+    },
+    [persistRightSidebarView, rightSidebarView],
+  );
+  const persistRightSidebarWidth = useCallback((next: number) => {
+    rightSidebarWidthRef.current = next;
+    if (rightSidebarWidthWriteTimerRef.current) {
+      window.clearTimeout(rightSidebarWidthWriteTimerRef.current);
+    }
+    rightSidebarWidthWriteTimerRef.current = window.setTimeout(() => {
+      rightSidebarWidthWriteTimerRef.current = 0;
+      try {
+        window.localStorage.setItem(
+          RIGHT_SIDEBAR_WIDTH_STORAGE_KEY,
+          String(next),
+        );
+      } catch {
+        // ignore
+      }
+    }, 200);
+  }, []);
+  useEffect(() => {
+    return () => {
+      if (rightSidebarWidthWriteTimerRef.current) {
+        window.clearTimeout(rightSidebarWidthWriteTimerRef.current);
       }
     };
   }, []);
@@ -329,6 +513,8 @@ export default function App() {
   const [pendingDeleteTabs, setPendingDeleteTabs] = useState<number[] | null>(
     null,
   );
+  // Folder path pending an "Add to Projects" confirmation dialog (null = closed).
+  const [addProjectPath, setAddProjectPath] = useState<string | null>(null);
   useEffect(() => {
     homeDir()
       .then(async (p) => {
@@ -377,6 +563,8 @@ export default function App() {
       previewRefs.current.clear();
       setActiveSearchAddon(null);
       setActiveEditorHandle(null);
+      // Leaving for a new workspace drops any active remote-browse session.
+      exitRemote();
       setWorkspaceEnv(env.kind === "local" ? LOCAL_WORKSPACE : env);
       setHome(nextHome);
       setLaunchCwd(nextHome);
@@ -400,6 +588,7 @@ export default function App() {
   }, []);
 
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [commandPopupOpen, setCommandPopupOpen] = useState(false);
   const [newEditorOpen, setNewEditorOpen] = useState(false);
   const miniOpen = useChatStore((s) => s.mini.open);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -472,6 +661,7 @@ export default function App() {
     void hydrateSessions();
     void useAgentsStore.getState().hydrate();
     void useSnippetsStore.getState().hydrate();
+    void useProjectsStore.getState().hydrate();
   }, [hydrateSessions]);
 
   const activeTab = tabs.find((t) => t.id === activeId);
@@ -483,6 +673,11 @@ export default function App() {
   const isGitDiffTab =
     activeTab?.kind === "git-diff" || activeTab?.kind === "git-commit-file";
   const isGitHistoryTab = activeTab?.kind === "git-history";
+  const isBunqueueTab = activeTab?.kind === "bunqueue";
+  const isDockerTab = activeTab?.kind === "docker-detail";
+  const isAnalyticsTab = activeTab?.kind === "agentlytics";
+  const isProjectsTab = activeTab?.kind === "projects";
+  const isProjectDetailTab = activeTab?.kind === "project-detail";
 
   // When an AI diff is approved (write_file applied to disk), reload any
   // open editor tabs for that path so the user sees the new content. We
@@ -822,6 +1017,47 @@ export default function App() {
     newTab(inheritedCwdForNewTab());
   }, [newTab, inheritedCwdForNewTab]);
 
+  // Wait for a PTY leaf to be ready, then run `claude`. Shared by the
+  // new-tab and split-pane launchers. Enabling hooks mirrors the managed-agent
+  // spawn path so notifications work for an interactively-started session too.
+  const launchClaudeInLeaf = useCallback((leafId: number) => {
+    const hooksReady = invoke("agent_enable_claude_hooks").catch(() => {});
+    void (async () => {
+      await Promise.all([whenSessionReady(leafId), hooksReady]);
+      writeToSession(leafId, "claude\r");
+    })();
+  }, []);
+
+  // Claude commands always launch at the current project/workspace root, not
+  // the active pane's cwd — so "open claude" is predictable regardless of where
+  // the user has cd'd inside a shell.
+  const projectCwd = useCallback(
+    () => explorerRoot ?? launchCwd ?? home ?? undefined,
+    [explorerRoot, launchCwd, home],
+  );
+
+  const openClaudeNewTab = useCallback(() => {
+    const { leafId } = newAgentTab(projectCwd(), "claude");
+    launchClaudeInLeaf(leafId);
+  }, [newAgentTab, projectCwd, launchClaudeInLeaf]);
+
+  const openClaudeSplitRight = useCallback(() => {
+    const t = tabsRef.current.find((x) => x.id === activeId);
+    // Split only works inside a terminal tab; fall back to a fresh tab so the
+    // command always does something useful.
+    if (!t || t.kind !== "terminal") {
+      openClaudeNewTab();
+      return;
+    }
+    const leafId = splitActivePane(activeId, "row", projectCwd());
+    if (leafId === null) {
+      // Pane cap hit — open in a new tab instead of a silent no-op.
+      openClaudeNewTab();
+      return;
+    }
+    launchClaudeInLeaf(leafId);
+  }, [activeId, splitActivePane, projectCwd, launchClaudeInLeaf, openClaudeNewTab]);
+
   const openNewPrivateTab = useCallback(() => {
     newPrivateTab(inheritedCwdForNewTab());
   }, [newPrivateTab, inheritedCwdForNewTab]);
@@ -852,8 +1088,118 @@ export default function App() {
     [newTab],
   );
 
+  // Open a project in a fresh window rooted at its folder. The dir is passed
+  // to the new window (via `?dir=`) so its default tab + explorer start there.
+  const openProject = useCallback((project: Project) => {
+    void invoke("open_main_window", { dir: project.path });
+  }, []);
+
+  // Open a project's detail page in a main-area tab (focuses an existing one).
+  const openProjectDetail = useCallback(
+    (project: Project) => {
+      openProjectDetailTab({ projectId: project.id, title: project.name });
+    },
+    [openProjectDetailTab],
+  );
+
+  // Folder right-click → "Add to Projects". If the folder is already a project,
+  // focus its detail tab instead of re-adding; otherwise open the add dialog.
+  const handleAddToProjects = useCallback(
+    (path: string) => {
+      const store = useProjectsStore.getState();
+      const norm = path.replace(/\\/g, "/").replace(/\/+$/, "");
+      const existing = store.projects.find(
+        (p) => p.path.replace(/\\/g, "/").replace(/\/+$/, "") === norm,
+      );
+      if (existing) {
+        openProject(existing);
+        return;
+      }
+      setAddProjectPath(path);
+    },
+    [openProject],
+  );
+
+  // Open a fresh terminal tab and run `ssh <alias>`. We wait for the PTY
+  // session to be ready (same handshake the managed-agent spawn uses) before
+  // writing the command, otherwise the bytes race the shell's first prompt and
+  // get swallowed.
+  const connectSsh = useCallback(
+    (host: SshHost) => {
+      // 1. Open an interactive ssh terminal tab.
+      const { leafId } = newAgentTab(undefined, `ssh · ${host.alias}`);
+
+      // Bind this leaf for remote cwd tracking BEFORE the ssh handshake: a
+      // per-leaf nonce gates the OSC 7704 hook output so only the hook we inject
+      // (carrying this nonce) can move the explorer. The callback re-points the
+      // remote root, so a `cd` on the server follows in the tree.
+      const nonce = newRemoteCwdNonce();
+      remoteCwdLeafRef.current = leafId;
+      bindRemoteCwd(leafId, {
+        alias: host.alias,
+        nonce,
+        onRemoteCwd: (uri) => setRemoteRoot(uri),
+      });
+
+      void (async () => {
+        await whenSessionReady(leafId);
+        writeToSession(leafId, `${sshCommandFor(host)}\r`);
+        // Install the remote precmd hook after the ssh session is up. We can't
+        // detect the remote prompt precisely (no remote integration), so wait a
+        // beat past the local handshake before typing the one-liner. If remote
+        // cwd sync never installs (unknown shell, slow/auth-prompting login),
+        // the explorer simply stays put and the user browses manually.
+        const hook = buildRemoteCwdHookCommand(nonce);
+        setTimeout(() => {
+          if (remoteCwdLeafRef.current === leafId) {
+            writeToSession(leafId, `${hook}\r`);
+          }
+        }, 1200);
+      })();
+
+      // 2. In parallel, bring up an SFTP session and point the explorer at the
+      //    remote home dir so the tree reflects the connected server.
+      void (async () => {
+        try {
+          const home = await connectRemote(host.alias);
+          setRemoteRoot(remoteUri(host.alias, home));
+          persistSidebarView("explorer");
+        } catch (e) {
+          console.error("[terax] SFTP connect failed:", e);
+          toast.error(`SFTP: could not browse ${host.alias}`, {
+            description: String(e),
+          });
+        }
+      })();
+    },
+    [newAgentTab, persistSidebarView],
+  );
+
+  // Leave the remote view: drop the SFTP session, unbind remote cwd tracking,
+  // and restore the local root.
+  const exitRemote = useCallback(() => {
+    if (remoteCwdLeafRef.current !== null) {
+      unbindRemoteCwd(remoteCwdLeafRef.current);
+      remoteCwdLeafRef.current = null;
+    }
+    setRemoteRoot((curr) => {
+      const ref = curr ? parseRemote(curr) : null;
+      if (ref) void disconnectRemote(ref.alias);
+      return null;
+    });
+  }, []);
+
   const handleOpenFile = useCallback(
     (path: string, pin?: boolean) => {
+      // Remote files can't open in the editor yet (the editor reads the local
+      // filesystem). Browsing the remote tree works; opening a file is a
+      // follow-on once SFTP file read/write is wired into the editor.
+      if (isRemote(path)) {
+        toast.info("Remote file editing isn't supported yet", {
+          description: "Use the ssh terminal to view or edit remote files.",
+        });
+        return;
+      }
       // Explorer defaults to preview (pin=false); explicit actions like
       // context-menu "Open" pass pin=true for a persistent tab.
       openFileTab(path, pin ?? false);
@@ -1032,6 +1378,13 @@ export default function App() {
     handleClose(activeId);
   }, [activeId, closeActivePane, handleClose]);
 
+  // Command-palette action: add the window's current folder (active terminal
+  // cwd, else the explorer root) to Projects. No-op when nothing resolves.
+  const addCurrentFolderToProjects = useCallback(() => {
+    const path = activeTerminalLeafCwd ?? explorerRoot;
+    if (path) handleAddToProjects(path);
+  }, [activeTerminalLeafCwd, explorerRoot, handleAddToProjects]);
+
   const shortcutHandlers = useMemo<ShortcutHandlers>(
     () => ({
       "tab.new": openNewTab,
@@ -1053,9 +1406,18 @@ export default function App() {
       "search.focus": () => searchInlineRef.current?.focus(),
       "ai.toggle": togglePanelAndFocus,
       "ai.askSelection": askFromSelection,
+      "claude.newTab": openClaudeNewTab,
+      "claude.splitRight": openClaudeSplitRight,
+      "window.new": () => void invoke("open_main_window"),
+      "commandPopup.open": () => setCommandPopupOpen((v) => !v),
       "shortcuts.open": () => setShortcutsOpen((v) => !v),
       "settings.open": () => void openSettingsWindow(),
       "sidebar.toggle": toggleSidebar,
+      "rightSidebar.toggle": toggleRightSidebar,
+      "view.sshRemote": () => cycleSidebarView("ssh-remote"),
+      "view.docker": () => cycleSidebarView("docker"),
+      "view.projects": () => cycleSidebarView("projects"),
+      "projects.addCurrent": addCurrentFolderToProjects,
       "explorer.focus": toggleExplorerFocus,
       "view.zoomIn": zoomIn,
       "view.zoomOut": zoomOut,
@@ -1076,7 +1438,12 @@ export default function App() {
       toggleSourceControl,
       togglePanelAndFocus,
       askFromSelection,
+      openClaudeNewTab,
+      openClaudeSplitRight,
+      cycleSidebarView,
+      addCurrentFolderToProjects,
       toggleSidebar,
+      toggleRightSidebar,
       toggleExplorerFocus,
       zoomIn,
       zoomOut,
@@ -1177,6 +1544,12 @@ export default function App() {
 
   const handleLeafExit = useCallback(
     (leafId: number, _code: number) => {
+      // If the ssh leaf driving remote cwd tracking exits, drop the binding so
+      // a stale nonce can't be reused by a later leaf that reuses the id.
+      if (remoteCwdLeafRef.current === leafId) {
+        unbindRemoteCwd(leafId);
+        remoteCwdLeafRef.current = null;
+      }
       const all = tabsRef.current;
       const tab = all.find(
         (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
@@ -1427,6 +1800,58 @@ export default function App() {
           onSearchHandle={setGitHistoryHandle}
         />
       </div>
+      <div
+        className={cn(
+          "absolute inset-0",
+          !isBunqueueTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isBunqueueTab}
+      >
+        <BunqueueStack tabs={tabs} activeId={activeId} />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0 px-3 pt-2 pb-2",
+          !isDockerTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isDockerTab}
+      >
+        <DockerDetailStack tabs={tabs} activeId={activeId} />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0",
+          !isAnalyticsTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isAnalyticsTab}
+      >
+        <AnalyticsStack tabs={tabs} activeId={activeId} />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0",
+          !isProjectsTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isProjectsTab}
+      >
+        <ProjectsDashboard
+          onOpenProject={openProject}
+          onOpenDetail={openProjectDetail}
+        />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0",
+          !isProjectDetailTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isProjectDetailTab}
+      >
+        <ProjectDetailStack
+          tabs={tabs}
+          activeId={activeId}
+          onOpenProject={openProject}
+        />
+      </div>
     </div>
   );
 
@@ -1443,9 +1868,12 @@ export default function App() {
             onNewPreview={() => openPreviewTab("")}
             onNewEditor={() => setNewEditorOpen(true)}
             onNewGitGraph={openGitGraphFromContext}
+            onOpenBunqueue={() => openBunqueueTab()}
+            onOpenAnalytics={() => openAnalyticsTab()}
             onClose={handleClose}
             onPin={pinTab}
             onToggleSidebar={toggleSidebar}
+            onToggleRightSidebar={toggleRightSidebar}
             onSplit={splitActivePaneInActiveTab}
             canSplit={
               activeTerminalTab !== null &&
@@ -1466,7 +1894,11 @@ export default function App() {
               <ResizablePanel
                 id="sidebar"
                 panelRef={sidebarRef}
-                defaultSize={`${sidebarWidthRef.current}px`}
+                defaultSize={
+                  startSidebarsCollapsedRef.current
+                    ? "0px"
+                    : `${sidebarWidthRef.current}px`
+                }
                 minSize={`${SIDEBAR_MIN_WIDTH}px`}
                 maxSize={`${SIDEBAR_MAX_WIDTH}px`}
                 collapsible
@@ -1480,14 +1912,25 @@ export default function App() {
                     {sidebarView === "explorer" ? (
                       <FileExplorer
                         ref={explorerRef}
-                        rootPath={explorerRoot}
+                        rootPath={remoteRoot ?? explorerRoot}
                         onOpenFile={handleOpenFile}
                         onPathRenamed={handlePathRenamed}
                         onPathDeleted={handlePathDeleted}
                         onRevealInTerminal={cdInNewTab}
                         onAttachToAgent={handleAttachFileToAgent}
                         onOpenMarkdownPreview={openMarkdownPreview}
+                        onAddToProjects={handleAddToProjects}
+                        onExitRemote={remoteRoot ? exitRemote : undefined}
                       />
+                    ) : sidebarView === "ssh-remote" ? (
+                      <SshRemotePanel onConnect={connectSsh} />
+                    ) : sidebarView === "docker" ? (
+                      <DockerPanel
+                        host={remoteAlias}
+                        onOpenContainer={openDockerDetailTab}
+                      />
+                    ) : sidebarView === "projects" ? (
+                      <ProjectsPanel onOpenProject={openProject} />
                     ) : (
                       <SourceControlPanel
                         open
@@ -1505,7 +1948,7 @@ export default function App() {
                 </div>
               </ResizablePanel>
               <ResizableHandle withHandle />
-              <ResizablePanel id="workspace" defaultSize="78%" minSize="30%">
+              <ResizablePanel id="workspace" defaultSize="60%" minSize="30%">
                 <div className="flex h-full min-h-0 flex-col">
                   <div className="relative min-h-0 flex-1">
                     {workspaceSurface}
@@ -1532,6 +1975,50 @@ export default function App() {
                       )}
                     </motion.div>
                   ) : null}
+                </div>
+              </ResizablePanel>
+              <ResizableHandle withHandle />
+              <ResizablePanel
+                id="right-sidebar"
+                panelRef={rightSidebarRef}
+                defaultSize={
+                  startSidebarsCollapsedRef.current
+                    ? "0px"
+                    : `${rightSidebarWidthRef.current}px`
+                }
+                minSize={`${RIGHT_SIDEBAR_MIN_WIDTH}px`}
+                maxSize={`${RIGHT_SIDEBAR_MAX_WIDTH}px`}
+                collapsible
+                collapsedSize={0}
+                onResize={(size) => {
+                  if (size.inPixels > 0)
+                    persistRightSidebarWidth(size.inPixels);
+                }}
+              >
+                <div className="flex h-full min-h-0 flex-col border-l border-border/60 bg-card">
+                  <div className="min-h-0 flex-1">
+                    {rightSidebarView === "ai" ? (
+                      <AiPanel
+                        hasComposer={hasComposer}
+                        onConnect={() => void openSettingsWindow("models")}
+                      />
+                    ) : rightSidebarView === "agents" ? (
+                      <AgentsPanel
+                        onActivate={onActivateAgent}
+                        onActivateLocal={onActivateLocalAgent}
+                      />
+                    ) : (
+                      <PreviewPanel
+                        tabs={tabs}
+                        activeId={activeId}
+                        onActivate={setActiveId}
+                      />
+                    )}
+                  </div>
+                  <RightSidebarRail
+                    activeView={rightSidebarView}
+                    onSelectView={selectRightSidebarView}
+                  />
                 </div>
               </ResizablePanel>
             </ResizablePanelGroup>
@@ -1585,11 +2072,27 @@ export default function App() {
             onOpenChange={setShortcutsOpen}
           />
 
+          <CommandPopup
+            open={commandPopupOpen}
+            onOpenChange={setCommandPopupOpen}
+            handlers={shortcutHandlers}
+          />
+
           <NewEditorDialog
             open={newEditorOpen}
             onOpenChange={setNewEditorOpen}
             rootPath={explorerRoot ?? home}
             onCreated={(path) => openFileTab(path)}
+          />
+
+          <AddProjectDialog
+            open={addProjectPath !== null}
+            onOpenChange={(open) => !open && setAddProjectPath(null)}
+            path={addProjectPath}
+            onSubmit={(project) => {
+              useProjectsStore.getState().upsert(project);
+              openProject(project);
+            }}
           />
 
           <UpdaterDialog />

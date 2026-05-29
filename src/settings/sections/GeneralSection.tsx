@@ -34,6 +34,7 @@ import {
   setVimMode,
   setZoomLevel,
 } from "@/modules/settings/store";
+import { probeGpuStatus, type GpuStatus } from "@/modules/terminal";
 import { useTheme } from "@/modules/theme";
 import {
   ComputerIcon,
@@ -76,6 +77,13 @@ export function GeneralSection() {
   const terminalWebglEnabled = usePreferencesStore(
     (s) => s.terminalWebglEnabled,
   );
+  // Probe the actual GPU backend once on mount so the user can confirm whether
+  // the webview is hardware-accelerated or silently fell back to software
+  // (SwiftShader). Cheap one-shot WebGL context read; see probeGpuStatus.
+  const [gpuStatus, setGpuStatus] = useState<GpuStatus | null>(null);
+  useEffect(() => {
+    setGpuStatus(probeGpuStatus());
+  }, []);
   const terminalFontFamily = usePreferencesStore((s) => s.terminalFontFamily);
   const terminalLetterSpacing = usePreferencesStore(
     (s) => s.terminalLetterSpacing,
@@ -242,6 +250,36 @@ export function GeneralSection() {
             onCheckedChange={(v) => void setTerminalWebglEnabled(v)}
           />
         </SettingRow>
+        {terminalWebglEnabled && gpuStatus ? (
+          <div className="flex items-center gap-1.5 px-0.5 text-[11px] text-muted-foreground">
+            <span
+              className={cn(
+                "inline-block size-1.5 rounded-full",
+                gpuStatus.acceleration === "hardware"
+                  ? "bg-emerald-500"
+                  : "bg-amber-500",
+              )}
+              aria-hidden
+            />
+            {gpuStatus.acceleration === "hardware" ? (
+              <span>
+                GPU accelerated
+                {gpuStatus.renderer ? ` · ${gpuStatus.renderer}` : ""}
+              </span>
+            ) : gpuStatus.acceleration === "software" ? (
+              <span>
+                No GPU acceleration
+                {gpuStatus.renderer ? ` (${gpuStatus.renderer})` : ""} — using
+                the DOM renderer instead (faster than software WebGL). Update
+                GPU drivers to enable hardware acceleration.
+              </span>
+            ) : (
+              <span>
+                GPU status unavailable — using the DOM renderer.
+              </span>
+            )}
+          </div>
+        ) : null}
         <SettingRow
           title="Font family"
           description='Nerd Font name for icons (e.g. "CaskaydiaCove Nerd Font Mono"). Leave blank to auto-detect.'

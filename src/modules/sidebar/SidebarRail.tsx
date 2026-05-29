@@ -1,5 +1,11 @@
 import { cn } from "@/lib/utils";
-import { FolderGitTwoIcon, FolderTreeIcon } from "@hugeicons/core-free-icons";
+import {
+  ContainerIcon,
+  FolderGitTwoIcon,
+  FolderLibraryIcon,
+  FolderTreeIcon,
+  ServerStack02Icon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { SidebarViewId } from "./types";
 
@@ -27,6 +33,9 @@ export function SidebarRail({ activeView, onSelectView, changedCount }: Props) {
       icon: FolderGitTwoIcon,
       badge: changedCount,
     },
+    { id: "ssh-remote", label: "SSH", icon: ServerStack02Icon },
+    { id: "docker", label: "Docker", icon: ContainerIcon },
+    { id: "projects", label: "Projects", icon: FolderLibraryIcon },
   ];
 
   return (

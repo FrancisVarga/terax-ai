@@ -27,9 +27,18 @@ export type ShortcutId =
   | "view.zoomReset"
   | "ai.toggle"
   | "ai.askSelection"
+  | "claude.newTab"
+  | "claude.splitRight"
+  | "window.new"
+  | "commandPopup.open"
   | "shortcuts.open"
   | "settings.open"
   | "sidebar.toggle"
+  | "rightSidebar.toggle"
+  | "view.sshRemote"
+  | "view.docker"
+  | "view.projects"
+  | "projects.addCurrent"
   | "editor.undo"
   | "editor.redo";
 
@@ -65,6 +74,18 @@ export const SHORTCUTS: Shortcut[] = [
     label: "Open settings",
     group: "General",
     defaultBindings: [{ [MOD_PROP]: true, key: "," }],
+  },
+  {
+    id: "window.new",
+    label: "New window",
+    group: "General",
+    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "n" }],
+  },
+  {
+    id: "commandPopup.open",
+    label: "Show all commands",
+    group: "General",
+    defaultBindings: [{ ctrl: true, shift: true, key: "p" }],
   },
   {
     id: "shortcuts.open",
@@ -184,16 +205,59 @@ export const SHORTCUTS: Shortcut[] = [
     defaultBindings: [{ [MOD_PROP]: true, key: "j" }],
   },
   {
+    id: "claude.newTab",
+    label: "Open Claude Code in new tab",
+    group: "AI",
+    // Palette-only by default; users can bind a key in settings.
+    defaultBindings: [],
+  },
+  {
+    id: "claude.splitRight",
+    label: "Open Claude Code in split pane right",
+    group: "AI",
+    defaultBindings: [],
+  },
+  {
     id: "sidebar.toggle",
     label: "Toggle file explorer",
     group: "View",
     defaultBindings: [{ [MOD_PROP]: true, key: "b" }],
   },
   {
+    id: "rightSidebar.toggle",
+    label: "Toggle right sidebar",
+    group: "View",
+    defaultBindings: [{ [MOD_PROP]: true, alt: true, key: "b" }],
+  },
+  {
     id: "explorer.focus",
     label: "Toggle file explorer focus",
     group: "View",
     defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "e" }],
+  },
+  {
+    id: "view.sshRemote",
+    label: "Connect SSH server",
+    group: "View",
+    defaultBindings: [],
+  },
+  {
+    id: "view.docker",
+    label: "Open Docker",
+    group: "View",
+    defaultBindings: [],
+  },
+  {
+    id: "view.projects",
+    label: "Open Projects",
+    group: "View",
+    defaultBindings: [],
+  },
+  {
+    id: "projects.addCurrent",
+    label: "Add current folder to Projects",
+    group: "View",
+    defaultBindings: [],
   },
   {
     id: "view.zoomIn",

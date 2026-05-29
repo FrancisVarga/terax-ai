@@ -1,5 +1,6 @@
 export { ShortcutsDialog } from "./ShortcutsDialog";
 export {
+  getBindingTokens,
   SHORTCUTS,
   SHORTCUT_GROUPS,
   type Shortcut,
