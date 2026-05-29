@@ -1,6 +1,7 @@
 import { cn } from "@/lib/utils";
 import {
   BotIcon,
+  Clock01Icon,
   EyeIcon,
   SparklesIcon,
 } from "@hugeicons/core-free-icons";
@@ -25,6 +26,7 @@ export function RightSidebarRail({ activeView, onSelectView }: Props) {
   const items: RailItem[] = [
     { id: "ai", label: "AI", icon: SparklesIcon },
     { id: "agents", label: "Agents", icon: BotIcon },
+    { id: "history", label: "History", icon: Clock01Icon },
     { id: "preview", label: "Preview", icon: EyeIcon },
   ];
 

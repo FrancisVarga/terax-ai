@@ -101,6 +101,7 @@ import {
   AiPanel,
   PreviewPanel,
   RightSidebarRail,
+  SessionHistoryPanel,
   type RightSidebarViewId,
 } from "@/modules/right-sidebar";
 import {
@@ -261,7 +262,12 @@ function readRightSidebarWidth(): number {
 function readRightSidebarView(): RightSidebarViewId {
   try {
     const stored = window.localStorage.getItem(RIGHT_SIDEBAR_VIEW_STORAGE_KEY);
-    if (stored === "ai" || stored === "agents" || stored === "preview")
+    if (
+      stored === "ai" ||
+      stored === "agents" ||
+      stored === "history" ||
+      stored === "preview"
+    )
       return stored;
   } catch {
     // ignore
@@ -2151,6 +2157,8 @@ export default function App() {
                         onActivate={onActivateAgent}
                         onActivateLocal={onActivateLocalAgent}
                       />
+                    ) : rightSidebarView === "history" ? (
+                      <SessionHistoryPanel onActivate={onActivateAgent} />
                     ) : (
                       <PreviewPanel
                         tabs={tabs}

@@ -25,6 +25,21 @@ export type AgentSession = {
   attentionSince: number | null;
 };
 
+/**
+ * One past or current agent run, retained for the Session History list.
+ * `endedAt` is null while the run is still live. `leafId`/`tabId` let an
+ * active entry re-focus its pane; once `endedAt` is set the pane is gone
+ * and the entry becomes a non-clickable history record.
+ */
+export type AgentHistoryEntry = {
+  id: string;
+  leafId: number;
+  tabId: number;
+  agent: string;
+  startedAt: number;
+  endedAt: number | null;
+};
+
 export type AgentNotification = {
   id: string;
   source: AgentSource;

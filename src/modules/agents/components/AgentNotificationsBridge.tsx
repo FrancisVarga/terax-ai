@@ -56,6 +56,23 @@ function route(
   });
 }
 
+/**
+ * Lazily create a session if one is missing. The `started` edge fires once
+ * when the detector arms; if it happened before this listener mounted (e.g.
+ * an agent already running at app launch / after a reload), every later
+ * `working`/`attention`/`finished` signal would otherwise be dropped. Any
+ * non-exit signal back-fills the session so both the Agents and History
+ * panels recover the run.
+ */
+function ensureSession(leafId: number, agent: string | null, ctx: Ctx): boolean {
+  const store = useAgentStore.getState();
+  if (store.sessions[leafId]) return true;
+  const info = tabInfo(ctx.tabs, leafId);
+  if (!info) return false;
+  store.start(leafId, info.tabId, agent ?? "agent");
+  return true;
+}
+
 function handleSignal(sig: AgentSignal, ctx: Ctx): void {
   const leafId = leafIdForPty(sig.id);
   if (leafId === null) return;
@@ -63,21 +80,22 @@ function handleSignal(sig: AgentSignal, ctx: Ctx): void {
 
   switch (sig.kind) {
     case "started": {
-      const info = tabInfo(ctx.tabs, leafId);
-      if (!info) return;
-      store.start(leafId, info.tabId, sig.agent ?? "agent");
+      ensureSession(leafId, sig.agent, ctx);
       return;
     }
     case "working":
+      if (!ensureSession(leafId, sig.agent, ctx)) return;
       store.setStatus(leafId, "working");
       return;
     case "attention": {
+      if (!ensureSession(leafId, sig.agent, ctx)) return;
       store.setStatus(leafId, "waiting");
       const session = store.sessions[leafId];
       if (session) route(session, "attention", ctx);
       return;
     }
     case "finished": {
+      if (!ensureSession(leafId, sig.agent, ctx)) return;
       store.setStatus(leafId, "waiting");
       const session = store.sessions[leafId];
       if (session) route(session, "finished", ctx);
