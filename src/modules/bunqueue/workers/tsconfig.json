@@ -1,0 +1,16 @@
+{
+  // Bun-runtime workers. Run via `bun <file>`; typed against Bun globals.
+  // Kept separate from the app tsconfig (which targets the browser/DOM).
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["bun"],
+    "lib": ["ESNext"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": ["./**/*.ts"]
+}
