@@ -1,1 +1,6 @@
-export type RightSidebarViewId = "ai" | "agents" | "history" | "preview";
+export type RightSidebarViewId =
+  | "ai"
+  | "agents"
+  | "tasks"
+  | "history"
+  | "preview";

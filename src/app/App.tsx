@@ -104,6 +104,7 @@ import {
   SessionHistoryPanel,
   type RightSidebarViewId,
 } from "@/modules/right-sidebar";
+import { TaskRunnerPanel } from "@/modules/task-runner";
 import {
   SourceControlPanel,
   useSourceControl,
@@ -265,6 +266,7 @@ function readRightSidebarView(): RightSidebarViewId {
     if (
       stored === "ai" ||
       stored === "agents" ||
+      stored === "tasks" ||
       stored === "history" ||
       stored === "preview"
     )
@@ -2157,6 +2159,8 @@ export default function App() {
                         onActivate={onActivateAgent}
                         onActivateLocal={onActivateLocalAgent}
                       />
+                    ) : rightSidebarView === "tasks" ? (
+                      <TaskRunnerPanel />
                     ) : rightSidebarView === "history" ? (
                       <SessionHistoryPanel onActivate={onActivateAgent} />
                     ) : (

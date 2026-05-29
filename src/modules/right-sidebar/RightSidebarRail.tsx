@@ -3,6 +3,7 @@ import {
   BotIcon,
   Clock01Icon,
   EyeIcon,
+  PlaySquareIcon,
   SparklesIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -26,6 +27,7 @@ export function RightSidebarRail({ activeView, onSelectView }: Props) {
   const items: RailItem[] = [
     { id: "ai", label: "AI", icon: SparklesIcon },
     { id: "agents", label: "Agents", icon: BotIcon },
+    { id: "tasks", label: "Tasks", icon: PlaySquareIcon },
     { id: "history", label: "History", icon: Clock01Icon },
     { id: "preview", label: "Preview", icon: EyeIcon },
   ];
