@@ -390,8 +390,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
             <img
               src={folderIconUrl(basename(rootPath), false)}
               alt=""
-              height={15}
-              width={15}
+              height={22}
+              width={22}
               className="mx-1.5"
             />
             {basename(rootPath)}
@@ -473,10 +473,10 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
               >
                 {pendingAtRoot ? (
                   <div
-                    className="flex h-6 w-full min-w-0 items-center gap-2 px-1.5 text-[13px]"
+                    className="flex h-8 w-full min-w-0 items-center gap-2 px-1.5 text-[13px]"
                     style={{ paddingLeft: 6 }}
                   >
-                    <span className="size-3.5 shrink-0" />
+                    <span className="size-5 shrink-0" />
                     <img
                       src={
                         pendingAtRoot.kind === "dir"
@@ -484,7 +484,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
                           : fileIconUrl("untitled")
                       }
                       alt=""
-                      className="size-4 shrink-0 opacity-70"
+                      className="size-5 shrink-0 opacity-70"
                     />
                     <InlineInput
                       initial=""

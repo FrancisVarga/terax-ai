@@ -70,6 +70,7 @@ function EntryRowImpl(props: EntryRowProps) {
 
   const [isConfirming, setIsConfirming] = useState(false);
   const iconUrl = isDir ? folderIconUrl(name, isExpanded) : fileIconUrl(name);
+  const iconSize = isDir ? "size-5" : "size-4";
   const createTarget = isDir ? path : path.slice(0, path.lastIndexOf("/")) || rootPath;
   const paddingLeft = 6 + depth * 12;
 
@@ -85,14 +86,14 @@ function EntryRowImpl(props: EntryRowProps) {
       <ContextMenuTrigger asChild>
         {isRenaming ? (
           <div
-            className="flex h-6 w-full min-w-0 items-center gap-2 px-1.5 text-[13px]"
+            className="flex h-8 w-full min-w-0 items-center gap-2 px-1.5 text-[13px]"
             style={{ paddingLeft }}
           >
-            <span className="size-3.5 shrink-0" />
+            <span className="size-5 shrink-0" />
             {iconUrl ? (
-              <img src={iconUrl} alt="" className="size-4 shrink-0" />
+              <img src={iconUrl} alt="" className={cn(iconSize, "shrink-0")} />
             ) : (
-              <span className="size-4 shrink-0" />
+              <span className="size-5 shrink-0" />
             )}
             <InlineInput
               initial={name}
@@ -107,16 +108,16 @@ function EntryRowImpl(props: EntryRowProps) {
             onClick={handleClick}
             onDoubleClick={() => !isDir && tree.beginRename(path)}
             className={cn(
-              "group flex h-6 w-full min-w-0 cursor-pointer items-center gap-2 rounded-sm px-1.5 text-left text-[13px] text-foreground/85 transition-colors hover:bg-accent/70",
+              "group flex h-8 w-full min-w-0 cursor-pointer items-center gap-2 rounded-sm px-1.5 text-left text-[13px] text-foreground/85 transition-colors hover:bg-accent/70",
               isSelected && "bg-accent text-foreground",
             )}
             style={{ paddingLeft }}
           >
-            <span className="flex size-3.5 shrink-0 items-center justify-center text-muted-foreground">
+            <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground">
               {isDir ? (
                 <HugeiconsIcon
                   icon={ArrowRight01Icon}
-                  size={12}
+                  size={16}
                   strokeWidth={2.25}
                   className={cn(
                     "transition-transform",
@@ -126,9 +127,13 @@ function EntryRowImpl(props: EntryRowProps) {
               ) : null}
             </span>
             {iconUrl ? (
-              <img src={iconUrl} alt="" className="size-4 shrink-0" />
+              <img
+                src={iconUrl}
+                alt=""
+                className={cn(iconSize, "shrink-0")}
+              />
             ) : (
-              <span className="size-4 shrink-0" />
+              <span className="size-5 shrink-0" />
             )}
             <span className="min-w-0 flex-1 truncate">{name}</span>
           </button>
@@ -252,14 +257,14 @@ export type PendingRowProps = {
 export function PendingRow({ depth, kind, onCommit, onCancel }: PendingRowProps) {
   return (
     <div
-      className="flex h-6 w-full min-w-0 items-center gap-2 px-1.5 text-[13px]"
+      className="flex h-8 w-full min-w-0 items-center gap-2 px-1.5 text-[13px]"
       style={{ paddingLeft: 6 + depth * 12 }}
     >
-      <span className="size-3.5 shrink-0" />
+      <span className="size-5 shrink-0" />
       <img
         src={kind === "dir" ? folderIconUrl("", false) : fileIconUrl("untitled")}
         alt=""
-        className="size-4 shrink-0 opacity-70"
+        className="size-5 shrink-0 opacity-70"
       />
       <InlineInput
         initial=""
