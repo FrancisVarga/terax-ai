@@ -7,6 +7,8 @@ export {
   type EditorTab,
   type PreviewTab,
   type MarkdownTab,
+  type ImageTab,
+  type LogTab,
   type DataTab,
   type S3Tab,
   type AiDiffTab,
