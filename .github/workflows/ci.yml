@@ -25,7 +25,11 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - run: pnpm install --frozen-lockfile
+      # package.json pins supportedArchitectures to win32/x64 for local Windows
+      # dev. Override in CI with the --os/--cpu install flags (pnpm >= 10.14) so
+      # the Linux-native optionals (rollup, esbuild) that vitest and vite need on
+      # ubuntu runners get installed alongside the pinned win32/x64 set.
+      - run: pnpm install --frozen-lockfile --os win32 --os current --cpu x64 --cpu current
 
       - name: Type-check
         run: pnpm exec tsc --noEmit
@@ -58,6 +62,26 @@ jobs:
         with:
           workspaces: ./src-tauri -> target
 
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build bunqueue sidecars
+        run: pnpm build:sidecars
+
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -89,6 +113,26 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: ./src-tauri -> target
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build bunqueue sidecars
+        run: pnpm build:sidecars
 
       - uses: taiki-e/install-action@v2
         with:
@@ -125,6 +169,26 @@ jobs:
         with:
           workspaces: ./src-tauri -> target
           key: coverage
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build bunqueue sidecars
+        run: pnpm build:sidecars
 
       - uses: taiki-e/install-action@v2
         with:
