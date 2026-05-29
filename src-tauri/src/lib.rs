@@ -4,6 +4,7 @@ use modules::{
     agent, agentscan, bunqueue, ccusage, docker, fs, git, gpu, net, pty, secrets, shell, ssh,
     workspace,
 };
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
@@ -106,6 +107,26 @@ async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Res
 /// labels, so a process-wide counter guarantees uniqueness across the session.
 static WINDOW_SEQ: AtomicU32 = AtomicU32::new(2);
 
+/// Maps a normalized project directory → the window label opened for it, so
+/// re-opening a project focuses the existing window instead of spawning a
+/// duplicate. Entries are pruned when their window closes (CloseRequested) and
+/// validated on lookup (a dead label is treated as no match).
+#[derive(Default)]
+struct ProjectWindows(Mutex<HashMap<String, String>>);
+
+/// Normalize a project dir for use as a window-registry key: backslashes →
+/// forward slashes and trailing slashes stripped, matching how the frontend
+/// stores project paths. Keeps `ssh://` and other paths comparable too.
+fn normalize_dir_key(dir: &str) -> String {
+    let s = dir.replace('\\', "/");
+    let trimmed = s.trim_end_matches('/');
+    if trimmed.is_empty() {
+        s
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Percent-encode a string for safe inclusion in a URL query component.
 /// Keeps the RFC 3986 unreserved set (`A-Z a-z 0-9 - _ . ~`) verbatim and
 /// `%XX`-escapes everything else — enough to carry an arbitrary filesystem path
@@ -125,6 +146,37 @@ fn encode_query_component(s: &str) -> String {
 
 #[tauri::command]
 async fn open_main_window(app: tauri::AppHandle, dir: Option<String>) -> Result<(), String> {
+    // Re-opening a project should focus its existing window rather than spawn a
+    // duplicate. We track dir → label at spawn time; on lookup, validate the
+    // label still maps to a live window (a closed one leaves a stale entry).
+    let dir_key = dir
+        .as_deref()
+        .filter(|d| !d.is_empty())
+        .map(normalize_dir_key);
+    if let Some(key) = dir_key.as_deref() {
+        let registry = app.state::<ProjectWindows>();
+        let existing = registry
+            .0
+            .lock()
+            .expect("ProjectWindows mutex poisoned")
+            .get(key)
+            .cloned();
+        if let Some(label) = existing {
+            if let Some(window) = app.get_webview_window(&label) {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+                return Ok(());
+            }
+            // Stale entry (window gone) — drop it and fall through to spawn.
+            registry
+                .0
+                .lock()
+                .expect("ProjectWindows mutex poisoned")
+                .remove(key);
+        }
+    }
+
     let n = WINDOW_SEQ.fetch_add(1, Ordering::Relaxed);
     let label = format!("main-{n}");
 
@@ -174,7 +226,29 @@ async fn open_main_window(app: tauri::AppHandle, dir: Option<String>) -> Result<
     {
         let _ = window.set_decorations(false);
     }
-    let _ = window;
+
+    // Record the dir → label association so a later open of the same project
+    // focuses this window, and prune it when the window closes.
+    if let Some(key) = dir_key {
+        app.state::<ProjectWindows>()
+            .0
+            .lock()
+            .expect("ProjectWindows mutex poisoned")
+            .insert(key.clone(), label.clone());
+
+        let app_handle = app.clone();
+        window.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                if let Some(reg) = app_handle.try_state::<ProjectWindows>() {
+                    let mut map = reg.0.lock().expect("ProjectWindows mutex poisoned");
+                    if map.get(&key).map(|l| l == &label).unwrap_or(false) {
+                        map.remove(&key);
+                    }
+                }
+            }
+        });
+    }
+
     Ok(())
 }
 
@@ -226,6 +300,7 @@ pub fn run() {
         .manage(LaunchDir(Mutex::new(cli_dir)))
         .manage(bunqueue::BunqueueState::default())
         .manage(ssh::SshFsState::default())
+        .manage(ProjectWindows::default())
         .setup(|app| {
             // In dev builds, suffix window titles with " Dev" so a running dev
             // instance is visually distinct from an installed release.
