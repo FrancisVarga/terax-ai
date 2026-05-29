@@ -29,6 +29,8 @@ import { ExplorerSearch, type ExplorerSearchHandle } from "./ExplorerSearch";
 import { EntryRow, PendingRow, StatusRow } from "./TreeRow";
 import { InlineInput } from "./InlineInput";
 import { copyToClipboard, revealInFinder } from "./lib/contextActions";
+import type { GitDecoration, GitDecorationStatus } from "./lib/gitDecoration";
+import { useGitDecoration } from "./lib/useGitDecoration";
 import { fileIconUrl, folderIconUrl } from "./lib/iconResolver";
 import { COMPACT_CONTENT, COMPACT_ITEM } from "./lib/menuItemClass";
 import { useFileTree } from "./lib/useFileTree";
@@ -66,6 +68,8 @@ type Row =
       isExpanded: boolean;
       depth: number;
       ignored: boolean;
+      /** Git status for files; folders with a dirty descendant get "modified". */
+      gitStatus: GitDecorationStatus | null;
     }
   | { kind: "rename"; key: string; path: string; name: string; isDir: boolean; depth: number }
   | { kind: "pending"; key: string; depth: number; pendingKind: "file" | "dir" }
@@ -82,6 +86,7 @@ function basename(path: string): string {
 function buildRows(
   rootPath: string,
   tree: ReturnType<typeof useFileTree>,
+  git: GitDecoration,
 ): { rows: Row[]; entryIndexByPath: Map<string, number> } {
   const rows: Row[] = [];
   const entryIndexByPath = new Map<string, number>();
@@ -106,6 +111,13 @@ function buildRows(
           depth,
         });
       } else {
+        // Files map to a status directly; a collapsed/expanded folder surfaces
+        // a rollup marker when any descendant is dirty.
+        const gitStatus = isDir
+          ? git.dirtyDirs.has(path)
+            ? "modified"
+            : null
+          : (git.files.get(path) ?? null);
         entryIndexByPath.set(path, rows.length);
         rows.push({
           kind: "entry",
@@ -116,6 +128,7 @@ function buildRows(
           isExpanded: expanded,
           depth,
           ignored,
+          gitStatus,
         });
       }
       if (isDir && expanded) {
@@ -172,6 +185,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
     ref,
   ) {
     const tree = useFileTree(rootPath, { onPathRenamed, onPathDeleted });
+    const git = useGitDecoration(rootPath);
     const [selectedPath, setSelectedPath] = useState<string | null>(null);
     const [isSearchOpen, setIsSearchOpen] = useState(false);
     const [isSearchActive, setIsSearchActive] = useState(false);
@@ -181,8 +195,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
 
     const { rows, entryIndexByPath } = useMemo(() => {
       if (!rootPath) return { rows: [] as Row[], entryIndexByPath: new Map<string, number>() };
-      return buildRows(rootPath, tree);
-    }, [rootPath, tree.nodes, tree.expanded, tree.renaming, tree.pendingCreate, tree]);
+      return buildRows(rootPath, tree, git);
+    }, [rootPath, tree.nodes, tree.expanded, tree.renaming, tree.pendingCreate, git]);
 
     const entryPaths = useMemo<string[]>(() => {
       const out: string[] = [];
@@ -354,6 +368,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
               isSelected={selectedPath === row.path}
               isRenaming={row.kind === "rename"}
               ignored={row.kind === "entry" ? row.ignored : false}
+              gitStatus={row.kind === "entry" ? row.gitStatus : null}
               onOpenFile={onOpenFile}
               onSelectPath={setSelectedPath}
               onRevealInTerminal={onRevealInTerminal}
