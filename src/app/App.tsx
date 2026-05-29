@@ -47,7 +47,11 @@ import {
   GitHistoryStack,
   type GitHistorySearchHandle,
 } from "@/modules/git-history";
-import { getLaunchDir, hasExplicitLaunchDir } from "@/lib/launchDir";
+import {
+  getLaunchDir,
+  getLaunchFile,
+  hasExplicitLaunchDir,
+} from "@/lib/launchDir";
 import { quoteShellArg } from "@/lib/shellQuote";
 import { useZoom } from "@/lib/useZoom";
 import { FileExplorer, type FileExplorerHandle } from "@/modules/explorer";
@@ -1307,6 +1311,18 @@ export default function App() {
     },
     [openFileTab, newDataTab],
   );
+
+  // "Open with Terax Camelot" on a file: the backend cd'd the workspace into
+  // the file's parent dir; here we open the file itself in the editor. Fires
+  // once on mount. Local files only (remote launch goes through ssh above).
+  const launchFileOpenedRef = useRef(false);
+  useEffect(() => {
+    if (launchFileOpenedRef.current) return;
+    const file = getLaunchFile();
+    if (!file || isRemote(file)) return;
+    launchFileOpenedRef.current = true;
+    handleOpenFile(file, true);
+  }, [handleOpenFile]);
 
   // Context-menu "Preview Data" — same destination as a click on a data file,
   // exposed explicitly so the action is discoverable.
