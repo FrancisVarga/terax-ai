@@ -1,6 +1,5 @@
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,15 +10,15 @@ use tauri::{AppHandle, Emitter};
 use super::agent_detect::AgentDetector;
 use super::da_filter::DaFilter;
 use super::shell_init;
+#[cfg(windows)]
 use crate::modules::sync::MutexExt;
 use crate::modules::workspace::WorkspaceEnv;
 
 const AGENT_EVENT: &str = "terax:agent-signal";
 
-// Flusher coalesces a short window after first-byte arrival so we send chunks,
-// not single bytes. MAX_IDLE is only a safety net for missed signals.
+// The reader coalesces a short window for bursts so we send chunks, not single
+// bytes (see the inline `flush` closure in `spawn`).
 const FLUSH_COALESCE: Duration = Duration::from_millis(4);
-const FLUSH_MAX_IDLE: Duration = Duration::from_millis(50);
 // Latency-first adaptive flush: a pending buffer at/under this size is treated
 // as interactive echo (a keystroke the shell bounced back) and flushed
 // immediately with no coalesce sleep, so keypress→glyph isn't padded by 4ms.
@@ -157,14 +156,14 @@ pub fn spawn(
         master: Mutex::new(pair.master),
     });
 
-    let pending: Arc<(Mutex<Vec<u8>>, Condvar)> = Arc::new((
-        Mutex::new(Vec::with_capacity(READ_BUF)),
-        Condvar::new(),
-    ));
-    let done = Arc::new(AtomicBool::new(false));
     let spawn_at = Instant::now();
 
-    let pending_r = pending.clone();
+    // Single reader+flusher thread per shell. The reader owns its output buffer
+    // as a thread-local `Vec` and flushes inline — no shared Mutex/Condvar and
+    // no separate flusher thread (was 3 threads/shell, now 2). Removing the
+    // cross-thread handoff also removes the head-of-line blocking that capped
+    // throughput when many shells contended on the OS scheduler.
+    let on_data_reader = on_data.clone();
     let writer_for_da = writer.clone();
     let app_reader = app.clone();
     let reader_thread = thread::Builder::new()
@@ -172,10 +171,34 @@ pub fn spawn(
         .spawn(move || {
             let mut buf = [0u8; READ_BUF];
             let mut filtered: Vec<u8> = Vec::with_capacity(READ_BUF);
+            // Thread-local accumulator. `flush` drains it via `mem::take`.
+            let mut pending: Vec<u8> = Vec::with_capacity(READ_BUF);
             let mut da_filter = DaFilter::new();
             let mut agent_detect = AgentDetector::new();
             let mut dropped_bytes: u64 = 0;
             let mut logged_first = false;
+
+            // Send whatever is buffered, applying the same latency-vs-throughput
+            // policy the old flusher used: a small payload (interactive echo) is
+            // sent immediately so keypress→glyph isn't padded; a burst pays the
+            // coalesce window to batch more output into one Channel send.
+            let flush = |pending: &mut Vec<u8>| -> bool {
+                if pending.is_empty() {
+                    return true;
+                }
+                if pending.len() > FLUSH_ECHO_THRESHOLD {
+                    thread::sleep(FLUSH_COALESCE);
+                }
+                let chunk = std::mem::take(pending);
+                match on_data_reader.send(Response::new(chunk)) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log::debug!("pty reader exiting, channel closed: {e}");
+                        false
+                    }
+                }
+            };
+
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
@@ -196,15 +219,15 @@ pub fn spawn(
                         if filtered.is_empty() {
                             continue;
                         }
-                        let (lock, cv) = &*pending_r;
-                        let mut g = lock.lock_safe();
-                        if g.len() + filtered.len() > MAX_PENDING {
-                            dropped_bytes += g.len() as u64;
-                            g.clear();
-                            g.extend_from_slice(OVERFLOW_NOTICE);
+                        if pending.len() + filtered.len() > MAX_PENDING {
+                            dropped_bytes += pending.len() as u64;
+                            pending.clear();
+                            pending.extend_from_slice(OVERFLOW_NOTICE);
                         }
-                        g.extend_from_slice(&filtered);
-                        cv.notify_one();
+                        pending.extend_from_slice(&filtered);
+                        if !flush(&mut pending) {
+                            break;
+                        }
                     }
                     Err(e) => {
                         log::debug!("pty reader ended: {e}");
@@ -215,7 +238,10 @@ pub fn spawn(
             agent_detect.finish(|t| {
                 let _ = app_reader.emit(AGENT_EVENT, t.into_signal(id));
             });
-            pending_r.1.notify_one();
+            // Final drain on EOF: the reader owns the buffer, so it sends the
+            // tail itself. The waiter joins this thread before emitting the exit
+            // code, so the last byte never races the Exit event.
+            flush(&mut pending);
             if dropped_bytes > 0 {
                 log::warn!("pty backpressure: dropped {dropped_bytes} bytes (cap {MAX_PENDING})");
             }
@@ -225,49 +251,6 @@ pub fn spawn(
             format!("spawn pty reader thread: {e}")
         })?;
 
-    let on_data_flush = on_data.clone();
-    let pending_f = pending.clone();
-    let done_f = done.clone();
-    thread::Builder::new()
-        .name("terax-pty-flusher".into())
-        .spawn(move || {
-            let (lock, cv) = &*pending_f;
-            loop {
-                let pending_len;
-                {
-                    let mut g = lock.lock_safe();
-                    while g.is_empty() {
-                        if done_f.load(Ordering::Acquire) {
-                            return;
-                        }
-                        let (next, _) = cv
-                            .wait_timeout(g, FLUSH_MAX_IDLE)
-                            .unwrap_or_else(|p| p.into_inner());
-                        g = next;
-                    }
-                    pending_len = g.len();
-                }
-                // Interactive echo (small payload) flushes immediately to keep
-                // keypress→glyph latency minimal. Only a burst — already a big
-                // pending buffer — pays the coalesce window for throughput.
-                if pending_len > FLUSH_ECHO_THRESHOLD {
-                    thread::sleep(FLUSH_COALESCE);
-                }
-                let chunk = std::mem::take(&mut *lock.lock_safe());
-                if chunk.is_empty() {
-                    continue;
-                }
-                if let Err(e) = on_data_flush.send(Response::new(chunk)) {
-                    log::debug!("pty flusher exiting, channel closed: {e}");
-                    break;
-                }
-            }
-        })
-        .map_err(|e| format!("spawn pty flusher thread: {e}"))?;
-
-    let on_data_exit = on_data;
-    let pending_e = pending;
-    let done_e = done;
     thread::Builder::new()
         .name("terax-pty-waiter".into())
         .spawn(move || {
@@ -278,10 +261,13 @@ pub fn spawn(
                     -1
                 }
             };
-            // Wait for the reader to hit EOF before taking a final snapshot of
-            // `pending`, so the last line of output never races the Exit event.
+            // Wait for the reader to finish (it flushes its own tail on EOF)
+            // before emitting the exit code, so the last line of output never
+            // races the Exit event.
             #[cfg(windows)]
             {
+                // On Windows the master pipe can lag the child exit, so we don't
+                // block the waiter indefinitely on `join`; poll briefly instead.
                 let deadline = Instant::now() + Duration::from_millis(50);
                 while Instant::now() < deadline && !reader_thread.is_finished() {
                     thread::sleep(Duration::from_millis(5));
@@ -291,15 +277,6 @@ pub fn spawn(
             if let Err(e) = reader_thread.join() {
                 log::error!("pty reader thread panicked: {e:?}");
             }
-            let (lock, cv) = &*pending_e;
-            let tail = std::mem::take(&mut *lock.lock_safe());
-            if !tail.is_empty() {
-                if let Err(e) = on_data_exit.send(Response::new(tail)) {
-                    log::debug!("pty final-data send failed (channel closed): {e}");
-                }
-            }
-            done_e.store(true, Ordering::Release);
-            cv.notify_all();
             if let Err(e) = on_exit.send(code) {
                 log::debug!("pty exit send failed (channel closed): {e}");
             }
