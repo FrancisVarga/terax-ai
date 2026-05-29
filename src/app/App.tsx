@@ -273,6 +273,7 @@ export default function App() {
     setActiveId,
     newTab,
     newAgentTab,
+    newGridTab,
     newPrivateTab,
     openFileTab,
     pinTab,
@@ -1064,6 +1065,13 @@ export default function App() {
     launchClaudeInLeaf(leafId);
   }, [activeId, splitActivePane, projectCwd, launchClaudeInLeaf, openClaudeNewTab]);
 
+  // Create a "Claude team": one tab split into a 2x2 grid, each pane running
+  // claude at the project root.
+  const openClaudeTeam = useCallback(() => {
+    const { leafIds: gridLeaves } = newGridTab(projectCwd(), "claude team");
+    for (const leafId of gridLeaves) launchClaudeInLeaf(leafId);
+  }, [newGridTab, projectCwd, launchClaudeInLeaf]);
+
   const openNewPrivateTab = useCallback(() => {
     newPrivateTab(inheritedCwdForNewTab());
   }, [newPrivateTab, inheritedCwdForNewTab]);
@@ -1476,6 +1484,7 @@ export default function App() {
       "ai.askSelection": askFromSelection,
       "claude.newTab": openClaudeNewTab,
       "claude.splitRight": openClaudeSplitRight,
+      "claude.team": openClaudeTeam,
       "window.new": () => void invoke("open_main_window"),
       "commandPopup.open": () => setCommandPopupOpen((v) => !v),
       "shortcuts.open": () => setShortcutsOpen((v) => !v),
@@ -1508,6 +1517,7 @@ export default function App() {
       askFromSelection,
       openClaudeNewTab,
       openClaudeSplitRight,
+      openClaudeTeam,
       cycleSidebarView,
       addCurrentFolderToProjects,
       toggleSidebar,
@@ -1791,6 +1801,7 @@ export default function App() {
           onCwd={handleTerminalCwd}
           onExit={handleLeafExit}
           onFocusLeaf={handleFocusLeaf}
+          onClosePane={closePaneByLeaf}
         />
       </div>
       <div
@@ -2049,11 +2060,11 @@ export default function App() {
               <ResizablePanel
                 id="right-sidebar"
                 panelRef={rightSidebarRef}
-                defaultSize={
-                  startSidebarsCollapsedRef.current
-                    ? "0px"
-                    : `${rightSidebarWidthRef.current}px`
-                }
+                // Right sidebar always starts collapsed (regardless of launch
+                // mode). The user opens it on demand via the rail/shortcut; it
+                // reopens to the stored width. Left sidebar still follows the
+                // launch heuristic.
+                defaultSize="0px"
                 minSize={`${RIGHT_SIDEBAR_MIN_WIDTH}px`}
                 maxSize={`${RIGHT_SIDEBAR_MAX_WIDTH}px`}
                 collapsible

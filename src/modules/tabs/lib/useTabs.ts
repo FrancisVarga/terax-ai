@@ -258,6 +258,57 @@ export function useTabs(
     [],
   );
 
+  // Open a terminal tab pre-split into a 2x2 grid (4 leaves). Used by the
+  // "Create Claude team" command. Returns the tab id and the 4 leaf ids in
+  // visual order (top-left, bottom-left, top-right, bottom-right) so the caller
+  // can launch a process in each. Capped at MAX_PANES_PER_TAB (=4).
+  const newGridTab = useCallback(
+    (cwd: string | undefined, title: string) => {
+      const tabId = nextIdRef.current++;
+      const outerSplit = nextIdRef.current++;
+      const leftSplit = nextIdRef.current++;
+      const rightSplit = nextIdRef.current++;
+      const a = nextIdRef.current++;
+      const b = nextIdRef.current++;
+      const c = nextIdRef.current++;
+      const d = nextIdRef.current++;
+      const leaf = (id: number): PaneNode => ({ kind: "leaf", id, cwd });
+      const paneTree: PaneNode = {
+        kind: "split",
+        id: outerSplit,
+        dir: "row",
+        children: [
+          {
+            kind: "split",
+            id: leftSplit,
+            dir: "col",
+            children: [leaf(a), leaf(b)],
+          },
+          {
+            kind: "split",
+            id: rightSplit,
+            dir: "col",
+            children: [leaf(c), leaf(d)],
+          },
+        ],
+      };
+      setTabs((t) => [
+        ...t,
+        {
+          id: tabId,
+          kind: "terminal",
+          title,
+          cwd,
+          paneTree,
+          activeLeafId: a,
+        },
+      ]);
+      setActiveId(tabId);
+      return { tabId, leafIds: [a, b, c, d] as const };
+    },
+    [],
+  );
+
   const newPrivateTab = useCallback((cwd?: string) => {
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;
@@ -998,6 +1049,7 @@ export function useTabs(
     setActiveId,
     newTab,
     newAgentTab,
+    newGridTab,
     newPrivateTab,
     openFileTab,
     pinTab,

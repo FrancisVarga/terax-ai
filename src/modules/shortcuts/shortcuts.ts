@@ -29,6 +29,7 @@ export type ShortcutId =
   | "ai.askSelection"
   | "claude.newTab"
   | "claude.splitRight"
+  | "claude.team"
   | "window.new"
   | "commandPopup.open"
   | "shortcuts.open"
@@ -214,6 +215,12 @@ export const SHORTCUTS: Shortcut[] = [
   {
     id: "claude.splitRight",
     label: "Open Claude Code in split pane right",
+    group: "AI",
+    defaultBindings: [],
+  },
+  {
+    id: "claude.team",
+    label: "Create Claude team (2x2 grid)",
     group: "AI",
     defaultBindings: [],
   },
