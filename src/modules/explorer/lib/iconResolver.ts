@@ -1,4 +1,4 @@
-import catppuccinIcons from "@iconify-json/catppuccin/icons.json";
+import materialIcons from "@iconify-json/material-icon-theme/icons.json";
 import { EXT_TO_LANGUAGE_ID } from "./constants";
 import * as fileIconsMod from "./fileIcons";
 import * as folderIconsMod from "./folderIcons";
@@ -15,20 +15,76 @@ type IconifySet = {
   height?: number;
 };
 
-const cat = catppuccinIcons as unknown as IconifySet;
-const CAT_W = cat.width ?? 16;
-const CAT_H = cat.height ?? 16;
+// Material Icon Theme. The association manifest (fileIcons/folderIcons) already
+// uses material-icon-theme slugs, so names resolve directly against this set.
+// Material icons are authored on a 24x24 grid (catppuccin used 16x16) and use
+// different default slugs: `document` / `folder-base` instead of `file` /
+// `folder`.
+const cat = materialIcons as unknown as IconifySet;
+const CAT_W = cat.width ?? 24;
+const CAT_H = cat.height ?? 24;
 
-const DEFAULT_FILE = "file";
-const DEFAULT_FOLDER = "folder";
-const DEFAULT_FOLDER_OPEN = "folder-open";
+const DEFAULT_FILE = "document";
+const DEFAULT_FOLDER = "folder-base";
+const DEFAULT_FOLDER_OPEN = "folder-base-open";
 
 const dataUrlCache = new Map<string, string>();
 
-// Catppuccin's manifest emits names like `folder_src`/`typescript-react`, but
-// the iconify export normalizes everything to hyphenated slugs.
+// The association manifest uses material-icon-theme's source definition IDs;
+// the iconify export keys a few icons under a different output slug. Bridge the
+// divergent names here. Extend when another mismatch surfaces.
+const SLUG_ALIASES: Record<string, string> = {
+  // file-icon slug renames
+  "adobe-ai": "adobe-illustrator",
+  "adobe-ps": "adobe-photoshop",
+  apple: "applescript",
+  "circle-ci": "circleci",
+  coffeescript: "coffee",
+  "java-jar": "jar",
+  "javascript-react": "react",
+  "markdown-mdx": "mdx",
+  "ms-powerpoint": "powerpoint",
+  "ms-word": "word",
+  prototools: "proto",
+  tailwind: "tailwindcss",
+  turbo: "turborepo",
+  "typescript-react": "react-ts",
+  "web-assembly": "webassembly",
+  windi: "windicss",
+  // folder-icon slug renames (resolver appends -open for expanded)
+  "folder-azure-devops": "folder-azure-pipelines",
+  "folder-cargo": "folder-rust",
+  "folder-circle-ci": "folder-circleci",
+  "folder-cloud": "folder-cloud-functions",
+  "folder-controllers": "folder-controller",
+  "folder-devcontainer": "folder-container",
+  "folder-direnv": "folder-environment",
+  "folder-drizzle-orm": "folder-drizzle",
+  "folder-fonts": "folder-font",
+  "folder-fvm": "folder-flutter",
+  "folder-hooks": "folder-hook",
+  "folder-layouts": "folder-layout",
+  "folder-locales": "folder-i18n",
+  "folder-mocks": "folder-mock",
+  "folder-moonrepo": "folder-moon",
+  "folder-plugins": "folder-plugin",
+  "folder-roblox": "folder-luau",
+  "folder-security": "folder-secure",
+  "folder-tauri": "folder-src-tauri",
+  "folder-templates": "folder-template",
+  "folder-tests": "folder-test",
+  "folder-themes": "folder-theme",
+  "folder-turbo": "folder-turborepo",
+  "folder-types": "folder-typescript",
+  "folder-workflows": "folder-gh-workflows",
+  "folder-xcode": "folder-ios",
+};
+
+// The manifest emits names like `folder_src`/`typescript-react`, but the
+// iconify export normalizes everything to hyphenated slugs.
 function toIconifySlug(name: string): string {
-  return name.replace(/_/g, "-");
+  const hyphenated = name.replace(/_/g, "-");
+  return SLUG_ALIASES[hyphenated] ?? hyphenated;
 }
 
 function catBody(iconName: string): string | null {
