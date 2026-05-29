@@ -14,10 +14,20 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { cn } from "@/lib/utils";
+import { useFsWatchReload } from "./hooks/useFsWatchReload";
+import { useLaunchFile } from "./hooks/useLaunchFile";
+import { useLiveBridge } from "./hooks/useLiveBridge";
+import { useThemeIngest } from "./hooks/useThemeIngest";
+import {
+  RIGHT_SIDEBAR_MAX_WIDTH,
+  RIGHT_SIDEBAR_MIN_WIDTH,
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_MIN_WIDTH,
+  useSidebarState,
+} from "./hooks/useSidebarState";
+import { TabStackRouter } from "./TabStackRouter";
 import { AgentNotificationsBridge } from "@/modules/agents";
 import { firePendingReviewForSession } from "@/modules/agents/lib/review";
-import { useManagedAgentsStore } from "@/modules/agents/store/managedAgentsStore";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import {
@@ -32,26 +42,12 @@ import {
   useChatStore,
 } from "@/modules/ai";
 import { AiComposerProvider } from "@/modules/ai/lib/composer";
-import { redactSensitive } from "@/modules/ai/lib/redact";
 import { native } from "@/modules/ai/lib/native";
 import { useAgentsStore } from "@/modules/ai/store/agentsStore";
 import { useSnippetsStore } from "@/modules/ai/store/snippetsStore";
-import {
-  AiDiffStack,
-  EditorStack,
-  GitDiffStack,
-  NewEditorDialog,
-  type EditorPaneHandle,
-} from "@/modules/editor";
-import {
-  GitHistoryStack,
-  type GitHistorySearchHandle,
-} from "@/modules/git-history";
-import {
-  getLaunchDir,
-  getLaunchFile,
-  hasExplicitLaunchDir,
-} from "@/lib/launchDir";
+import { NewEditorDialog, type EditorPaneHandle } from "@/modules/editor";
+import { type GitHistorySearchHandle } from "@/modules/git-history";
+import { getLaunchDir, hasExplicitLaunchDir } from "@/lib/launchDir";
 import { quoteShellArg } from "@/lib/shellQuote";
 import { useZoom } from "@/lib/useZoom";
 import { FileExplorer, type FileExplorerHandle } from "@/modules/explorer";
@@ -63,52 +59,37 @@ import {
   remoteUri,
 } from "@/modules/explorer/lib/remote";
 import {
-  listenFsChanged,
-  parentDir,
-  watchAdd,
-  watchRemove,
-} from "@/modules/explorer/lib/watch";
-import {
   Header,
   type SearchInlineHandle,
   type SearchTarget,
 } from "@/modules/header";
-import { BunqueueStack } from "@/modules/bunqueue";
 import { CommandPopup } from "@/modules/command-popup";
-import { MarkdownStack } from "@/modules/markdown";
-import { ImageStack } from "@/modules/image";
-import { LogStack } from "@/modules/log";
-import { DataStack, dataFormatForPath } from "@/modules/data";
-import { S3Stack, S3Panel } from "@/modules/s3";
-import { PreviewStack, type PreviewPaneHandle } from "@/modules/preview";
+import { dataFormatForPath } from "@/modules/data";
+import { S3Panel } from "@/modules/s3";
+import { type PreviewPaneHandle } from "@/modules/preview";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { onKeysChanged, setThemeId as persistThemeId } from "@/modules/settings/store";
+import { onKeysChanged } from "@/modules/settings/store";
 import {
   ShortcutsDialog,
   useGlobalShortcuts,
   type ShortcutHandlers,
   type ShortcutId,
 } from "@/modules/shortcuts";
-import { DockerDetailStack, DockerPanel } from "@/modules/docker";
-import { AnalyticsStack } from "@/modules/agentlytics";
-import { CcusageStack } from "@/modules/ccusage";
+import { DockerPanel } from "@/modules/docker";
 import {
   AddProjectDialog,
-  ProjectDetailStack,
-  ProjectsDashboard,
   ProjectsPanel,
   useProjectsStore,
   type Project,
 } from "@/modules/projects";
-import { SidebarRail, type SidebarViewId } from "@/modules/sidebar";
+import { SidebarRail } from "@/modules/sidebar";
 import {
   AgentsPanel,
   AiPanel,
   PreviewPanel,
   RightSidebarRail,
   SessionHistoryPanel,
-  type RightSidebarViewId,
 } from "@/modules/right-sidebar";
 import { TaskRunnerPanel } from "@/modules/task-runner";
 import {
@@ -132,25 +113,14 @@ import {
   leafIds,
   newRemoteCwdNonce,
   respawnSession,
-  TerminalStack,
   unbindRemoteCwd,
   whenSessionReady,
   writeToSession,
   type TerminalPaneHandle,
 } from "@/modules/terminal";
 import { ThemeProvider } from "@/modules/theme";
-import { listCustomThemes, saveCustomTheme } from "@/modules/theme/customThemes";
-import {
-  isThemeFilePath,
-  onThemeEdit,
-  parseThemeFile,
-  starterTheme,
-  themeFilePath,
-  writeThemeFile,
-} from "@/modules/theme/themeFiles";
 import { UpdaterDialog } from "@/modules/updater";
 import {
-  currentWorkspaceEnv,
   getWslHome,
   LOCAL_WORKSPACE,
   useWorkspaceEnvStore,
@@ -158,27 +128,9 @@ import {
 } from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";
 import { homeDir } from "@tauri-apps/api/path";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { SearchAddon } from "@xterm/addon-search";
 import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { PanelImperativeHandle } from "react-resizable-panels";
-
-type TuiWaitResult = "ready" | "gone" | "timeout";
-
-async function waitForClaudeTuiReady(
-  readBuf: () => string | null,
-  timeoutMs = 8000,
-): Promise<TuiWaitResult> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const buf = readBuf();
-    if (buf === null) return "gone";
-    if (buf.includes("shortcuts") || buf.includes("? for")) return "ready";
-    await new Promise((r) => setTimeout(r, 120));
-  }
-  return "timeout";
-}
 
 function dirname(path: string | null): string | null {
   if (!path) return null;
@@ -193,88 +145,6 @@ function dirname(path: string | null): string | null {
 const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|ico|avif|svg)$/i;
 const LOG_RE = /\.log$/i;
 const MARKDOWN_RE = /\.(md|markdown|mdx)$/i;
-
-const SIDEBAR_MIN_WIDTH = 220;
-const SIDEBAR_MAX_WIDTH = 480;
-const SIDEBAR_WIDTH_STORAGE_KEY = "terax.sidebar.width";
-const SIDEBAR_VIEW_STORAGE_KEY = "terax.sidebar.view";
-
-const RIGHT_SIDEBAR_DEFAULT_WIDTH = 320;
-const RIGHT_SIDEBAR_MIN_WIDTH = 240;
-const RIGHT_SIDEBAR_MAX_WIDTH = 560;
-const RIGHT_SIDEBAR_WIDTH_STORAGE_KEY = "terax.right-sidebar.width";
-const RIGHT_SIDEBAR_VIEW_STORAGE_KEY = "terax.right-sidebar.view";
-
-function readSidebarWidth(): number {
-  // The left sidebar always starts at its minimum width on launch; the user can
-  // drag it wider during the session (and that live value still persists), but
-  // each new window begins compact rather than restoring the stored width.
-  return SIDEBAR_MIN_WIDTH;
-}
-
-function readSidebarView(): SidebarViewId {
-  // Windows opened for a project (carrying `?dir=`) always start on the file
-  // explorer, regardless of the cross-window persisted view.
-  try {
-    if (new URLSearchParams(window.location.search).get("dir")) {
-      return "explorer";
-    }
-  } catch {
-    // ignore
-  }
-  try {
-    const stored = window.localStorage.getItem(SIDEBAR_VIEW_STORAGE_KEY);
-    if (
-      stored === "explorer" ||
-      stored === "source-control" ||
-      stored === "ssh-remote" ||
-      stored === "docker" ||
-      stored === "projects"
-    )
-      return stored;
-  } catch {
-    // ignore
-  }
-  return "explorer";
-}
-
-function clampRightSidebarWidth(width: number): number {
-  return Math.min(
-    RIGHT_SIDEBAR_MAX_WIDTH,
-    Math.max(RIGHT_SIDEBAR_MIN_WIDTH, Math.round(width)),
-  );
-}
-
-function readRightSidebarWidth(): number {
-  try {
-    const stored = window.localStorage.getItem(
-      RIGHT_SIDEBAR_WIDTH_STORAGE_KEY,
-    );
-    const parsed = stored ? Number.parseInt(stored, 10) : NaN;
-    return Number.isFinite(parsed)
-      ? clampRightSidebarWidth(parsed)
-      : RIGHT_SIDEBAR_DEFAULT_WIDTH;
-  } catch {
-    return RIGHT_SIDEBAR_DEFAULT_WIDTH;
-  }
-}
-
-function readRightSidebarView(): RightSidebarViewId {
-  try {
-    const stored = window.localStorage.getItem(RIGHT_SIDEBAR_VIEW_STORAGE_KEY);
-    if (
-      stored === "ai" ||
-      stored === "agents" ||
-      stored === "tasks" ||
-      stored === "history" ||
-      stored === "preview"
-    )
-      return stored;
-  } catch {
-    // ignore
-  }
-  return "ai";
-}
 
 export default function App() {
   const {
@@ -304,6 +174,7 @@ export default function App() {
     openCommitHistoryTab,
     openCommitFileDiffTab,
     closeTab,
+    reorderTab,
     updateTab,
     selectByIndex,
     setLeafCwd,
@@ -350,26 +221,24 @@ export default function App() {
     useState<GitHistorySearchHandle | null>(null);
   const { zoomIn, zoomOut, zoomReset } = useZoom();
   const explorerRef = useRef<FileExplorerHandle>(null);
-  const explorerReturnFocusRef = useRef<HTMLElement | null>(null);
 
-  // On a plain launch (no project dir) both sidebars start collapsed so the
-  // projects dashboard owns the full window. A dir-launched project window
-  // keeps its normal sidebars (explorer etc.). Read once at construction so
-  // re-renders keep the panels' `defaultSize` stable (changing it would yank a
-  // sidebar the user has since opened). Toggling a rail reopens it to the
-  // stored width.
-  const startSidebarsCollapsedRef = useRef(!hasExplicitLaunchDir());
+  const {
+    startSidebarsCollapsedRef,
+    sidebarRef,
+    sidebarWidthRef,
+    sidebarView,
+    persistSidebarView,
+    persistSidebarWidth,
+    toggleSidebar,
+    cycleSidebarView,
+    toggleExplorerFocus,
+    rightSidebarRef,
+    rightSidebarView,
+    persistRightSidebarWidth,
+    toggleRightSidebar,
+    selectRightSidebarView,
+  } = useSidebarState({ explorerRef });
 
-  const sidebarRef = useRef<PanelImperativeHandle | null>(null);
-  const sidebarWidthRef = useRef(readSidebarWidth());
-  const sidebarWidthWriteTimerRef = useRef(0);
-  const [sidebarView, setSidebarViewState] = useState<SidebarViewId>(readSidebarView);
-
-  const rightSidebarRef = useRef<PanelImperativeHandle | null>(null);
-  const rightSidebarWidthRef = useRef(readRightSidebarWidth());
-  const rightSidebarWidthWriteTimerRef = useRef(0);
-  const [rightSidebarView, setRightSidebarViewState] =
-    useState<RightSidebarViewId>(readRightSidebarView);
   // When set (`ssh://alias/path`), the explorer browses a remote SFTP root
   // instead of the local workspace. Cleared by switching workspace or
   // disconnecting.
@@ -383,152 +252,6 @@ export default function App() {
     () => (remoteRoot ? (parseRemote(remoteRoot)?.alias ?? null) : null),
     [remoteRoot],
   );
-  const persistSidebarView = useCallback((view: SidebarViewId) => {
-    setSidebarViewState(view);
-    try {
-      window.localStorage.setItem(SIDEBAR_VIEW_STORAGE_KEY, view);
-    } catch {
-      // storage may fail in private mode
-    }
-  }, []);
-  const toggleSidebar = useCallback(() => {
-    const p = sidebarRef.current;
-    if (!p) return;
-    // `.resize()` (not `.expand()`) so the rail reopens at the stored width even
-    // on the first toggle — panels launch collapsed with no prior size to expand to.
-    if (p.getSize().asPercentage <= 0) p.resize(`${sidebarWidthRef.current}px`);
-    else p.collapse();
-  }, []);
-  const toggleRightSidebar = useCallback(() => {
-    const p = rightSidebarRef.current;
-    if (!p) return;
-    if (p.getSize().asPercentage <= 0)
-      p.resize(`${rightSidebarWidthRef.current}px`);
-    else p.collapse();
-  }, []);
-  const cycleSidebarView = useCallback(
-    (view: SidebarViewId) => {
-      const panel = sidebarRef.current;
-      const collapsed = panel ? panel.getSize().asPercentage <= 0 : false;
-      if (collapsed) {
-        if (panel) panel.resize(`${sidebarWidthRef.current}px`);
-        if (view !== sidebarView) persistSidebarView(view);
-        return;
-      }
-      if (view === sidebarView) {
-        panel?.collapse();
-        return;
-      }
-      persistSidebarView(view);
-    },
-    [persistSidebarView, sidebarView],
-  );
-  const persistSidebarWidth = useCallback((next: number) => {
-    sidebarWidthRef.current = next;
-    if (sidebarWidthWriteTimerRef.current) {
-      window.clearTimeout(sidebarWidthWriteTimerRef.current);
-    }
-    sidebarWidthWriteTimerRef.current = window.setTimeout(() => {
-      sidebarWidthWriteTimerRef.current = 0;
-      try {
-        window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(next));
-      } catch {
-        // ignore
-      }
-    }, 200);
-  }, []);
-  useEffect(() => {
-    return () => {
-      if (sidebarWidthWriteTimerRef.current) {
-        window.clearTimeout(sidebarWidthWriteTimerRef.current);
-      }
-    };
-  }, []);
-
-  const persistRightSidebarView = useCallback((view: RightSidebarViewId) => {
-    setRightSidebarViewState(view);
-    try {
-      window.localStorage.setItem(RIGHT_SIDEBAR_VIEW_STORAGE_KEY, view);
-    } catch {
-      // storage may fail in private mode
-    }
-  }, []);
-  // Selecting the active view again collapses the panel; selecting a different
-  // view (while collapsed) re-expands it. Mirrors the left rail's behavior.
-  const selectRightSidebarView = useCallback(
-    (view: RightSidebarViewId) => {
-      const panel = rightSidebarRef.current;
-      const collapsed = panel ? panel.getSize().asPercentage <= 0 : false;
-      if (collapsed) {
-        if (panel) panel.resize(`${rightSidebarWidthRef.current}px`);
-        if (view !== rightSidebarView) persistRightSidebarView(view);
-        return;
-      }
-      if (view === rightSidebarView) {
-        panel?.collapse();
-        return;
-      }
-      persistRightSidebarView(view);
-    },
-    [persistRightSidebarView, rightSidebarView],
-  );
-  const persistRightSidebarWidth = useCallback((next: number) => {
-    rightSidebarWidthRef.current = next;
-    if (rightSidebarWidthWriteTimerRef.current) {
-      window.clearTimeout(rightSidebarWidthWriteTimerRef.current);
-    }
-    rightSidebarWidthWriteTimerRef.current = window.setTimeout(() => {
-      rightSidebarWidthWriteTimerRef.current = 0;
-      try {
-        window.localStorage.setItem(
-          RIGHT_SIDEBAR_WIDTH_STORAGE_KEY,
-          String(next),
-        );
-      } catch {
-        // ignore
-      }
-    }, 200);
-  }, []);
-  useEffect(() => {
-    return () => {
-      if (rightSidebarWidthWriteTimerRef.current) {
-        window.clearTimeout(rightSidebarWidthWriteTimerRef.current);
-      }
-    };
-  }, []);
-
-  const toggleExplorerFocus = useCallback(() => {
-    const explorer = explorerRef.current;
-    const panel = sidebarRef.current;
-    const collapsed = panel ? panel.getSize().asPercentage <= 0 : false;
-    if (sidebarView !== "explorer" || collapsed) {
-      if (panel && collapsed) panel.resize(`${sidebarWidthRef.current}px`);
-      if (sidebarView !== "explorer") persistSidebarView("explorer");
-      const active = document.activeElement;
-      explorerReturnFocusRef.current =
-        active instanceof HTMLElement && active !== document.body
-          ? active
-          : null;
-      requestAnimationFrame(() => explorerRef.current?.focus());
-      return;
-    }
-    if (!explorer) return;
-    if (explorer.isFocused()) {
-      const target = explorerReturnFocusRef.current;
-      explorerReturnFocusRef.current = null;
-      if (target && document.body.contains(target)) {
-        target.focus();
-      } else {
-        (document.activeElement as HTMLElement | null)?.blur?.();
-      }
-      return;
-    }
-    const active = document.activeElement;
-    explorerReturnFocusRef.current =
-      active instanceof HTMLElement && active !== document.body ? active : null;
-    explorer.focus();
-  }, [persistSidebarView, sidebarView]);
-
   const [home, setHome] = useState<string | null>(null);
   const [pendingCloseTab, setPendingCloseTab] = useState<number | null>(null);
   const workspaceEnv = useWorkspaceEnvStore((s) => s.env);
@@ -693,22 +416,7 @@ export default function App() {
   const activeTab = tabs.find((t) => t.id === activeId);
   const isTerminalTab = activeTab?.kind === "terminal";
   const isEditorTab = activeTab?.kind === "editor";
-  const isPreviewTab = activeTab?.kind === "preview";
-  const isMarkdownTab = activeTab?.kind === "markdown";
-  const isImageTab = activeTab?.kind === "image";
-  const isLogTab = activeTab?.kind === "log";
-  const isDataTab = activeTab?.kind === "data";
-  const isS3Tab = activeTab?.kind === "s3";
-  const isAiDiffTab = activeTab?.kind === "ai-diff";
-  const isGitDiffTab =
-    activeTab?.kind === "git-diff" || activeTab?.kind === "git-commit-file";
   const isGitHistoryTab = activeTab?.kind === "git-history";
-  const isBunqueueTab = activeTab?.kind === "bunqueue";
-  const isDockerTab = activeTab?.kind === "docker-detail";
-  const isAnalyticsTab = activeTab?.kind === "agentlytics";
-  const isCcusageTab = activeTab?.kind === "ccusage";
-  const isProjectsTab = activeTab?.kind === "projects";
-  const isProjectDetailTab = activeTab?.kind === "project-detail";
 
   // When an AI diff is approved (write_file applied to disk), reload any
   // open editor tabs for that path so the user sees the new content. We
@@ -729,120 +437,11 @@ export default function App() {
     }
   }, [tabs]);
 
-  useEffect(() => {
-    type FileWrittenPayload = { path: string; source?: string };
-    const unlistenPromise = getCurrentWebviewWindow().listen<FileWrittenPayload>(
-      "fs:file-written",
-      (event) => {
-        if (event.payload.source === "editor") return;
-        const normalizedPath = event.payload.path.replace(/\\/g, "/");
-        const currentTabs = tabsRef.current;
-        for (const t of currentTabs) {
-          if (t.kind !== "editor") continue;
-          if (t.path.replace(/\\/g, "/") === normalizedPath) {
-            editorRefs.current.get(t.id)?.reload();
-          }
-        }
-      },
-    );
-    return () => {
-      void unlistenPromise.then((un) => un());
-    };
-  }, []);
-
-  const editorWatchRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const want = new Set<string>();
-    for (const t of tabs) if (t.kind === "editor") want.add(parentDir(t.path));
-    const prev = editorWatchRef.current;
-    const toAdd = [...want].filter((d) => !prev.has(d));
-    const toRemove = [...prev].filter((d) => !want.has(d));
-    watchAdd(toAdd);
-    watchRemove(toRemove);
-    editorWatchRef.current = want;
-  }, [tabs]);
-
-  useEffect(() => {
-    let alive = true;
-    let unlisten: (() => void) | undefined;
-    void listenFsChanged((paths) => {
-      const changed = new Set(paths.map((p) => p.replace(/\\/g, "/")));
-      for (const t of tabsRef.current) {
-        if (t.kind !== "editor") continue;
-        if (changed.has(t.path.replace(/\\/g, "/"))) {
-          editorRefs.current.get(t.id)?.reload();
-        }
-      }
-    }).then((un) => {
-      if (alive) unlisten = un;
-      else un();
-    });
-    return () => {
-      alive = false;
-      unlisten?.();
-    };
-  }, []);
+  useFsWatchReload({ tabs, tabsRef, editorRefs });
 
   // Theme editing: a custom theme is materialized to a real file and edited in
   // the code editor. Saving it re-ingests into the runtime store + applies live.
-  useEffect(() => {
-    type FileWrittenPayload = { path: string; source?: string };
-    const unlistenPromise = getCurrentWebviewWindow().listen<FileWrittenPayload>(
-      "fs:file-written",
-      (event) => {
-        if (event.payload.source !== "editor") return;
-        if (!isThemeFilePath(event.payload.path)) return;
-        void (async () => {
-          try {
-            const res = await invoke<{ kind: string; content?: string }>(
-              "fs_read_file",
-              { path: event.payload.path, workspace: currentWorkspaceEnv() },
-            );
-            if (res.kind !== "text" || typeof res.content !== "string") return;
-            const parsed = parseThemeFile(res.content);
-            if (!parsed.ok) {
-              console.warn("[terax] theme not applied:", parsed.error);
-              return;
-            }
-            await saveCustomTheme(parsed.theme);
-          } catch (e) {
-            console.warn("[terax] theme ingest failed:", e);
-          }
-        })();
-      },
-    );
-    return () => {
-      void unlistenPromise.then((un) => un());
-    };
-  }, []);
-
-  useEffect(() => {
-    let alive = true;
-    let unsub: (() => void) | undefined;
-    void onThemeEdit(async (req) => {
-      const theme =
-        req.action === "create"
-          ? starterTheme()
-          : (await listCustomThemes()).find((t) => t.id === req.id);
-      if (!theme) return;
-      if (req.action === "create") await saveCustomTheme(theme);
-      const path = await themeFilePath(theme.id);
-      const open = tabsRef.current.some(
-        (t) => t.kind === "editor" && t.path === path,
-      );
-      if (!open) await writeThemeFile(theme);
-      void persistThemeId(theme.id);
-      openFileTab(path);
-      void getCurrentWebviewWindow().setFocus();
-    }).then((fn) => {
-      if (alive) unsub = fn;
-      else fn();
-    });
-    return () => {
-      alive = false;
-      unsub?.();
-    };
-  }, [openFileTab]);
+  useThemeIngest({ tabsRef, openFileTab });
 
   const { explorerRoot, inheritedCwdForNewTab } = useWorkspaceCwd(
     activeTab,
@@ -1326,17 +925,7 @@ export default function App() {
     [openFileTab, newDataTab, newImageTab, newLogTab, newMarkdownTab],
   );
 
-  // "Open with Terax Camelot" on a file: the backend cd'd the workspace into
-  // the file's parent dir; here we open the file itself in the editor. Fires
-  // once on mount. Local files only (remote launch goes through ssh above).
-  const launchFileOpenedRef = useRef(false);
-  useEffect(() => {
-    if (launchFileOpenedRef.current) return;
-    const file = getLaunchFile();
-    if (!file || isRemote(file)) return;
-    launchFileOpenedRef.current = true;
-    handleOpenFile(file, true);
-  }, [handleOpenFile]);
+  useLaunchFile(handleOpenFile);
 
   // Context-menu "Preview Data" — same destination as a click on a data file,
   // exposed explicitly so the action is discoverable.
@@ -1754,301 +1343,40 @@ export default function App() {
 
   const activeCwd = activeTerminalLeafCwd;
 
-  useEffect(() => {
-    const findCwd = () => {
-      const active = tabs.find((x) => x.id === activeId);
-      if (active?.kind === "terminal") {
-        return findLeafCwd(active.paneTree, active.activeLeafId) ?? active.cwd ?? null;
-      }
-      for (let i = tabs.length - 1; i >= 0; i--) {
-        const t = tabs[i];
-        if (t.kind !== "terminal") continue;
-        const cwd = findLeafCwd(t.paneTree, t.activeLeafId) ?? t.cwd;
-        if (cwd) return cwd;
-      }
-      return explorerRoot ?? launchCwd ?? home ?? null;
-    };
-
-    setLive({
-      getCwd: findCwd,
-      getTerminalContext: () => {
-        const t = tabs.find((x) => x.id === activeId);
-        if (t?.kind !== "terminal") return null;
-        if (t.private) return null;
-        const buf = terminalRefs.current.get(t.activeLeafId)?.getBuffer(300);
-        return buf ? redactSensitive(buf) : null;
-      },
-      isActiveTerminalPrivate: () => {
-        const t = tabs.find((x) => x.id === activeId);
-        return t?.kind === "terminal" && t.private === true;
-      },
-      injectIntoActivePty: (text) => {
-        const t = tabs.find((x) => x.id === activeId);
-        if (t?.kind !== "terminal") return false;
-        const term = terminalRefs.current.get(t.activeLeafId);
-        if (!term) return false;
-        term.write(text);
-        term.focus();
-        return true;
-      },
-      getWorkspaceRoot: () => explorerRoot ?? launchCwd ?? home ?? null,
-      getActiveFile: () => {
-        const t = tabs.find((x) => x.id === activeId);
-        return t?.kind === "editor" ? t.path : null;
-      },
-      openPreview: (url: string) => {
-        openPreviewTab(url);
-        return true;
-      },
-      spawnManagedAgent: (prompt: string, sessionId: string) => {
-        const trimmed = prompt.trim();
-        if (!trimmed) return null;
-        const oneLine = trimmed.replace(/\s*\r?\n\s*/g, " ");
-        const cwd = findCwd();
-        const short = oneLine.length > 32 ? `${oneLine.slice(0, 32)}…` : oneLine;
-        const { tabId, leafId } = newAgentTab(cwd ?? undefined, `claude · ${short}`);
-        useManagedAgentsStore
-          .getState()
-          .register({ leafId, tabId, sessionId, task: oneLine, cwd });
-        const hooksReady = invoke("agent_enable_claude_hooks").catch(() => {});
-        void (async () => {
-          await Promise.all([whenSessionReady(leafId), hooksReady]);
-          if (!writeToSession(leafId, "claude\r")) {
-            useManagedAgentsStore.getState().remove(leafId);
-            return;
-          }
-          const readBuf = () => {
-            const term = terminalRefs.current.get(leafId);
-            return term ? term.getBuffer(120) : null;
-          };
-          const result = await waitForClaudeTuiReady(readBuf);
-          if (result !== "ready") {
-            if (result === "timeout") {
-              console.warn(
-                "[terax] Claude TUI did not appear in time; aborting prompt send",
-              );
-            }
-            useManagedAgentsStore.getState().remove(leafId);
-            return;
-          }
-          if (!writeToSession(leafId, `\x1b[200~${trimmed}\x1b[201~`)) {
-            useManagedAgentsStore.getState().remove(leafId);
-            return;
-          }
-          setTimeout(() => writeToSession(leafId, "\r"), 120);
-          useManagedAgentsStore.getState().setPhase(leafId, "working");
-        })();
-        return { tabId, leafId };
-      },
-      readLeafBuffer: (leafId: number) => {
-        const buf = terminalRefs.current.get(leafId)?.getBuffer(300);
-        return buf ? redactSensitive(buf) : null;
-      },
-    });
-  }, [
-    setLive,
-    activeId,
+  useLiveBridge({
     tabs,
+    activeId,
     explorerRoot,
     launchCwd,
     home,
+    terminalRefs,
     openPreviewTab,
     newAgentTab,
-  ]);
+    setLive,
+  });
 
   const workspaceSurface = (
-    <div className="relative h-full min-h-0">
-      <div
-        className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
-          !isTerminalTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isTerminalTab}
-      >
-        <TerminalStack
-          tabs={tabs}
-          activeId={activeId}
-          registerHandle={registerTerminalHandle}
-          onSearchReady={handleSearchReady}
-          onCwd={handleTerminalCwd}
-          onExit={handleLeafExit}
-          onFocusLeaf={handleFocusLeaf}
-          onClosePane={closePaneByLeaf}
-        />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
-          !isEditorTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isEditorTab}
-      >
-        <EditorStack
-          tabs={tabs}
-          activeId={activeId}
-          registerHandle={registerEditorHandle}
-          onDirtyChange={handleEditorDirty}
-          onCloseTab={disposeTab}
-        />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
-          !isPreviewTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isPreviewTab}
-      >
-        <PreviewStack
-          tabs={tabs}
-          activeId={activeId}
-          registerHandle={registerPreviewHandle}
-          onUrlChange={handlePreviewUrl}
-        />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
-          !isMarkdownTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isMarkdownTab}
-      >
-        <MarkdownStack tabs={tabs} activeId={activeId} />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
-          !isImageTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isImageTab}
-      >
-        <ImageStack tabs={tabs} activeId={activeId} />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
-          !isLogTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isLogTab}
-      >
-        <LogStack tabs={tabs} activeId={activeId} />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
-          !isDataTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isDataTab}
-      >
-        <DataStack tabs={tabs} activeId={activeId} />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
-          !isS3Tab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isS3Tab}
-      >
-        <S3Stack tabs={tabs} activeId={activeId} />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
-          !isAiDiffTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isAiDiffTab}
-      >
-        <AiDiffStack
-          tabs={tabs}
-          activeId={activeId}
-          onAccept={(id) => respondToApproval(id, true)}
-          onReject={(id) => respondToApproval(id, false)}
-        />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
-          !isGitDiffTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isGitDiffTab}
-      >
-        <GitDiffStack tabs={tabs} activeId={activeId} />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0",
-          !isGitHistoryTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isGitHistoryTab}
-      >
-        <GitHistoryStack
-          tabs={tabs}
-          activeId={activeId}
-          onOpenCommitFile={openCommitFileDiffTab}
-          onSearchHandle={setGitHistoryHandle}
-        />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0",
-          !isBunqueueTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isBunqueueTab}
-      >
-        <BunqueueStack tabs={tabs} activeId={activeId} />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0 px-3 pt-2 pb-2",
-          !isDockerTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isDockerTab}
-      >
-        <DockerDetailStack tabs={tabs} activeId={activeId} />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0",
-          !isAnalyticsTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isAnalyticsTab}
-      >
-        <AnalyticsStack tabs={tabs} activeId={activeId} />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0",
-          !isCcusageTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isCcusageTab}
-      >
-        <CcusageStack tabs={tabs} activeId={activeId} />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0",
-          !isProjectsTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isProjectsTab}
-      >
-        <ProjectsDashboard
-          onOpenProject={openProject}
-          onOpenDetail={openProjectDetail}
-        />
-      </div>
-      <div
-        className={cn(
-          "absolute inset-0",
-          !isProjectDetailTab && "invisible pointer-events-none",
-        )}
-        aria-hidden={!isProjectDetailTab}
-      >
-        <ProjectDetailStack
-          tabs={tabs}
-          activeId={activeId}
-          onOpenProject={openProject}
-        />
-      </div>
-    </div>
+    <TabStackRouter
+      tabs={tabs}
+      activeId={activeId}
+      activeKind={activeTab?.kind}
+      registerTerminalHandle={registerTerminalHandle}
+      onSearchReady={handleSearchReady}
+      onTerminalCwd={handleTerminalCwd}
+      onLeafExit={handleLeafExit}
+      onFocusLeaf={handleFocusLeaf}
+      onClosePane={closePaneByLeaf}
+      registerEditorHandle={registerEditorHandle}
+      onEditorDirty={handleEditorDirty}
+      onCloseEditorTab={disposeTab}
+      registerPreviewHandle={registerPreviewHandle}
+      onPreviewUrl={handlePreviewUrl}
+      onApprovalRespond={respondToApproval}
+      onOpenCommitFile={openCommitFileDiffTab}
+      onGitHistorySearchHandle={setGitHistoryHandle}
+      onOpenProject={openProject}
+      onOpenProjectDetail={openProjectDetail}
+    />
   );
 
   const shell = (
@@ -2069,6 +1397,7 @@ export default function App() {
             onOpenCcusage={() => openCcusageTab()}
             onClose={handleClose}
             onPin={pinTab}
+            onReorder={reorderTab}
             onToggleSidebar={toggleSidebar}
             onToggleRightSidebar={toggleRightSidebar}
             onSplit={splitActivePaneInActiveTab}
