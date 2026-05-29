@@ -586,7 +586,17 @@ export function useTerminalSession({
     s.visibleNow = visible;
     s.focusedNow = focused;
     if (visible) {
-      if (s.container && !s.hasSlot) bindLeafToSlot(leafId, s);
+      if (s.container && !s.hasSlot) {
+        bindLeafToSlot(leafId, s);
+        // A pane that is visible at first paint (e.g. the terminal is the
+        // active tab at window launch) can bind before its ResizablePanel has
+        // laid out, so the eager fit() in bindSlot measures 0×0. Re-fit on the
+        // next frame, once layout has settled, so the grid + PTY get real dims
+        // even if the ResizeObserver hasn't fired yet.
+        requestAnimationFrame(() => {
+          if (!s.disposed && sessions.get(leafId)?.hasSlot) refitLeaf(leafId);
+        });
+      }
       setSlotFocused(leafId, focused);
       if (focused) focusSlot(leafId);
     } else if (s.hasSlot) {

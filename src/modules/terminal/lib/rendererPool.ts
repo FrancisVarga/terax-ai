@@ -513,9 +513,16 @@ function setupResizeObserver(slot: Slot, p: AcquireParams): void {
       if (slot.currentLeafId !== p.leafId) return;
       const w = slot.pendingW;
       const h = slot.pendingH;
-      if (w === slot.lastW && h === slot.lastH) return;
+      // Skip only when the box is unchanged AND already non-zero. A pane that
+      // binds before its panel has laid out (e.g. a terminal that is the active
+      // tab at window launch) measures 0×0 on the eager fit; without this the
+      // guard would treat the first real 0→0 observation as "settled" and the
+      // corrective fit, once the panel sizes up, could be suppressed. Treating
+      // any zero dimension as not-yet-settled guarantees the refit runs.
+      if (w === slot.lastW && h === slot.lastH && w > 0 && h > 0) return;
       slot.lastW = w;
       slot.lastH = h;
+      if (w <= 0 || h <= 0) return; // nothing to fit against yet
       slot.fitAddon.fit();
       if (slot.ptyTimer) clearTimeout(slot.ptyTimer);
       slot.ptyTimer = setTimeout(flushPty, PTY_RESIZE_DEBOUNCE_MS);
