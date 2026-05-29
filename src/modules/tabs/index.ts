@@ -14,6 +14,7 @@ export {
   type BunqueueTab,
   type DockerDetailTab,
   type AnalyticsTab,
+  type CcusageTab,
   type ProjectsTab,
   type ProjectDetailTab,
   type AiDiffStatus,

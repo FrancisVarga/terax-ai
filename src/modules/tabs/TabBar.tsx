@@ -13,6 +13,7 @@ import {
   Cancel01Icon,
   ChartLineData01Icon,
   Clock01Icon,
+  Coins01Icon,
   ComputerTerminal02Icon,
   ContainerIcon,
   Database02Icon,
@@ -39,6 +40,7 @@ type Props = {
   onNewGitGraph: () => void;
   onOpenBunqueue: () => void;
   onOpenAnalytics: () => void;
+  onOpenCcusage: () => void;
   onClose: (id: number) => void;
   /** Pin (promote) a preview tab to persistent on double-click. */
   onPin: (id: number) => void;
@@ -56,6 +58,7 @@ export function TabBar({
   onNewGitGraph,
   onOpenBunqueue,
   onOpenAnalytics,
+  onOpenCcusage,
   onClose,
   onPin,
   compact,
@@ -236,6 +239,10 @@ export function TabBar({
               />
               <span className="flex-1">Agentlytics</span>
             </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onOpenCcusage()}>
+              <HugeiconsIcon icon={Coins01Icon} size={14} strokeWidth={1.75} />
+              <span className="flex-1">ccusage</span>
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -328,6 +335,16 @@ function TabIcon({ tab }: { tab: Tab }) {
       />
     );
   }
+  if (tab.kind === "ccusage") {
+    return (
+      <HugeiconsIcon
+        icon={Coins01Icon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
+    );
+  }
   if (tab.kind === "projects" || tab.kind === "project-detail") {
     return (
       <HugeiconsIcon
@@ -359,6 +376,7 @@ function labelFor(t: Tab): string {
   if (t.kind === "bunqueue") return t.title;
   if (t.kind === "docker-detail") return t.title;
   if (t.kind === "agentlytics") return t.title;
+  if (t.kind === "ccusage") return t.title;
   if (t.kind === "projects") return t.title;
   if (t.kind === "project-detail") return t.title;
   if (!t.cwd) return t.title;

@@ -10,9 +10,9 @@
 //! top-N logic lives here in [`aggregate`] so adding a new source is one more
 //! parser, not another copy of the math.
 
-mod claude;
-mod cursor;
-mod gemini;
+pub(crate) mod claude;
+pub(crate) mod cursor;
+pub(crate) mod gemini;
 
 use serde::Serialize;
 use std::collections::HashMap;
@@ -44,6 +44,15 @@ pub struct Msg {
     pub tokens_known: bool,
     /// Tool names invoked in this message (assistant tool calls).
     pub tools: Vec<String>,
+    /// `message.id` from the transcript, when present. Combined with
+    /// [`request_id`](Self::request_id) it forms the ccusage dedup key.
+    pub message_id: Option<String>,
+    /// `requestId` from the transcript, when present.
+    pub request_id: Option<String>,
+    /// Pre-computed `costUSD` baked into the transcript line, when the agent
+    /// persisted one. Used by the ccusage `display`/`auto` cost modes; `None`
+    /// means fall back to the calculated price.
+    pub cost_usd: Option<f64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -79,7 +88,7 @@ pub fn est_tokens_from_chars(chars: usize) -> u64 {
 }
 
 const DAILY_WINDOW: i64 = 90;
-const MS_PER_DAY: i64 = 86_400_000;
+pub(crate) const MS_PER_DAY: i64 = 86_400_000;
 
 /// Per-model pricing in USD per 1M tokens, `(input, output)`. Matched by
 /// case-insensitive substring so versioned ids (`claude-opus-4-7`,
@@ -110,7 +119,10 @@ const BLENDED_PER_1M: f64 = 5.0;
 const CACHE_READ_MULT: f64 = 0.10;
 const CACHE_CREATE_MULT: f64 = 1.25;
 
-fn cost_usd(model: Option<&str>, m: &Msg) -> f64 {
+/// Calculated USD cost for a message from its token counts and the pricing
+/// table — the single source of truth shared by agentscan and the ccusage
+/// module's `calculate`/`auto` cost modes.
+pub(crate) fn cost_for_msg(model: Option<&str>, m: &Msg) -> f64 {
     let (pin, pout) = price_for(model);
     (m.input_tokens as f64 / 1_000_000.0) * pin
         + (m.output_tokens as f64 / 1_000_000.0) * pout
@@ -226,7 +238,7 @@ fn empty_analytics(now_ms: i64, tz_offset_ms: i64) -> Analytics {
 /// Local `YYYY-MM-DD` for an epoch-ms instant. Uses a fixed-offset day bucket
 /// derived from the host's current UTC offset so chart days line up with the
 /// user's wall clock without pulling in chrono.
-fn day_key(ts_ms: i64, tz_offset_ms: i64) -> String {
+pub(crate) fn day_key(ts_ms: i64, tz_offset_ms: i64) -> String {
     let local = ts_ms + tz_offset_ms;
     let days = local.div_euclid(MS_PER_DAY);
     let (y, m, d) = civil_from_days(days);
@@ -241,7 +253,7 @@ fn hour_of(ts_ms: i64, tz_offset_ms: i64) -> usize {
 
 /// Howard Hinnant's days-from-civil inverse (public-domain algorithm). Avoids a
 /// date crate for the only calendar math we need.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
+pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -372,7 +384,7 @@ fn aggregate(results: Vec<SourceResult>, now_ms: i64, tz_offset_ms: i64) -> Anal
             sb.est_tokens += tokens;
             out.est_input_tokens += in_tok;
             out.est_output_tokens += out_tok;
-            out.est_cost_usd += cost_usd(m.model.as_deref(), m);
+            out.est_cost_usd += cost_for_msg(m.model.as_deref(), m);
 
             let key = day_key(m.ts_ms, tz_offset_ms);
             active_days.insert(key.clone());
@@ -497,6 +509,9 @@ mod tests {
             cache_creation_tokens: 0,
             tokens_known: true,
             tools: Vec::new(),
+            message_id: None,
+            request_id: None,
+            cost_usd: None,
         }
     }
 
@@ -542,7 +557,7 @@ mod tests {
         m.cache_read_tokens = 1_000_000;
         m.cache_creation_tokens = 1_000_000;
         // 15 (in) + 75 (out) + 15*0.10 (read) + 15*1.25 (create) = 15+75+1.5+18.75
-        let c = cost_usd(m.model.as_deref(), &m);
+        let c = cost_for_msg(m.model.as_deref(), &m);
         assert!((c - 110.25).abs() < 1e-6, "got {c}");
     }
 

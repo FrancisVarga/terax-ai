@@ -112,6 +112,12 @@ export type AnalyticsTab = {
   title: string;
 };
 
+export type CcusageTab = {
+  id: number;
+  kind: "ccusage";
+  title: string;
+};
+
 export type ProjectsTab = {
   id: number;
   kind: "projects";
@@ -150,6 +156,7 @@ export type Tab =
   | BunqueueTab
   | DockerDetailTab
   | AnalyticsTab
+  | CcusageTab
   | ProjectsTab
   | ProjectDetailTab;
 
@@ -641,6 +648,23 @@ export function useTabs(
     return targetId;
   }, []);
 
+  /** Open (or focus) the singleton ccusage token/cost dashboard tab. */
+  const openCcusageTab = useCallback(() => {
+    let targetId: number | null = null;
+    setTabs((curr) => {
+      const existing = curr.find((t) => t.kind === "ccusage");
+      if (existing) {
+        targetId = existing.id;
+        return curr;
+      }
+      const id = nextIdRef.current++;
+      targetId = id;
+      return [...curr, { id, kind: "ccusage", title: "ccusage" }];
+    });
+    if (targetId !== null) setActiveId(targetId);
+    return targetId;
+  }, []);
+
   const newMarkdownTab = useCallback((path: string) => {
     let targetId: number | null = null;
     setTabs((curr) => {
@@ -1059,6 +1083,7 @@ export function useTabs(
     openProjectsTab,
     openProjectDetailTab,
     openAnalyticsTab,
+    openCcusageTab,
     openDockerDetailTab,
     openAiDiffTab,
     openGitDiffTab,

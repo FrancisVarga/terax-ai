@@ -9,33 +9,53 @@ use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 
-fn projects_dir() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".claude").join("projects"))
+/// Every `projects` dir Claude Code may write transcripts to, matching
+/// ccusage's discovery: `$CLAUDE_CONFIG_DIR` (a `,`-separated list of config
+/// roots) plus the default `~/.claude` and `~/.config/claude`. Returns only
+/// dirs that exist, de-duplicated so an overlapping env var doesn't double-count.
+fn projects_dirs() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut push = |p: PathBuf| {
+        let dir = p.join("projects");
+        if !roots.contains(&dir) {
+            roots.push(dir);
+        }
+    };
+
+    if let Ok(cfg) = std::env::var("CLAUDE_CONFIG_DIR") {
+        for part in cfg.split(',') {
+            let part = part.trim();
+            if !part.is_empty() {
+                push(PathBuf::from(part));
+            }
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        push(home.join(".claude"));
+        push(home.join(".config").join("claude"));
+    }
+
+    roots.into_iter().filter(|d| d.is_dir()).collect()
 }
 
 pub fn scan() -> SourceResult {
     let mut messages = Vec::new();
     let mut session_ids = std::collections::HashSet::new();
 
-    let Some(root) = projects_dir() else {
+    let dirs = projects_dirs();
+    if dirs.is_empty() {
         return SourceResult {
             source: Source::Claude,
             messages,
             session_ids: Vec::new(),
-            error: Some("could not resolve home dir".into()),
-        };
-    };
-    if !root.is_dir() {
-        return SourceResult {
-            source: Source::Claude,
-            messages,
-            session_ids: Vec::new(),
-            error: Some("no ~/.claude/projects directory".into()),
+            error: Some("no Claude config dir (~/.claude, ~/.config/claude, $CLAUDE_CONFIG_DIR)".into()),
         };
     }
 
     let mut files = Vec::new();
-    collect_jsonl(&root, &mut files);
+    for root in &dirs {
+        collect_jsonl(root, &mut files);
+    }
 
     for path in files {
         // The file stem is the session UUID; use it as a fallback session id.
@@ -117,6 +137,22 @@ fn parse_line(v: &Value, file_session: &str) -> Option<Msg> {
         .filter(|m| !m.is_empty() && *m != "<synthetic>")
         .map(|s| s.to_string());
 
+    // ccusage dedup keys: `message.id` + top-level `requestId`. costUSD is
+    // sometimes baked into the line (sibling of `message`, occasionally nested);
+    // captured for the ccusage `display`/`auto` cost modes.
+    let message_id = message
+        .get("id")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+    let request_id = v
+        .get("requestId")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+    let cost_usd = v
+        .get("costUSD")
+        .or_else(|| message.get("costUSD"))
+        .and_then(Value::as_f64);
+
     // Token usage. Cache reads/creations are real billed input, so fold them
     // into the input total. Assistant turns carry usage; user turns usually
     // don't (estimate from text instead).
@@ -193,6 +229,9 @@ fn parse_line(v: &Value, file_session: &str) -> Option<Msg> {
         cache_creation_tokens,
         tokens_known,
         tools,
+        message_id,
+        request_id,
+        cost_usd,
     })
 }
 

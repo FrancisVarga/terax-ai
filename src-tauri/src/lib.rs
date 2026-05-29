@@ -1,7 +1,8 @@
 pub mod modules;
 
 use modules::{
-    agent, agentscan, bunqueue, docker, fs, git, gpu, net, pty, secrets, shell, ssh, workspace,
+    agent, agentscan, bunqueue, ccusage, docker, fs, git, gpu, net, pty, secrets, shell, ssh,
+    workspace,
 };
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
@@ -331,6 +332,7 @@ pub fn run() {
             agent::agent_enable_claude_hooks,
             agent::agent_claude_hooks_status,
             agentscan::agentscan_collect,
+            ccusage::ccusage_collect,
             secrets::secrets_get,
             secrets::secrets_set,
             secrets::secrets_delete,

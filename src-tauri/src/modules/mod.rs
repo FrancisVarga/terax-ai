@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod agentscan;
 pub mod bunqueue;
+pub mod ccusage;
 pub mod docker;
 pub mod fs;
 pub mod git;

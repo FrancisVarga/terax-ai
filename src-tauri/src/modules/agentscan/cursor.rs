@@ -196,6 +196,9 @@ fn parse_bubble(v: &Value, composer_id: &str) -> Option<Msg> {
         cache_creation_tokens: 0,
         tokens_known,
         tools: Vec::new(),
+        message_id: None,
+        request_id: None,
+        cost_usd: None,
     })
 }
 

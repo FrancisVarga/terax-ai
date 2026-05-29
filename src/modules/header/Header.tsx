@@ -18,6 +18,7 @@ import { TabBar } from "@/modules/tabs";
 import { NotificationBell } from "@/modules/agents";
 import {
   ChartLineData01Icon,
+  Coins01Icon,
   GridViewIcon,
   LayoutTwoColumnIcon,
   LayoutTwoRowIcon,
@@ -44,6 +45,7 @@ type Props = {
   onNewGitGraph: () => void;
   onOpenBunqueue: () => void;
   onOpenAnalytics: () => void;
+  onOpenCcusage: () => void;
   onClose: (id: number) => void;
   /** Promote a preview (transient) tab to persistent. */
   onPin: (id: number) => void;
@@ -72,6 +74,7 @@ export function Header({
   onNewGitGraph,
   onOpenBunqueue,
   onOpenAnalytics,
+  onOpenCcusage,
   onClose,
   onPin,
   onToggleSidebar,
@@ -143,6 +146,18 @@ export function Header({
       title="Agentlytics — local AI analytics"
     >
       <HugeiconsIcon icon={ChartLineData01Icon} size={16} strokeWidth={1.75} />
+    </Button>
+  );
+
+  const ccusageButton = (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+      onClick={onOpenCcusage}
+      title="ccusage — token & cost reports"
+    >
+      <HugeiconsIcon icon={Coins01Icon} size={16} strokeWidth={1.75} />
     </Button>
   );
 
@@ -232,6 +247,7 @@ export function Header({
           onNewGitGraph={onNewGitGraph}
           onOpenBunqueue={onOpenBunqueue}
           onOpenAnalytics={onOpenAnalytics}
+          onOpenCcusage={onOpenCcusage}
           onClose={onClose}
           onPin={onPin}
           compact={compact}
@@ -248,6 +264,7 @@ export function Header({
             onActivateLocal={onActivateLocalAgent}
           />
           {analyticsButton}
+          {ccusageButton}
           {rightSidebarButton}
           {settingsButton}
         </>
@@ -256,6 +273,7 @@ export function Header({
       {!IS_MAC && (
         <>
           {analyticsButton}
+          {ccusageButton}
           {rightSidebarButton}
           {settingsButton}
         </>

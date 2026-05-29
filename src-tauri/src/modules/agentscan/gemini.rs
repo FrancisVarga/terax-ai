@@ -174,6 +174,9 @@ fn parse_turn(turn: &Value, session_id: &str) -> Option<Msg> {
         cache_creation_tokens: 0,
         tokens_known: false,
         tools: Vec::new(),
+        message_id: None,
+        request_id: None,
+        cost_usd: None,
     })
 }
 

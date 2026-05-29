@@ -84,6 +84,7 @@ import {
 } from "@/modules/shortcuts";
 import { DockerDetailStack, DockerPanel } from "@/modules/docker";
 import { AnalyticsStack } from "@/modules/agentlytics";
+import { CcusageStack } from "@/modules/ccusage";
 import {
   AddProjectDialog,
   ProjectDetailStack,
@@ -281,6 +282,7 @@ export default function App() {
     newMarkdownTab,
     openBunqueueTab,
     openAnalyticsTab,
+    openCcusageTab,
     openProjectDetailTab,
     openDockerDetailTab,
     openAiDiffTab,
@@ -687,6 +689,7 @@ export default function App() {
   const isBunqueueTab = activeTab?.kind === "bunqueue";
   const isDockerTab = activeTab?.kind === "docker-detail";
   const isAnalyticsTab = activeTab?.kind === "agentlytics";
+  const isCcusageTab = activeTab?.kind === "ccusage";
   const isProjectsTab = activeTab?.kind === "projects";
   const isProjectDetailTab = activeTab?.kind === "project-detail";
 
@@ -1909,6 +1912,15 @@ export default function App() {
       <div
         className={cn(
           "absolute inset-0",
+          !isCcusageTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isCcusageTab}
+      >
+        <CcusageStack tabs={tabs} activeId={activeId} />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0",
           !isProjectsTab && "invisible pointer-events-none",
         )}
         aria-hidden={!isProjectsTab}
@@ -1949,6 +1961,7 @@ export default function App() {
             onNewGitGraph={openGitGraphFromContext}
             onOpenBunqueue={() => openBunqueueTab()}
             onOpenAnalytics={() => openAnalyticsTab()}
+            onOpenCcusage={() => openCcusageTab()}
             onClose={handleClose}
             onPin={pinTab}
             onToggleSidebar={toggleSidebar}
