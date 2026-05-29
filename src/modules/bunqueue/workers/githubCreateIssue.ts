@@ -6,7 +6,14 @@
  * `github-create-issue` jobs by shelling out to the GitHub CLI.
  *
  * Auth: `gh` uses its own stored credentials (`gh auth login` / GH_TOKEN), so
- * this worker never handles tokens itself.
+ * this worker never handles tokens itself. SECURITY: because gh runs with the
+ * user's ambient credentials, a job can create an issue in ANY repo that token
+ * can reach (confused-deputy). The enqueue path is the trust boundary — only
+ * code that already runs with the user's authority (the Tauri backend / the
+ * webview it controls) should be able to enqueue `github-create-issue` jobs,
+ * and the `repo`/`cwd` it passes should be constrained to the active workspace.
+ * This worker additionally redacts any token-shaped strings from gh/git output
+ * before they land in a job result or log (see redactSecrets).
  *
  * Job payload (see CreateIssuePayload). The processor's return value is stored
  * as the job result; throwing routes the job to retry/DLQ per server policy.
@@ -81,6 +88,23 @@ function validate(data: unknown): CreateIssuePayload {
   };
 }
 
+/**
+ * Strip anything that looks like a credential from gh/git output before it
+ * reaches a job result or log. `gh`/`git` can echo token-tagged remote URLs
+ * (https://x-access-token:<TOKEN>@github.com/...) or `GH_TOKEN=...` on failure;
+ * those must never be persisted as a job error.
+ */
+function redactSecrets(text: string): string {
+  return text
+    // userinfo in URLs: scheme://user:secret@host  ->  scheme://***@host
+    .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^@\s/]+(@)/gi, "$1***$2")
+    // bare github/gh tokens
+    .replace(/\bgh[opsu]_[A-Za-z0-9]{20,}\b/g, "***")
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "***")
+    // KEY=secret style env leaks for token-ish keys
+    .replace(/\b([A-Z_]*TOKEN|GH_TOKEN|GITHUB_TOKEN)=\S+/g, "$1=***");
+}
+
 /** Run a command in `cwd`, returning trimmed stdout. Throws on non-zero exit. */
 async function run(
   cmd: string[],
@@ -98,9 +122,8 @@ async function run(
     proc.exited,
   ]);
   if (exitCode !== 0) {
-    throw new Error(
-      `${cmd.join(" ")} failed (exit ${exitCode}): ${stderr.trim() || stdout.trim()}`,
-    );
+    const detail = redactSecrets(stderr.trim() || stdout.trim());
+    throw new Error(`${cmd[0]} failed (exit ${exitCode}): ${detail}`);
   }
   return stdout.trim();
 }
