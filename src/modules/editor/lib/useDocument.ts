@@ -2,11 +2,34 @@ import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { currentWorkspaceEnv } from "@/modules/workspace";
 import { usePreferencesStore } from "@/modules/settings/preferences";
+import {
+  parseRemote,
+  readRemoteFile,
+  writeRemoteFile,
+} from "@/modules/explorer/lib/remote";
 
 type ReadResult =
   | { kind: "text"; content: string; size: number }
   | { kind: "binary"; size: number }
   | { kind: "toolarge"; size: number; limit: number };
+
+/**
+ * Read a document, routing `ssh://alias/path` URIs to the SFTP backend and
+ * local paths to `fs_read_file`. The remote read returns raw text (no binary /
+ * too-large classification — the explorer already gates which files open as
+ * text), so it is wrapped as a text `ReadResult` to keep one state machine.
+ */
+async function readDoc(path: string): Promise<ReadResult> {
+  const ref = parseRemote(path);
+  if (ref) {
+    const content = await readRemoteFile(ref.alias, ref.path);
+    return { kind: "text", content, size: content.length };
+  }
+  return invoke<ReadResult>("fs_read_file", {
+    path,
+    workspace: currentWorkspaceEnv(),
+  });
+}
 
 export type DocumentState =
   | { status: "loading" }
@@ -49,12 +72,17 @@ export function useDocument({ path, onDirtyChange }: Options) {
 
   const saveNow = useCallback(async () => {
     const content = bufferRef.current;
-    await invoke("fs_write_file", {
-      path,
-      content,
-      workspace: currentWorkspaceEnv(),
-      source: "editor",
-    });
+    const ref = parseRemote(path);
+    if (ref) {
+      await writeRemoteFile(ref.alias, ref.path, content);
+    } else {
+      await invoke("fs_write_file", {
+        path,
+        content,
+        workspace: currentWorkspaceEnv(),
+        source: "editor",
+      });
+    }
     savedRef.current = content;
     setDirty(false);
   }, [path]);
@@ -74,7 +102,7 @@ export function useDocument({ path, onDirtyChange }: Options) {
     setDoc({ status: "loading" });
     setDirty(false);
 
-    invoke<ReadResult>("fs_read_file", { path, workspace: currentWorkspaceEnv() })
+    readDoc(path)
       .then((res) => {
         if (cancelled) return;
         if (res.kind === "text") {
@@ -108,10 +136,7 @@ export function useDocument({ path, onDirtyChange }: Options) {
   // matches the buffer (self-save / duplicate watcher event → no re-render).
   const reload = useCallback((): boolean => {
     if (dirtyRef.current) return false;
-    void invoke<ReadResult>("fs_read_file", {
-      path,
-      workspace: currentWorkspaceEnv(),
-    })
+    void readDoc(path)
       .then((res) => {
         if (res.kind === "text") {
           if (res.content === savedRef.current) return;

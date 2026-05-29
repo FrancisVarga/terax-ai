@@ -101,6 +101,28 @@ russh = "0.45"
 russh-sftp = "2"
 russh-keys = "0.45"
 async-trait = "0.1"
+# OTEL collector. opentelemetry-proto ships pre-generated prost message types
+# (gen-tonic-messages, NOT gen-tonic — no gRPC/tonic/protoc), and `with-serde`
+# adds the OTLP/JSON-correct codecs: trace/span ids as hex strings and int64
+# fields as decimal strings. The same `Export*ServiceRequest` struct decodes
+# from both protobuf (prost) and JSON (serde) wire formats. trace/logs/metrics
+# gate the per-signal module paths. prost is the decoder for the binary wire.
+opentelemetry-proto = { version = "0.32", default-features = false, features = [
+	"gen-tonic-messages",
+	"with-serde",
+	"trace",
+	"logs",
+	"metrics",
+] }
+prost = "0.14"
+# Embedded loopback HTTP/1.1 server for OTLP/HTTP ingest. hyper + http-body-util
+# are already in the tree via reqwest; we only switch on hyper's `server`
+# feature. flate2 (miniz_oxide backend, no C) is already present via parquet and
+# decompresses gzip-encoded OTLP request bodies.
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
+flate2 = "1"
 
 [dev-dependencies]
 proptest = "1"

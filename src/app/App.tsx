@@ -121,7 +121,14 @@ import {
   type SshHost,
 } from "@/modules/ssh-remote";
 import { StatusBar } from "@/modules/statusbar";
-import { MAX_PANES_PER_TAB, useTabs, useWorkspaceCwd } from "@/modules/tabs";
+import {
+  MAX_PANES_PER_TAB,
+  useStableTabSlice,
+  useTabs,
+  useWorkspaceCwd,
+  type GitCommitFileDiffTab,
+  type GitDiffTab,
+} from "@/modules/tabs";
 import {
   bindRemoteCwd,
   buildRemoteCwdHookCommand,
@@ -336,6 +343,32 @@ export default function App() {
     return t && t.kind === "terminal" ? t : null;
   }, [tabs, activeId]);
   const activeLeafId = activeTerminalTab?.activeLeafId ?? null;
+
+  // Referentially-stable per-kind slices. The single `tabs` array changes on
+  // every tab mutation — including `setLeafCwd`, which fires at keystroke rate —
+  // so passing `tabs` straight to each content Stack re-renders all of them on
+  // any change. These slices keep their reference when their own kind is
+  // unchanged, so the (now `React.memo`-wrapped) Stacks bail out: a cwd change
+  // on a terminal tab no longer reconciles the markdown / log / data / git
+  // subtrees. The terminal slice itself legitimately changes (it carries
+  // paneTree/cwd), so TerminalStack still re-renders — that's correct.
+  const editorTabs = useStableTabSlice(tabs, "editor");
+  const previewTabs = useStableTabSlice(tabs, "preview");
+  const markdownTabs = useStableTabSlice(tabs, "markdown");
+  const imageTabs = useStableTabSlice(tabs, "image");
+  const logTabs = useStableTabSlice(tabs, "log");
+  const dataTabs = useStableTabSlice(tabs, "data");
+  const aiDiffTabs = useStableTabSlice(tabs, "ai-diff");
+  const gitHistoryTabs = useStableTabSlice(tabs, "git-history");
+  const dockerDetailTabs = useStableTabSlice(tabs, "docker-detail");
+  // GitDiffStack renders two kinds; combine their stable slices into one stable
+  // array (recomputed only when either slice's reference actually changed).
+  const gitDiffWorkingTabs = useStableTabSlice(tabs, "git-diff");
+  const gitCommitFileTabs = useStableTabSlice(tabs, "git-commit-file");
+  const gitDiffTabs = useMemo<(GitDiffTab | GitCommitFileDiffTab)[]>(
+    () => [...gitDiffWorkingTabs, ...gitCommitFileTabs],
+    [gitDiffWorkingTabs, gitCommitFileTabs],
+  );
 
   const searchAddons = useRef<Map<number, SearchAddon>>(new Map());
   const [activeSearchAddon, setActiveSearchAddon] =
@@ -844,11 +877,34 @@ export default function App() {
     };
   }, [openFileTab]);
 
+  // Project windows (opened via `?dir=`) pin the explorer to the project root
+  // so a `cd` inside a shell no longer drags the file tree off the project.
+  // A `ssh://…` launch dir is remote — the local explorer can't pin to it.
+  const pinnedExplorerRoot = useMemo<string | null>(() => {
+    if (!hasExplicitLaunchDir()) return null;
+    const dir = getLaunchDir();
+    return dir && !isRemote(dir) ? dir : null;
+  }, []);
+
   const { explorerRoot, inheritedCwdForNewTab } = useWorkspaceCwd(
     activeTab,
     tabs,
     launchCwd ?? home,
+    pinnedExplorerRoot,
   );
+
+  // Reflect the active project (the explorer root's folder name) in the OS
+  // window title so taskbar/alt-tab entries are distinguishable per project.
+  // explorerRoot is `/`-normalized (see launchDir.ts), so the basename is the
+  // last non-empty path segment. Falls back to "Terax" with no project root.
+  // The Rust setup adds a one-time " Dev" suffix; that gets overwritten here,
+  // so reproduce it via import.meta.env.DEV to keep dev windows distinct.
+  useEffect(() => {
+    const segments = (explorerRoot ?? "").split("/").filter(Boolean);
+    const name = segments.length > 0 ? segments[segments.length - 1] : "Terax";
+    const title = import.meta.env.DEV ? `${name} Dev` : name;
+    void getCurrentWebviewWindow().setTitle(title);
+  }, [explorerRoot]);
 
   useEffect(() => {
     setActiveSearchAddon(
@@ -1287,13 +1343,12 @@ export default function App() {
 
   const handleOpenFile = useCallback(
     (path: string, pin?: boolean) => {
-      // Remote files can't open in the editor yet (the editor reads the local
-      // filesystem). Browsing the remote tree works; opening a file is a
-      // follow-on once SFTP file read/write is wired into the editor.
+      // Remote (`ssh://`) files open in the text editor, which reads/writes
+      // over SFTP via useDocument. The specialized viewers (data grid, image,
+      // log, markdown preview) read the local filesystem only, so remote files
+      // skip them and open as editable text — the common case for SSH editing.
       if (isRemote(path)) {
-        toast.info("Remote file editing isn't supported yet", {
-          description: "Use the ssh terminal to view or edit remote files.",
-        });
+        openFileTab(path, pin ?? false);
         return;
       }
       // Tabular files (sqlite/csv/parquet) open in the data-grid viewer
@@ -1573,6 +1628,13 @@ export default function App() {
       "view.zoomReset": zoomReset,
       "editor.undo": () => editorRefs.current.get(activeId)?.undo(),
       "editor.redo": () => editorRefs.current.get(activeId)?.redo(),
+      "editor.format": () => {
+        const handle = editorRefs.current.get(activeId);
+        if (!handle) return;
+        void handle.format().then((res) => {
+          if (!res.ok) toast.error(`Format failed: ${res.message}`);
+        });
+      },
     }),
     [
       activeId,
@@ -1603,7 +1665,11 @@ export default function App() {
 
   const shortcutsDisabled = useCallback(
     (id: ShortcutId, e: KeyboardEvent) => {
-      if (id === "editor.undo" || id === "editor.redo") {
+      if (
+        id === "editor.undo" ||
+        id === "editor.redo" ||
+        id === "editor.format"
+      ) {
         return activeTab?.kind !== "editor";
       }
       if (id === "ai.askSelection") {
@@ -1884,7 +1950,7 @@ export default function App() {
         aria-hidden={!isEditorTab}
       >
         <EditorStack
-          tabs={tabs}
+          editors={editorTabs}
           activeId={activeId}
           registerHandle={registerEditorHandle}
           onDirtyChange={handleEditorDirty}
@@ -1899,7 +1965,7 @@ export default function App() {
         aria-hidden={!isPreviewTab}
       >
         <PreviewStack
-          tabs={tabs}
+          previews={previewTabs}
           activeId={activeId}
           registerHandle={registerPreviewHandle}
           onUrlChange={handlePreviewUrl}
@@ -1912,7 +1978,7 @@ export default function App() {
         )}
         aria-hidden={!isMarkdownTab}
       >
-        <MarkdownStack tabs={tabs} activeId={activeId} />
+        <MarkdownStack markdowns={markdownTabs} activeId={activeId} />
       </div>
       <div
         className={cn(
@@ -1921,7 +1987,7 @@ export default function App() {
         )}
         aria-hidden={!isImageTab}
       >
-        <ImageStack tabs={tabs} activeId={activeId} />
+        <ImageStack images={imageTabs} activeId={activeId} />
       </div>
       <div
         className={cn(
@@ -1930,7 +1996,7 @@ export default function App() {
         )}
         aria-hidden={!isLogTab}
       >
-        <LogStack tabs={tabs} activeId={activeId} />
+        <LogStack logs={logTabs} activeId={activeId} />
       </div>
       <div
         className={cn(
@@ -1939,7 +2005,7 @@ export default function App() {
         )}
         aria-hidden={!isDataTab}
       >
-        <DataStack tabs={tabs} activeId={activeId} />
+        <DataStack data={dataTabs} activeId={activeId} />
       </div>
       <div
         className={cn(
@@ -1958,7 +2024,7 @@ export default function App() {
         aria-hidden={!isAiDiffTab}
       >
         <AiDiffStack
-          tabs={tabs}
+          aiDiffs={aiDiffTabs}
           activeId={activeId}
           onAccept={(id) => respondToApproval(id, true)}
           onReject={(id) => respondToApproval(id, false)}
@@ -1971,7 +2037,7 @@ export default function App() {
         )}
         aria-hidden={!isGitDiffTab}
       >
-        <GitDiffStack tabs={tabs} activeId={activeId} />
+        <GitDiffStack gitDiffs={gitDiffTabs} activeId={activeId} />
       </div>
       <div
         className={cn(
@@ -1981,7 +2047,7 @@ export default function App() {
         aria-hidden={!isGitHistoryTab}
       >
         <GitHistoryStack
-          tabs={tabs}
+          gitHistories={gitHistoryTabs}
           activeId={activeId}
           onOpenCommitFile={openCommitFileDiffTab}
           onSearchHandle={setGitHistoryHandle}
@@ -2003,7 +2069,10 @@ export default function App() {
         )}
         aria-hidden={!isDockerTab}
       >
-        <DockerDetailStack tabs={tabs} activeId={activeId} />
+        <DockerDetailStack
+          dockerDetails={dockerDetailTabs}
+          activeId={activeId}
+        />
       </div>
       <div
         className={cn(

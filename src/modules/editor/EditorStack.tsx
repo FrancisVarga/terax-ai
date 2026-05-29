@@ -1,24 +1,24 @@
 import { cn } from "@/lib/utils";
-import type { EditorTab, Tab } from "@/modules/tabs";
-import { useEffect, useRef } from "react";
+import type { EditorTab } from "@/modules/tabs";
+import { memo, useEffect, useRef } from "react";
 import { EditorPane, type EditorPaneHandle } from "./EditorPane";
 
 type Props = {
-  tabs: Tab[];
+  /** Pre-filtered, referentially-stable slice (see `useStableTabSlice`). */
+  editors: EditorTab[];
   activeId: number;
   onDirtyChange: (id: number, dirty: boolean) => void;
   registerHandle: (id: number, handle: EditorPaneHandle | null) => void;
   onCloseTab: (id: number) => void;
 };
 
-export function EditorStack({
-  tabs,
+export const EditorStack = memo(function EditorStack({
+  editors,
   activeId,
   onDirtyChange,
   registerHandle,
   onCloseTab,
 }: Props) {
-  const editors = tabs.filter((t): t is EditorTab => t.kind === "editor");
 
   // Stable per-tab callbacks. Inline arrows in `ref` and `onDirtyChange`
   // change identity every render, which makes React detach+reattach the ref
@@ -109,4 +109,4 @@ export function EditorStack({
       })}
     </div>
   );
-}
+});

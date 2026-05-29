@@ -25,3 +25,4 @@ export {
   type TabPatch,
 } from "./lib/useTabs";
 export { useWorkspaceCwd } from "./lib/useWorkspaceCwd";
+export { useStableTabSlice } from "./lib/useStableTabSlice";

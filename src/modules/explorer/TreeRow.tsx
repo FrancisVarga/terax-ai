@@ -214,6 +214,21 @@ function EntryRowImpl(props: EntryRowProps) {
         <ContextMenuSeparator />
         <ContextMenuItem
           className={COMPACT_ITEM}
+          onSelect={() => tree.copyPath(path)}
+        >
+          Copy
+        </ContextMenuItem>
+        {tree.copySource && (
+          <ContextMenuItem
+            className={COMPACT_ITEM}
+            onSelect={() => void tree.pasteInto(createTarget)}
+          >
+            Paste
+          </ContextMenuItem>
+        )}
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          className={COMPACT_ITEM}
           onSelect={() => void copyToClipboard(path)}
         >
           Copy Path

@@ -93,6 +93,54 @@ export async function readRemoteFile(
   return invoke<string>("ssh_fs_read_file", { alias, path });
 }
 
+/** Write text content to a remote file over SFTP (create or overwrite). */
+export async function writeRemoteFile(
+  alias: string,
+  path: string,
+  content: string,
+): Promise<void> {
+  await invoke("ssh_fs_write_file", { alias, path, content });
+}
+
+/** Create an empty remote file. Fails if it already exists. */
+export async function createRemoteFile(
+  alias: string,
+  path: string,
+): Promise<void> {
+  await invoke("ssh_fs_create_file", { alias, path });
+}
+
+/** Create a remote directory. Fails if it already exists. */
+export async function createRemoteDir(
+  alias: string,
+  path: string,
+): Promise<void> {
+  await invoke("ssh_fs_create_dir", { alias, path });
+}
+
+/** Rename/move a remote path. Refuses to overwrite an existing target. */
+export async function renameRemote(
+  alias: string,
+  from: string,
+  to: string,
+): Promise<void> {
+  await invoke("ssh_fs_rename", { alias, from, to });
+}
+
+/** Copy a remote path (recursive for dirs). Refuses to overwrite a target. */
+export async function copyRemote(
+  alias: string,
+  from: string,
+  to: string,
+): Promise<void> {
+  await invoke("ssh_fs_copy", { alias, from, to });
+}
+
+/** Delete a remote file or directory (recursive for dirs). */
+export async function deleteRemote(alias: string, path: string): Promise<void> {
+  await invoke("ssh_fs_delete", { alias, path });
+}
+
 /** Connect (or reuse) an SFTP session; resolves the remote home dir. */
 export async function connectRemote(alias: string): Promise<string> {
   return invoke<string>("ssh_fs_connect", { alias });

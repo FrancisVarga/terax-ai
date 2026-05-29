@@ -274,6 +274,36 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
         target.isContentEditable
       )
         return;
+
+      // Copy / paste run before the empty-tree guard so pasting into an empty
+      // folder still works. Copy stashes the selection; paste drops it into the
+      // selection's target dir (folder → into it, file → into its parent), or
+      // the root when nothing is selected. Mod = Cmd on macOS, Ctrl elsewhere.
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && (e.key === "c" || e.key === "C")) {
+        if (selectedPath) {
+          e.preventDefault();
+          tree.copyPath(selectedPath);
+        }
+        return;
+      }
+      if (mod && (e.key === "v" || e.key === "V")) {
+        if (!tree.copySource) return;
+        e.preventDefault();
+        let pasteTarget = rootPath;
+        if (selectedPath) {
+          const idx = entryIndexByPath.get(selectedPath);
+          const row = idx === undefined ? undefined : rows[idx];
+          if (row?.kind === "entry") {
+            pasteTarget = row.isDir
+              ? selectedPath
+              : selectedPath.slice(0, selectedPath.lastIndexOf("/")) || rootPath;
+          }
+        }
+        void tree.pasteInto(pasteTarget);
+        return;
+      }
+
       if (entryPaths.length === 0) return;
 
       const currentIdx = selectedPath ? entryPaths.indexOf(selectedPath) : -1;
@@ -576,6 +606,17 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
               >
                 New Folder
               </ContextMenuItem>
+              {tree.copySource && (
+                <>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem
+                    className={COMPACT_ITEM}
+                    onSelect={() => void tree.pasteInto(rootPath)}
+                  >
+                    Paste
+                  </ContextMenuItem>
+                </>
+              )}
               <ContextMenuSeparator />
               <ContextMenuItem
                 className={COMPACT_ITEM}

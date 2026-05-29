@@ -338,20 +338,10 @@ pub fn run() {
         .manage(s3::S3State::default())
         .manage(ProjectWindows::default())
         .setup(|app| {
-            // In dev builds, suffix window titles with " Dev" so a running dev
-            // instance is visually distinct from an installed release.
-            #[cfg(debug_assertions)]
-            {
-                for window in app.webview_windows().values() {
-                    let current = window.title().unwrap_or_default();
-                    let dev_title = if current.is_empty() {
-                        "Terax Dev".to_string()
-                    } else {
-                        format!("{current} Dev")
-                    };
-                    let _ = window.set_title(&dev_title);
-                }
-            }
+            // Window titles (incl. the dev-distinguishing " Dev" suffix and the
+            // active project name) are owned by the frontend — see the title
+            // effect in App.tsx. The webview overwrites the title on mount, so a
+            // Rust-side dev suffix here would just be clobbered.
 
             // Raise the OS timer resolution so the PTY flusher's sub-tick
             // coalesce sleep is honored instead of rounding to ~15ms (Windows).
@@ -445,7 +435,27 @@ pub fn run() {
             ssh::ssh_fs_connect,
             ssh::ssh_fs_read_dir,
             ssh::ssh_fs_read_file,
+            ssh::ssh_fs_write_file,
+            ssh::ssh_fs_create_file,
+            ssh::ssh_fs_create_dir,
+            ssh::ssh_fs_rename,
+            ssh::ssh_fs_copy,
+            ssh::ssh_fs_delete,
             ssh::ssh_fs_glob,
+            ssh::ssh_fs_search,
+            ssh::ssh_fs_grep,
+            ssh::ssh_git_panel_snapshot,
+            ssh::ssh_git_status,
+            ssh::ssh_git_diff,
+            ssh::ssh_git_diff_content,
+            ssh::ssh_git_stage,
+            ssh::ssh_git_unstage,
+            ssh::ssh_git_discard,
+            ssh::ssh_git_commit,
+            ssh::ssh_git_log,
+            ssh::ssh_git_show_commit,
+            ssh::ssh_git_resolve_repo,
+            ssh::ssh_git_remote_url,
             ssh::ssh_bg_spawn,
             ssh::ssh_bg_logs,
             ssh::ssh_bg_kill,

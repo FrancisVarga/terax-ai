@@ -1,4 +1,5 @@
-import type { GitHistoryTab, Tab } from "@/modules/tabs";
+import { memo } from "react";
+import type { GitHistoryTab } from "@/modules/tabs";
 import { GitHistoryPane, type GitHistorySearchHandle } from "./GitHistoryPane";
 
 type CommitFileDiffOpenInput = {
@@ -11,21 +12,20 @@ type CommitFileDiffOpenInput = {
 };
 
 type Props = {
-  tabs: Tab[];
+  /** Pre-filtered, referentially-stable slice (see `useStableTabSlice`). */
+  gitHistories: GitHistoryTab[];
   activeId: number;
   onOpenCommitFile: (input: CommitFileDiffOpenInput) => void;
   onSearchHandle?: (handle: GitHistorySearchHandle | null) => void;
 };
 
-export function GitHistoryStack({
-  tabs,
+export const GitHistoryStack = memo(function GitHistoryStack({
+  gitHistories,
   activeId,
   onOpenCommitFile,
   onSearchHandle,
 }: Props) {
-  const active = tabs.find(
-    (t): t is GitHistoryTab => t.kind === "git-history" && t.id === activeId,
-  );
+  const active = gitHistories.find((t) => t.id === activeId);
   if (!active) return null;
   return (
     <GitHistoryPane
@@ -35,4 +35,4 @@ export function GitHistoryStack({
       onSearchHandle={onSearchHandle}
     />
   );
-}
+});

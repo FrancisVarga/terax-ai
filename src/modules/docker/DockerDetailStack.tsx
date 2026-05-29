@@ -1,18 +1,20 @@
-import type { DockerDetailTab, Tab } from "@/modules/tabs";
+import { memo } from "react";
+import type { DockerDetailTab } from "@/modules/tabs";
 import { DockerDetailPane } from "./DockerDetailPane";
 
 type Props = {
-  tabs: Tab[];
+  /** Pre-filtered, referentially-stable slice (see `useStableTabSlice`). */
+  dockerDetails: DockerDetailTab[];
   activeId: number;
 };
 
 /** Renders the active Docker detail tab, if one is focused. Keyed by id so
  * switching containers remounts the pane (fresh inspect + logs fetch). */
-export function DockerDetailStack({ tabs, activeId }: Props) {
-  const active = tabs.find(
-    (t): t is DockerDetailTab =>
-      t.kind === "docker-detail" && t.id === activeId,
-  );
+export const DockerDetailStack = memo(function DockerDetailStack({
+  dockerDetails,
+  activeId,
+}: Props) {
+  const active = dockerDetails.find((t) => t.id === activeId);
   if (!active) return null;
   return (
     <DockerDetailPane
@@ -22,4 +24,4 @@ export function DockerDetailStack({ tabs, activeId }: Props) {
       host={active.host}
     />
   );
-}
+});
