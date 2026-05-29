@@ -1,3 +1,5 @@
 allowBuilds:
+  bun: true
   esbuild: true
+  msgpackr-extract: true
   msw: true

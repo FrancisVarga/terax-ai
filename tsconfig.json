@@ -14,6 +14,11 @@
     "noEmit": true,
     "jsx": "react-jsx",
 
+    // Explicit allowlist so @types/bun (a devDep used only by the Bun worker
+    // scripts) is NOT auto-included into the browser build, where its global
+    // `fetch` override conflicts with the DOM lib (see ai/lib/proxyFetch.ts).
+    "types": ["node", "react", "react-dom", "vite/client"],
+
     /* Linting */
     "strict": true,
     "noUnusedLocals": true,
@@ -24,5 +29,9 @@
     }
   },
   "include": ["src"],
+  // Bun-runtime workers are executed by `bun` directly (not the vite/browser
+  // build) and use Bun globals + bunqueue/client TCP. Exclude them from the
+  // app typecheck; they have their own tsconfig under src/modules/bunqueue/workers.
+  "exclude": ["src/**/workers/**"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }
