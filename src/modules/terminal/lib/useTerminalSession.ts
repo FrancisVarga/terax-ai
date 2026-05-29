@@ -154,11 +154,25 @@ configureRendererPool({
   evictLeaf(leafId) {
     const s = sessions.get(leafId);
     if (!s) return;
+    // Defense-in-depth: pickSlotFor must never select a visible leaf as a
+    // victim (it would blank the pane irrecoverably). If we still get here for
+    // a visible leaf it's a pool bug — skip the unbind and keep the slot bound
+    // rather than blanking, and surface it.
+    if (s.visibleNow) {
+      console.error(
+        `[terax] refused to evict visible terminal leaf ${leafId} — pool bug`,
+      );
+      return;
+    }
     unbindLeafFromSlot(leafId, s);
   },
   isLeafFocused(leafId) {
     const s = sessions.get(leafId);
     return !!s && s.visibleNow && s.focusedNow;
+  },
+  isLeafVisible(leafId) {
+    const s = sessions.get(leafId);
+    return !!s && s.visibleNow;
   },
 });
 

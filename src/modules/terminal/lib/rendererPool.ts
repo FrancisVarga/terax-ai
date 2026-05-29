@@ -15,7 +15,13 @@ import {
   terminalWordNavigationSequence,
 } from "./keymap";
 
-export const POOL_MAX_SIZE = 5;
+// Must comfortably exceed the largest single-tab pane count. The 2x2 Claude
+// grid puts 4 panes in one tab; with any slot still held by a deactivating
+// tab during a switch, a cap of 5 forces eviction of a still-visible sibling
+// (permanent blank pane — the evicted leaf has no rebind trigger). 8 gives a
+// 4-pane grid headroom; pickSlotFor also treats this as a soft cap and grows
+// rather than ever evicting a visible leaf.
+export const POOL_MAX_SIZE = 8;
 const FIT_DEBOUNCE_MS = 8;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
 const SNAPSHOT_SCROLLBACK_CAP = 5_000;
@@ -24,6 +30,11 @@ export type SlotAdapter = {
   resolveLeaf(leafId: number): LeafBridge | null;
   evictLeaf(leafId: number): void;
   isLeafFocused(leafId: number): boolean;
+  // A visible leaf is on-screen in the active tab. Evicting its slot blanks
+  // the pane with no way to recover (the bind is edge-triggered by React
+  // effect deps that don't change on eviction), so pickSlotFor must never
+  // choose a visible leaf's slot as a victim.
+  isLeafVisible(leafId: number): boolean;
 };
 
 export type LeafBridge = {
@@ -265,6 +276,13 @@ function pickSlotFor(leafId: number): PickResult {
   let bestScore = Number.POSITIVE_INFINITY;
   for (const s of slots) {
     if (s.currentLeafId === leafId) return { slot: s, previousLeafId: null };
+    // A visible leaf must never be evicted — its pane would blank permanently
+    // (the rebind is edge-triggered by React effect deps that don't change on
+    // eviction). Skip it as a candidate entirely.
+    const visible =
+      s.currentLeafId !== null &&
+      (adapter?.isLeafVisible(s.currentLeafId) ?? false);
+    if (visible) continue;
     const focused =
       s.currentLeafId !== null &&
       (adapter?.isLeafFocused(s.currentLeafId) ?? false);
@@ -275,8 +293,12 @@ function pickSlotFor(leafId: number): PickResult {
       best = s;
     }
   }
-  const chosen = best!;
-  return { slot: chosen, previousLeafId: chosen.currentLeafId };
+  // Every slot holds a visible leaf (more on-screen panes than the soft cap).
+  // Growing the pool past POOL_MAX_SIZE is correct here — better to spend an
+  // extra renderer than to blank a visible pane. The dormant sweep reclaims
+  // the WebGL contexts of these extra slots once they go off-screen.
+  if (!best) return { slot: createSlot(), previousLeafId: null };
+  return { slot: best, previousLeafId: best.currentLeafId };
 }
 
 export type AcquireParams = {
