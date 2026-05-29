@@ -6,8 +6,12 @@ import { IS_LINUX } from "@/lib/platform";
 
 const LAST_CHECK_KEY = "terax:updater:last-check";
 const CHECK_INTERVAL_MS = 30 * 60 * 1000;
+// Must match the repo that actually publishes releases — the same one in the
+// Tauri updater `endpoints` (FrancisVarga/terax-ai). The Windows/macOS updater
+// uses that endpoint; this GitHub API URL is the Linux manual-check path, which
+// previously pointed at a non-publishing repo so Linux never saw updates.
 const GITHUB_LATEST_RELEASE =
-  "https://api.github.com/repos/crynta/terax-ai/releases/latest";
+  "https://api.github.com/repos/FrancisVarga/terax-ai/releases/latest";
 
 export interface ManualUpdateInfo {
   version: string;
