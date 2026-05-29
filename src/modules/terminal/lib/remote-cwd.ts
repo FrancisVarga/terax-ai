@@ -89,14 +89,24 @@ export function decodeRemoteCwd(encoded: string): string | null {
  * spaces, `%`, or unicode round-trip through decodeURIComponent on the JS side.
  */
 export function buildRemoteCwdHookCommand(nonce: string): string {
-  // Single logical line: typed into the PTY followed by \r. Uses only POSIX
-  // builtins + od/sed/tr in the bash/sh branch; a zsh-specific branch registers
-  // a precmd. `__terax_enc` percent-encodes $PWD byte-by-byte so it is locale-
+  // The hook body. Single logical line of POSIX shell. Uses only POSIX builtins
+  // + od/sed/tr in the bash/sh branch; a zsh-specific branch registers a
+  // precmd. `__terax_enc` percent-encodes $PWD byte-by-byte so it is locale-
   // and charset-safe.
-  return [
+  const body = [
     `__terax_enc(){ od -An -tx1 -v 2>/dev/null | tr -d ' \\n' | sed 's/../%&/g'; }`,
     `__terax_pwd7704(){ printf '\\033]7704;${nonce};%s\\033\\\\' "$(printf %s "$PWD" | __terax_enc)"; }`,
     `if [ -n "$ZSH_VERSION" ]; then autoload -Uz add-zsh-hook 2>/dev/null; add-zsh-hook precmd __terax_pwd7704 2>/dev/null || precmd_functions+=(__terax_pwd7704); else case "$PROMPT_COMMAND" in *__terax_pwd7704*) :;; *) PROMPT_COMMAND="__terax_pwd7704\${PROMPT_COMMAND:+; $PROMPT_COMMAND}";; esac; fi`,
     `__terax_pwd7704`,
   ].join("; ");
+
+  // Wrap the body as a single-quoted argument to `eval`, gated by a POSIX
+  // `command -v` shell check. The point is cross-shell safety: on a POSIX shell
+  // (bash/zsh/sh) this evaluates the body in the CURRENT shell (so the precmd
+  // hook persists, unlike `sh -c` which would run in a throwaway subshell). On
+  // PowerShell / cmd / fish the function-definition syntax `(){}` is never
+  // parsed — it lives inside the single-quoted string — so the worst case is a
+  // single "command not recognized" line instead of a multi-line ParserError.
+  const escaped = body.replace(/'/g, `'\\''`);
+  return `command -v od >/dev/null 2>&1 && eval '${escaped}'`;
 }
