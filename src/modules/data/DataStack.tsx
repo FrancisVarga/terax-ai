@@ -1,6 +1,12 @@
 import { cn } from "@/lib/utils";
 import type { DataTab, Tab } from "@/modules/tabs";
-import { DataPane } from "./DataPane";
+import { lazy, Suspense } from "react";
+
+// Lazy so the AG Grid bundle code-splits out of the startup chunk and loads
+// only when the first data tab opens.
+const DataPane = lazy(() =>
+  import("./DataPane").then((m) => ({ default: m.DataPane })),
+);
 
 type Props = {
   tabs: Tab[];
@@ -29,7 +35,9 @@ export function DataStack({ tabs, activeId }: Props) {
             )}
             aria-hidden={!visible}
           >
-            <DataPane path={t.path} format={t.format} visible={visible} />
+            <Suspense fallback={null}>
+              <DataPane path={t.path} format={t.format} visible={visible} />
+            </Suspense>
           </div>
         );
       })}

@@ -1,14 +1,21 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Alert02Icon, File01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
-// DataPane is NOT re-exported from `@/modules/data` (only DataStack +
-// dataFormatForPath are), so we import it directly from its source file.
-import { DataPane } from "@/modules/data/DataPane";
-import { S3ParquetGrid } from "./S3ParquetGrid";
 import { s3FormatForKey, type S3ObjectBytes } from "./lib/types";
+
+// Both viewers pull in the AG Grid bundle; lazy-load them so that bundle
+// code-splits out of the startup chunk and arrives only when an S3 tabular
+// object is opened. DataPane is not re-exported from `@/modules/data`, so it is
+// imported directly from its source file.
+const DataPane = lazy(() =>
+  import("@/modules/data/DataPane").then((m) => ({ default: m.DataPane })),
+);
+const S3ParquetGrid = lazy(() =>
+  import("./S3ParquetGrid").then((m) => ({ default: m.S3ParquetGrid })),
+);
 
 type Props = {
   connId: string;
@@ -34,12 +41,14 @@ export function S3ObjectPreview({ connId, bucket, objectKey, visible }: Props) {
   // Parquet streams directly; no download/byte fetch needed.
   if (format === "parquet") {
     return (
-      <S3ParquetGrid
-        connId={connId}
-        bucket={bucket}
-        objectKey={objectKey}
-        visible={visible}
-      />
+      <Suspense fallback={<LoadingState label="Loading viewer…" />}>
+        <S3ParquetGrid
+          connId={connId}
+          bucket={bucket}
+          objectKey={objectKey}
+          visible={visible}
+        />
+      </Suspense>
     );
   }
 
@@ -118,7 +127,11 @@ function CachedTabularPreview({
 
   if (error) return <ErrorState message={error} />;
   if (!path) return <LoadingState label="Downloading object…" />;
-  return <DataPane path={path} format={format} visible={visible} />;
+  return (
+    <Suspense fallback={<LoadingState label="Loading viewer…" />}>
+      <DataPane path={path} format={format} visible={visible} />
+    </Suspense>
+  );
 }
 
 /**

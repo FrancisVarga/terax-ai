@@ -11,7 +11,9 @@ import type {
 } from "ag-grid-community";
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { buildDataGridTheme } from "./lib/agGridTheme";
+import { buildDataGridTheme, ensureAgGridRegistered } from "./lib/agGridTheme";
+
+ensureAgGridRegistered();
 
 /** Wire format returned by the `data_*` Rust commands. */
 type DataPreview = {
