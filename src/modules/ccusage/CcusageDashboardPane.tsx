@@ -66,6 +66,17 @@ function fmtTime(ms: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+/** Coarse "synced Ns/Nm/Nh ago" label from an epoch ms timestamp. */
+function fmtAgo(ms: number | null): string | null {
+  if (ms == null) return null;
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 5) return "synced just now";
+  if (s < 60) return `synced ${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `synced ${m}m ago`;
+  return `synced ${Math.round(m / 60)}h ago`;
+}
+
 /**
  * ccusage dashboard — an in-app port of the `ccusage` CLI
  * (github.com/ryoppippi/ccusage). Reuses the same on-disk parsers as
@@ -141,7 +152,8 @@ export function CcusageDashboardPane() {
 }
 
 function Header({ usage }: { usage: UseCcusage }) {
-  const { refresh, loading, costMode, setCostMode } = usage;
+  const { refresh, loading, costMode, setCostMode, syncedAt } = usage;
+  const ago = fmtAgo(syncedAt);
   return (
     <div className="flex items-center justify-between gap-2">
       <div className="flex items-center gap-2">
@@ -155,6 +167,7 @@ function Header({ usage }: { usage: UseCcusage }) {
           <h1 className="text-[15px] font-semibold leading-tight">ccusage</h1>
           <p className="text-[11px] text-muted-foreground">
             Token &amp; cost reports
+            {ago ? <span className="text-muted-foreground/60"> · {ago}</span> : null}
           </p>
         </div>
       </div>

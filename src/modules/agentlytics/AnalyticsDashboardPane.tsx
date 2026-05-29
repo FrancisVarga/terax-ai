@@ -43,6 +43,17 @@ function fmtHour(h: number): string {
   return `${hour}${period}`;
 }
 
+/** Coarse "synced Ns/Nm/Nh ago" label from an epoch ms timestamp. */
+function fmtAgo(ms: number | null): string | null {
+  if (ms == null) return null;
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 5) return "synced just now";
+  if (s < 60) return `synced ${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `synced ${m}m ago`;
+  return `synced ${Math.round(m / 60)}h ago`;
+}
+
 /**
  * Local AI usage analytics dashboard — an in-app port of agentlytics
  * (github.com/f/agentlytics). Reads this app's own AI session store and renders
@@ -51,7 +62,7 @@ function fmtHour(h: number): string {
  * does not persist real token counts).
  */
 export function AnalyticsDashboardPane() {
-  const { data, loading, error, refresh } = useAnalytics();
+  const { data, loading, error, syncedAt, refresh } = useAnalytics();
 
   if (loading && data.totalSessions === 0) {
     return (
@@ -101,7 +112,7 @@ export function AnalyticsDashboardPane() {
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex max-w-5xl flex-col gap-5 p-5">
-        <Header onRefresh={refresh} loading={loading} />
+        <Header onRefresh={refresh} loading={loading} syncedAt={syncedAt} />
         <KpiRow data={data} />
         <SourcesRow sources={data.sources} />
         <ActivityChart daily={data.daily} />
@@ -125,10 +136,13 @@ export function AnalyticsDashboardPane() {
 function Header({
   onRefresh,
   loading,
+  syncedAt,
 }: {
   onRefresh: () => void;
   loading: boolean;
+  syncedAt: number | null;
 }) {
+  const ago = fmtAgo(syncedAt);
   return (
     <div className="flex items-center justify-between gap-2">
       <div className="flex items-center gap-2">
@@ -144,6 +158,7 @@ function Header({
           </h1>
           <p className="text-[11px] text-muted-foreground">
             Local AI coding analytics
+            {ago ? <span className="text-muted-foreground/60"> · {ago}</span> : null}
           </p>
         </div>
       </div>

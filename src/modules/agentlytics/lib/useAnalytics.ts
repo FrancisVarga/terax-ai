@@ -1,5 +1,9 @@
-import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useState } from "react";
+import { readCache, writeCache } from "@/lib/localCache";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type {
+  AnalyticsRequest,
+  AnalyticsResponse,
+} from "./analytics.worker";
 
 /**
  * Local-first AI usage analytics — the in-app analog of agentlytics
@@ -10,7 +14,16 @@ import { useCallback, useEffect, useState } from "react";
  * (`~/.gemini/tmp`), and Cursor (`state.vscdb`) — and aggregates them. Token
  * counts are real where the source persists them and estimated from text
  * length (≈4 chars/token) otherwise; everything stays on the machine.
+ *
+ * Loading runs in a Web Worker (`analytics.worker.ts`) so the scan's IPC and
+ * deserialization stay off the render thread, and the last result is cached in
+ * localStorage: on mount we paint the cached snapshot instantly (no spinner)
+ * and the worker re-syncs in the background (stale-while-revalidate).
  */
+
+/** localStorage cache identity. Bump VERSION when `Analytics` shape changes. */
+const CACHE_KEY = "agentlytics";
+const CACHE_VERSION = 1;
 
 export type ModelUsage = {
   model: string;
@@ -87,59 +100,87 @@ function emptyAnalytics(): Analytics {
   };
 }
 
-/**
- * Aggregate on-disk agent sessions via the Rust `agentscan_collect` command.
- * The webview owns the clock and timezone, so we pass `nowMs` and the local
- * UTC offset; the backend uses them for day/hour bucketing without needing a
- * date crate. The returned shape already matches `Analytics` (serde renames to
- * camelCase), so no client-side transform is needed.
- */
-async function computeAnalytics(): Promise<Analytics> {
-  const now = new Date();
-  return invoke<Analytics>("agentscan_collect", {
-    nowMs: now.getTime(),
-    // getTimezoneOffset() is minutes *behind* UTC (positive west of UTC), so
-    // negate to get the offset to add to a UTC instant to reach local time.
-    tzOffsetMs: -now.getTimezoneOffset() * 60_000,
-  });
-}
-
 export type UseAnalytics = {
   data: Analytics;
   loading: boolean;
   error: string | null;
+  /** Epoch ms of the data currently shown, or null when nothing cached yet. */
+  syncedAt: number | null;
   refresh: () => void;
 };
 
 /**
- * Loads and aggregates local AI session analytics. Recomputes on mount and on
- * demand via `refresh`; cheap enough to run on tab open without caching.
+ * Loads and aggregates local AI session analytics.
+ *
+ * Strategy: a single long-lived Web Worker performs the scan off the render
+ * thread; the last good result is cached in localStorage. On mount we seed
+ * state from the cache (instant paint, no spinner when present) and kick off a
+ * background sync. `refresh` re-syncs on demand. Worker results are written
+ * back to the cache for the next launch.
  */
 export function useAnalytics(): UseAnalytics {
-  const [data, setData] = useState<Analytics>(emptyAnalytics);
+  const seed = readCache<Analytics>(CACHE_KEY, CACHE_VERSION);
+  const [data, setData] = useState<Analytics>(seed?.value ?? emptyAnalytics());
+  // Only show the blocking spinner when we have nothing cached to paint.
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [syncedAt, setSyncedAt] = useState<number | null>(
+    seed?.savedAt ?? null,
+  );
 
-  const refresh = useCallback(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    computeAnalytics()
-      .then((result) => {
-        if (!cancelled) setData(result);
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+  const workerRef = useRef<Worker | null>(null);
+
+  // One worker for the hook's lifetime; recreated only if it ever errors out.
+  const getWorker = useCallback((): Worker => {
+    if (!workerRef.current) {
+      workerRef.current = new Worker(
+        new URL("./analytics.worker.ts", import.meta.url),
+        { type: "module" },
+      );
+    }
+    return workerRef.current;
   }, []);
 
-  useEffect(() => refresh(), [refresh]);
+  const refresh = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    const worker = getWorker();
+    const now = new Date();
+    worker.onmessage = (e: MessageEvent<AnalyticsResponse>) => {
+      const res = e.data;
+      if (res.ok) {
+        setData(res.data);
+        const at = Date.now();
+        setSyncedAt(at);
+        writeCache(CACHE_KEY, CACHE_VERSION, res.data, at);
+      } else {
+        setError(res.error);
+      }
+      setLoading(false);
+    };
+    worker.onerror = (e) => {
+      setError(e.message || "analytics worker failed");
+      setLoading(false);
+      // Drop the failed worker so the next refresh spins up a fresh one.
+      worker.terminate();
+      workerRef.current = null;
+    };
+    const req: AnalyticsRequest = {
+      nowMs: now.getTime(),
+      // getTimezoneOffset() is minutes *behind* UTC (positive west of UTC), so
+      // negate to get the offset to add to a UTC instant to reach local time.
+      tzOffsetMs: -now.getTimezoneOffset() * 60_000,
+    };
+    worker.postMessage(req);
+  }, [getWorker]);
 
-  return { data, loading, error, refresh };
+  useEffect(() => {
+    refresh();
+    return () => {
+      workerRef.current?.terminate();
+      workerRef.current = null;
+    };
+  }, [refresh]);
+
+  return { data, loading, error, syncedAt, refresh };
 }
