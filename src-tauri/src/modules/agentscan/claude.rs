@@ -52,18 +52,41 @@ pub fn scan() -> SourceResult {
         };
     }
 
-    let mut files = Vec::new();
-    for root in &dirs {
-        collect_jsonl(root, &mut files);
+    // Each (file, owning `projects` root) pair so we can derive a workspace
+    // label. Two config roots are distinct accounts/environments and must not be
+    // merged, so the root index is part of the fallback label.
+    let mut files: Vec<(PathBuf, usize)> = Vec::new();
+    for (root_idx, root) in dirs.iter().enumerate() {
+        let before = files.len();
+        let mut found = Vec::new();
+        collect_jsonl(root, &mut found);
+        files.extend(found.into_iter().map(|p| (p, root_idx)));
+        let _ = before;
     }
+    // Single root → no account-disambiguation prefix needed (keeps labels clean).
+    let multi_root = dirs.len() > 1;
 
-    for path in files {
+    for (path, root_idx) in files {
         // The file stem is the session UUID; use it as a fallback session id.
         let file_session = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
+        // Fallback workspace label from the path: the project-slug dir Claude
+        // derives from the cwd (e.g. `E--workspace-terax-ai`), prefixed with the
+        // config-root index when more than one root is in play so separate
+        // accounts stay separate even if they share a project slug.
+        let slug = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        let ws_fallback = if multi_root {
+            format!("root{root_idx}:{slug}")
+        } else {
+            slug.to_string()
+        };
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
@@ -75,7 +98,7 @@ pub fn scan() -> SourceResult {
             let Ok(v) = serde_json::from_str::<Value>(line) else {
                 continue;
             };
-            if let Some(msg) = parse_line(&v, &file_session) {
+            if let Some(msg) = parse_line(&v, &file_session, &ws_fallback) {
                 session_ids.insert(msg.session_id.clone());
                 messages.push(msg);
             }
@@ -110,7 +133,7 @@ fn collect_jsonl(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn parse_line(v: &Value, file_session: &str) -> Option<Msg> {
+fn parse_line(v: &Value, file_session: &str, ws_fallback: &str) -> Option<Msg> {
     let message = v.get("message")?;
     let role_str = message.get("role").and_then(Value::as_str)?;
     let role = match role_str {
@@ -124,6 +147,17 @@ fn parse_line(v: &Value, file_session: &str) -> Option<Msg> {
         .and_then(Value::as_str)
         .unwrap_or(file_session)
         .to_string();
+
+    // Workspace identity: prefer the line's `cwd` (the real project dir the
+    // session ran in — the most accurate account/env signal), else the
+    // path-derived slug. Distinct cwds / config roots stay distinct so usage is
+    // never summed across accounts.
+    let workspace = v
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| ws_fallback.to_string());
 
     let ts_ms = v
         .get("timestamp")
@@ -219,6 +253,7 @@ fn parse_line(v: &Value, file_session: &str) -> Option<Msg> {
 
     Some(Msg {
         source: Source::Claude,
+        workspace,
         session_id,
         ts_ms,
         role,
@@ -259,7 +294,7 @@ mod tests {
                 }
             }
         });
-        let m = parse_line(&line, "file").unwrap();
+        let m = parse_line(&line, "file", "ws").unwrap();
         assert_eq!(m.role, Role::Assistant);
         assert_eq!(m.model.as_deref(), Some("claude-opus-4-7"));
         assert!(m.tokens_known);
@@ -280,17 +315,29 @@ mod tests {
                 "content": [{"type": "text", "text": "12345678"}]  // 8 chars -> 2 tokens
             }
         });
-        let m = parse_line(&line, "filestem").unwrap();
+        let m = parse_line(&line, "filestem", "myws").unwrap();
         assert_eq!(m.role, Role::User);
         assert!(!m.tokens_known);
         assert_eq!(m.input_tokens, 2);
         assert_eq!(m.output_tokens, 0);
         assert_eq!(m.session_id, "filestem"); // fell back to file stem
+        assert_eq!(m.workspace, "myws"); // no cwd in line -> path-derived fallback
+    }
+
+    #[test]
+    fn workspace_prefers_line_cwd() {
+        let line = serde_json::json!({
+            "sessionId": "s",
+            "cwd": "/home/a/proj",
+            "message": { "role": "user", "content": [{"type": "text", "text": "hi"}] }
+        });
+        let m = parse_line(&line, "f", "fallback").unwrap();
+        assert_eq!(m.workspace, "/home/a/proj");
     }
 
     #[test]
     fn skips_non_message_lines() {
         let meta = serde_json::json!({"type": "permission-mode", "permissionMode": "x"});
-        assert!(parse_line(&meta, "f").is_none());
+        assert!(parse_line(&meta, "f", "ws").is_none());
     }
 }

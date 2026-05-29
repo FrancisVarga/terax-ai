@@ -13,9 +13,14 @@ import { useCallback, useEffect, useState } from "react";
  *
  * The last report per cost mode is cached in localStorage
  * (stale-while-revalidate): switching modes paints the cached snapshot
- * instantly while a fresh report syncs in the background. The `invoke` runs on
- * the main thread — Tauri's IPC lives on `window.__TAURI_INTERNALS__`, which
- * Web Workers (no `window`) can't reach — and the heavy work is in Rust anyway.
+ * instantly while a fresh report syncs in the background.
+ *
+ * The `ccusage_collect` command is `async` on the Rust side, so its disk walk
+ * runs on a Tauri worker thread (via `spawn_blocking`), never the UI thread —
+ * the webview stays responsive while a scan is in flight, so the app no longer
+ * hangs on large transcript histories. Rust also keeps a short-TTL in-memory
+ * cache of the raw scan, so a mode switch within that window rebuilds the report
+ * from memory instead of re-reading every transcript from disk.
  */
 
 /** localStorage cache identity. Bump VERSION when `CcusageReport` shape changes. */
@@ -46,6 +51,8 @@ export type PeriodBucket = {
 /** A session rollup — a PeriodBucket (flattened) plus a time span + source. */
 export type SessionBucket = PeriodBucket & {
   source: "claude" | "gemini" | "cursor";
+  /** Workspace/account this session belongs to (so it stays attributable). */
+  workspace: string;
   messages: number;
   startMs: number;
   endMs: number;
@@ -88,6 +95,18 @@ export type SourceBreakdown = {
   error?: string;
 };
 
+/**
+ * One workspace's self-contained report (the Rust `WorkspaceReport`): its
+ * identity plus the same report body as the top-level merged view. Distinct
+ * accounts/environments are never summed together — totals, periods, sessions,
+ * and 5-hour blocks are all scoped to this workspace only.
+ */
+export type WorkspaceReport = CcusageReport & {
+  source: "claude" | "gemini" | "cursor";
+  /** Workspace label (project cwd, Gemini project hash, or config-root tag). */
+  workspace: string;
+};
+
 export type CcusageReport = {
   costMode: CostMode;
   totals: Totals;
@@ -97,6 +116,12 @@ export type CcusageReport = {
   sessions: SessionBucket[];
   blocks: BlockBucket[];
   sources: SourceBreakdown[];
+  /**
+   * Per-workspace breakdown, busiest first. The top-level fields above are the
+   * merged "All workspaces" view; render one tab per entry to keep accounts
+   * separate. Empty on a `WorkspaceReport` itself (no recursion).
+   */
+  workspaces: WorkspaceReport[];
 };
 
 function emptyReport(mode: CostMode): CcusageReport {
@@ -118,6 +143,7 @@ function emptyReport(mode: CostMode): CcusageReport {
     sessions: [],
     blocks: [],
     sources: [],
+    workspaces: [],
   };
 }
 

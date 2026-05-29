@@ -42,6 +42,23 @@ export type DayActivity = {
   estTokens: number;
 };
 
+/**
+ * One workspace's rolled-up usage. A "workspace" is a distinct account or
+ * environment — Claude's project cwd (a second `$CLAUDE_CONFIG_DIR` account on
+ * the same path counts separately), a Gemini project hash, or Cursor's single
+ * `default` bucket. Usage from different accounts is never summed together; the
+ * dashboard renders one card per entry.
+ */
+export type WorkspaceUsage = {
+  source: "claude" | "gemini" | "cursor";
+  /** Project path / hash / config-root label identifying this workspace. */
+  workspace: string;
+  sessions: number;
+  messages: number;
+  estTokens: number;
+  estCostUsd: number;
+};
+
 /** What one on-disk agent source contributed (and why it's empty, if so). */
 export type SourceBreakdown = {
   source: "claude" | "gemini" | "cursor";
@@ -75,6 +92,8 @@ export type Analytics = {
   hourly: number[];
   /** Per-source rollup (Claude / Gemini / Cursor). */
   sources: SourceBreakdown[];
+  /** Per-workspace rollup, busiest first. One card per distinct account/env. */
+  workspaces: WorkspaceUsage[];
 };
 
 function emptyAnalytics(): Analytics {
@@ -95,6 +114,7 @@ function emptyAnalytics(): Analytics {
     peakHour: null,
     hourly: Array.from({ length: 24 }, () => 0),
     sources: [],
+    workspaces: [],
   };
 }
 
@@ -104,17 +124,26 @@ export type UseAnalytics = {
   error: string | null;
   /** Epoch ms of the data currently shown, or null when nothing cached yet. */
   syncedAt: number | null;
-  refresh: () => void;
+  /** Re-sync. `force` (default true) bypasses the Rust scan cache. */
+  refresh: (force?: boolean) => void;
 };
 
-/** Aggregate on-disk agent sessions via the Rust `agentscan_collect` command. */
-async function computeAnalytics(): Promise<Analytics> {
+/**
+ * Aggregate on-disk agent sessions via the Rust `agentscan_collect` command.
+ *
+ * The command is async on the Rust side (the disk walk runs on a blocking
+ * thread pool, off the IPC worker, so the UI never freezes) and keeps a short
+ * TTL cache of the last scan. Pass `force` to bypass that cache and re-read
+ * disk — used by the explicit `refresh()`, not the background re-sync.
+ */
+async function computeAnalytics(force: boolean): Promise<Analytics> {
   const now = new Date();
   return invoke<Analytics>("agentscan_collect", {
     nowMs: now.getTime(),
     // getTimezoneOffset() is minutes *behind* UTC (positive west of UTC), so
     // negate to get the offset to add to a UTC instant to reach local time.
     tzOffsetMs: -now.getTimezoneOffset() * 60_000,
+    force,
   });
 }
 
@@ -136,11 +165,14 @@ export function useAnalytics(): UseAnalytics {
     seed?.savedAt ?? null,
   );
 
-  const refresh = useCallback(() => {
+  // `force` bypasses the Rust-side scan cache (re-reads disk). The mount-time
+  // sync passes `false` so a re-mount within the TTL reuses the last scan; a
+  // user-triggered refresh defaults to `true` to pull genuinely fresh data.
+  const refresh = useCallback((force = true) => {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    computeAnalytics()
+    computeAnalytics(force)
       .then((result) => {
         if (cancelled) return;
         setData(result);
@@ -159,7 +191,8 @@ export function useAnalytics(): UseAnalytics {
     };
   }, []);
 
-  useEffect(() => refresh(), [refresh]);
+  // Mount-time sync reuses a fresh cached scan when available (force = false).
+  useEffect(() => refresh(false), [refresh]);
 
   return { data, loading, error, syncedAt, refresh };
 }

@@ -16,6 +16,7 @@ import {
   type Analytics,
   type DayActivity,
   type SourceBreakdown,
+  type WorkspaceUsage,
 } from "./lib/useAnalytics";
 
 const SOURCE_LABELS: Record<SourceBreakdown["source"], string> = {
@@ -115,6 +116,7 @@ export function AnalyticsDashboardPane() {
         <Header onRefresh={refresh} loading={loading} syncedAt={syncedAt} />
         <KpiRow data={data} />
         <SourcesRow sources={data.sources} />
+        <WorkspacesRow workspaces={data.workspaces} />
         <ActivityChart daily={data.daily} />
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <ModelsCard data={data} />
@@ -164,7 +166,7 @@ function Header({
       </div>
       <button
         type="button"
-        onClick={onRefresh}
+        onClick={() => onRefresh()}
         title="Refresh"
         className="flex items-center gap-1.5 rounded-md border border-border/60 bg-background/50 px-2.5 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
       >
@@ -271,6 +273,64 @@ function SourcesRow({ sources }: { sources: SourceBreakdown[] }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/** Short label for a workspace path: trailing 2 path segments, else the raw
+ * value (Gemini hash / "default"). Full value lives in the `title` tooltip. */
+function workspaceLabel(ws: string): string {
+  const parts = ws.split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 1) return ws;
+  return parts.slice(-2).join("/");
+}
+
+/**
+ * Per-workspace breakdown — one card per distinct account/environment. Usage is
+ * never summed across workspaces (a second `$CLAUDE_CONFIG_DIR` account, a
+ * different project cwd, or another agent each get their own card), so two
+ * accounts sharing a project path stay separate rows.
+ */
+function WorkspacesRow({ workspaces }: { workspaces: WorkspaceUsage[] }) {
+  if (workspaces.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-muted-foreground/80">
+        <HugeiconsIcon icon={Tag01Icon} size={12} strokeWidth={1.75} />
+        Workspaces ({workspaces.length})
+      </div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {workspaces.map((w) => (
+          <div
+            key={`${w.source}:${w.workspace}`}
+            className="flex flex-col gap-1 rounded-lg border border-border/50 bg-background/40 p-3"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span
+                className="truncate font-mono text-[12px] font-medium text-foreground"
+                title={w.workspace}
+              >
+                {workspaceLabel(w.workspace)}
+              </span>
+              <span className="shrink-0 rounded bg-muted/60 px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-wide text-muted-foreground">
+                {SOURCE_LABELS[w.source]}
+              </span>
+            </div>
+            <div className="font-mono text-[15px] font-semibold leading-none text-foreground">
+              {fmtNum(w.estTokens)}{" "}
+              <span className="text-[11px] font-normal text-muted-foreground">
+                tok
+              </span>
+              <span className="ml-2 text-[12px] font-normal text-muted-foreground">
+                {fmtUsd(w.estCostUsd)}
+              </span>
+            </div>
+            <div className="truncate font-mono text-[10.5px] text-muted-foreground">
+              {fmtNum(w.sessions)} sessions · {fmtNum(w.messages)} msg
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

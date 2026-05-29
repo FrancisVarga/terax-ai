@@ -18,6 +18,7 @@ import {
   type SessionBucket,
   type Totals,
   type UseCcusage,
+  type WorkspaceReport,
 } from "./lib/useCcusage";
 
 /** The report views, mirroring ccusage's subcommands. */
@@ -88,6 +89,18 @@ export function CcusageDashboardPane() {
   const usage = useCcusage();
   const { data, loading, error } = usage;
   const [view, setView] = useState<View>("daily");
+  // Which workspace's report to show. `null` = the merged "All" view (the
+  // top-level report); otherwise the matching entry from `data.workspaces`.
+  // Distinct accounts/environments are never summed, so picking one shows only
+  // that account's usage — including its own independent 5-hour blocks.
+  const [workspace, setWorkspace] = useState<string | null>(null);
+
+  // Resolve the active report: the merged view, or the selected workspace's
+  // sub-report. Falls back to merged if the selection vanished after a refresh.
+  const active =
+    workspace === null
+      ? data
+      : (data.workspaces.find((w) => w.workspace === workspace) ?? data);
 
   if (loading && data.totals.messages === 0) {
     return (
@@ -116,22 +129,29 @@ export function CcusageDashboardPane() {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex max-w-5xl flex-col gap-5 p-5">
         <Header usage={usage} />
-        <TotalsRow totals={data.totals} />
+        {data.workspaces.length > 1 ? (
+          <WorkspaceSwitcher
+            workspaces={data.workspaces}
+            selected={workspace}
+            onChange={setWorkspace}
+          />
+        ) : null}
+        <TotalsRow totals={active.totals} />
         <ViewSwitcher view={view} onChange={setView} />
-        {data.totals.messages === 0 ? (
+        {active.totals.messages === 0 ? (
           <EmptyState />
         ) : view === "session" ? (
-          <SessionTable sessions={data.sessions} />
+          <SessionTable sessions={active.sessions} />
         ) : view === "blocks" ? (
-          <BlocksView blocks={data.blocks} />
+          <BlocksView blocks={active.blocks} />
         ) : (
           <PeriodTable
             buckets={
               view === "daily"
-                ? data.daily
+                ? active.daily
                 : view === "weekly"
-                  ? data.weekly
-                  : data.monthly
+                  ? active.weekly
+                  : active.monthly
             }
             keyLabel={
               view === "daily" ? "Day" : view === "weekly" ? "Week" : "Month"
@@ -287,6 +307,62 @@ function ViewSwitcher({
   );
 }
 
+/** Short, readable label for a workspace path/hash (keeps the tail segment). */
+function shortWorkspace(w: string): string {
+  const parts = w.split(/[\\/]/).filter(Boolean);
+  const tail = parts.length ? parts[parts.length - 1] : w;
+  return tail.length > 22 ? `…${tail.slice(-21)}` : tail;
+}
+
+/**
+ * Account/environment picker. Switching scopes every table below to a single
+ * workspace's report — its own totals, sessions, periods, and independent
+ * 5-hour blocks — so usage from different accounts is never shown summed.
+ * `null` selects the merged "All" view.
+ */
+function WorkspaceSwitcher({
+  workspaces,
+  selected,
+  onChange,
+}: {
+  workspaces: WorkspaceReport[];
+  selected: string | null;
+  onChange: (w: string | null) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      <button
+        type="button"
+        onClick={() => onChange(null)}
+        className={cn(
+          "rounded-md border px-2 py-1 text-[10.5px] font-medium transition-colors",
+          selected === null
+            ? "border-primary/50 bg-accent text-foreground"
+            : "border-border/60 bg-background/50 text-muted-foreground hover:text-foreground",
+        )}
+      >
+        All workspaces
+      </button>
+      {workspaces.map((w) => (
+        <button
+          key={`${w.source}:${w.workspace}`}
+          type="button"
+          onClick={() => onChange(w.workspace)}
+          title={`${w.source} · ${w.workspace}`}
+          className={cn(
+            "rounded-md border px-2 py-1 text-[10.5px] font-medium transition-colors",
+            selected === w.workspace
+              ? "border-primary/50 bg-accent text-foreground"
+              : "border-border/60 bg-background/50 text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {shortWorkspace(w.workspace)}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function EmptyState() {
   return (
     <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-border/40 bg-background/20 p-10 text-center text-muted-foreground">
@@ -423,7 +499,10 @@ function SessionTable({ sessions }: { sessions: SessionBucket[] }) {
                 <span className="rounded bg-foreground/[0.06] px-1 py-0.5 text-[9.5px] font-medium uppercase text-muted-foreground">
                   {SOURCE_LABELS[s.source]}
                 </span>{" "}
-                <span className="font-mono text-muted-foreground" title={s.key}>
+                <span
+                  className="font-mono text-muted-foreground"
+                  title={`${s.key}\n${s.workspace}`}
+                >
                   {shortId(s.key)}
                 </span>
               </td>

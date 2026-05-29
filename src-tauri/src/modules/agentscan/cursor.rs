@@ -186,6 +186,12 @@ fn parse_bubble(v: &Value, composer_id: &str) -> Option<Msg> {
 
     Some(Msg {
         source: Source::Cursor,
+        // Cursor's global state.vscdb doesn't link a composer to a project
+        // folder (per-workspace data lives in separate workspaceStorage DBs
+        // keyed by folder URI, which this parser doesn't open). So all Cursor
+        // chat rolls up under one honest "default" workspace rather than a
+        // fabricated per-project split.
+        workspace: "default".to_string(),
         session_id: composer_id.to_string(),
         ts_ms,
         role,

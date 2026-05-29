@@ -7,4 +7,5 @@ export {
   type ModelUsage,
   type ToolUsage,
   type UseAnalytics,
+  type WorkspaceUsage,
 } from "./lib/useAnalytics";

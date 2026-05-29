@@ -21,9 +21,52 @@ use crate::modules::agentscan::{
 };
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Claude's rolling billing window length.
 const BLOCK_MS: i64 = 5 * 60 * 60 * 1000;
+
+/// How long a disk scan stays fresh. Within this window, repeated
+/// `ccusage_collect` calls (cost-mode switches, the mount-time refresh) reuse
+/// the cached message stream instead of re-walking every transcript on disk.
+const SCAN_TTL: Duration = Duration::from_secs(30);
+
+/// In-memory cache of the last full disk scan. The expensive part of a report
+/// is the disk walk (`scan()` over every Claude/Gemini/Cursor transcript); the
+/// per-mode `build()` is cheap arithmetic. So we cache the raw [`Msg`] stream,
+/// not the finished report — a mode switch rebuilds from memory in microseconds.
+struct ScanCache {
+    /// When this scan was taken (monotonic), for TTL expiry.
+    at: Instant,
+    /// The deduped-on-build raw message stream from all sources.
+    messages: Vec<Msg>,
+}
+
+/// Process-global scan cache. `Mutex<Option<…>>` because the cache is empty
+/// until the first scan and is shared across the async command's invocations.
+static SCAN_CACHE: Mutex<Option<ScanCache>> = Mutex::new(None);
+
+/// Read the cached message stream if it is still within [`SCAN_TTL`].
+fn cached_messages() -> Option<Vec<Msg>> {
+    let guard = SCAN_CACHE.lock().ok()?;
+    let entry = guard.as_ref()?;
+    if entry.at.elapsed() < SCAN_TTL {
+        Some(entry.messages.clone())
+    } else {
+        None
+    }
+}
+
+/// Walk every source's on-disk transcripts into one message stream. This is the
+/// blocking, disk-bound work; callers run it via `spawn_blocking`.
+fn scan_all_sources() -> Vec<Msg> {
+    let mut messages = Vec::new();
+    for res in [claude::scan(), gemini::scan(), cursor::scan()] {
+        messages.extend(res.messages);
+    }
+    messages
+}
 
 /// How cost is derived per message. Mirrors ccusage's `--mode` flag.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -102,6 +145,9 @@ pub struct SessionBucket {
     #[serde(flatten)]
     pub bucket: PeriodBucket,
     pub source: String,
+    /// Workspace/account this session belongs to, so the merged session list
+    /// stays attributable to its origin account/environment.
+    pub workspace: String,
     pub messages: u64,
     #[serde(rename = "startMs")]
     pub start_ms: i64,
@@ -156,6 +202,24 @@ pub struct Totals {
     pub cost_usd: f64,
 }
 
+/// One workspace's self-contained ccusage report. A "workspace" is a distinct
+/// account or environment (see [`Msg::workspace`](crate::modules::agentscan::Msg));
+/// its report is built only from that workspace's messages, so totals, periods,
+/// sessions, and — critically — the rolling **5-hour billing blocks** are never
+/// merged across accounts. Merging blocks across accounts would invent
+/// overlapping windows and meaningless burn rates, so this split is a
+/// correctness fix, not just a display nicety.
+#[derive(Serialize)]
+pub struct WorkspaceReport {
+    /// Owning source (`claude` / `gemini` / `cursor`).
+    pub source: String,
+    /// Workspace label (project cwd, Gemini project hash, or config-root tag).
+    pub workspace: String,
+    /// This workspace's report body (same shape as the top-level merged view).
+    #[serde(flatten)]
+    pub report: CcusageReport,
+}
+
 /// Everything the ccusage dashboard renders, in one round-trip.
 #[derive(Serialize)]
 pub struct CcusageReport {
@@ -168,6 +232,13 @@ pub struct CcusageReport {
     pub sessions: Vec<SessionBucket>,
     pub blocks: Vec<BlockBucket>,
     pub sources: Vec<SourceBreakdown>,
+    /// Per-workspace breakdown — one entry per distinct account/environment,
+    /// each a full report over only that workspace's messages, sorted by total
+    /// tokens desc. Empty on a per-workspace report itself (no recursion). The
+    /// top-level fields above remain the merged "All workspaces" view so the UI
+    /// can show an aggregate tab plus one tab per workspace.
+    #[serde(rename = "workspaces")]
+    pub workspaces: Vec<WorkspaceReport>,
 }
 
 /// ISO-8601 week key (`YYYY-Www`) for a local day index, Monday-anchored.
@@ -246,8 +317,12 @@ fn finalize(mut map: HashMap<String, PeriodBucket>) -> Vec<PeriodBucket> {
     v
 }
 
-/// Compute the full report. Pulled out of the command for unit testing.
-fn build(messages: Vec<Msg>, now_ms: i64, tz_offset_ms: i64, mode: CostMode) -> CcusageReport {
+/// Compute one report over a single message set (the merged set, or one
+/// workspace's slice). Does NOT compute the per-workspace breakdown — that is
+/// [`build`]'s job, which calls this once per workspace. Keeping the split out
+/// of here prevents infinite recursion and keeps all the bucketing math in one
+/// place.
+fn build_one(messages: Vec<Msg>, now_ms: i64, tz_offset_ms: i64, mode: CostMode) -> CcusageReport {
     let messages = dedup(messages);
 
     let mut totals = Totals::default();
@@ -291,6 +366,7 @@ fn build(messages: Vec<Msg>, now_ms: i64, tz_offset_ms: i64, mode: CostMode) -> 
         let s = sessions.entry(skey.clone()).or_insert_with(|| SessionBucket {
             bucket: PeriodBucket::new(m.session_id.clone()),
             source: source_key(m.source).to_string(),
+            workspace: m.workspace.clone(),
             messages: 0,
             start_ms: m.ts_ms,
             end_ms: m.ts_ms,
@@ -326,7 +402,48 @@ fn build(messages: Vec<Msg>, now_ms: i64, tz_offset_ms: i64, mode: CostMode) -> 
         sessions: session_vec,
         blocks,
         sources: source_breakdowns(&messages, mode),
+        // Filled by `build` for the merged report; always empty here.
+        workspaces: Vec::new(),
     }
+}
+
+/// Compute the full report: the merged "All workspaces" view plus a
+/// self-contained sub-report per `(source, workspace)`. The expensive disk walk
+/// already happened upstream; this is in-memory arithmetic, so building N+1
+/// reports is cheap. Pulled out of the command for unit testing.
+fn build(messages: Vec<Msg>, now_ms: i64, tz_offset_ms: i64, mode: CostMode) -> CcusageReport {
+    // Partition by (source, workspace) so distinct accounts/environments never
+    // mix — preserving message order within each group so block windows stay
+    // faithful. A BTreeMap keeps the workspace tabs in a stable, deterministic
+    // order before the final token-desc sort.
+    let mut groups: std::collections::BTreeMap<(String, String), Vec<Msg>> =
+        std::collections::BTreeMap::new();
+    for m in &messages {
+        groups
+            .entry((source_key(m.source).to_string(), m.workspace.clone()))
+            .or_default()
+            .push(m.clone());
+    }
+
+    let mut workspaces: Vec<WorkspaceReport> = groups
+        .into_iter()
+        .map(|((source, workspace), msgs)| WorkspaceReport {
+            source,
+            workspace,
+            report: build_one(msgs, now_ms, tz_offset_ms, mode),
+        })
+        .collect();
+    // Busiest workspace (by fresh tokens) first.
+    workspaces.sort_by(|a, b| {
+        b.report
+            .totals
+            .total_tokens
+            .cmp(&a.report.totals.total_tokens)
+    });
+
+    let mut merged = build_one(messages, now_ms, tz_offset_ms, mode);
+    merged.workspaces = workspaces;
+    merged
 }
 
 fn source_key(s: Source) -> &'static str {
@@ -469,14 +586,46 @@ fn finish_block(b: &mut BlockBucket, now_ms: i64, _mode: CostMode) {
 ///
 /// `now_ms`/`tz_offset_ms` come from the webview (owns the user's clock); `cost_mode`
 /// is `auto` | `calculate` | `display`.
+///
+/// **Off the main thread.** This is declared `async` so Tauri dispatches it on a
+/// worker thread rather than the UI thread, and the blocking disk walk itself
+/// runs inside [`spawn_blocking`](tauri::async_runtime::spawn_blocking) so it
+/// never starves the async runtime. The webview's IPC promise resolves when the
+/// scan completes; the UI event loop stays responsive throughout — that is what
+/// stops the app from hanging on large transcript histories.
+///
+/// **Cached.** A [`SCAN_TTL`]-bounded in-memory cache holds the raw message
+/// stream from the last disk walk. Cost-mode switches and the mount-time refresh
+/// within that window rebuild the report from memory (cheap) instead of
+/// re-reading every transcript (expensive).
 #[tauri::command]
-pub fn ccusage_collect(now_ms: i64, tz_offset_ms: i64, cost_mode: String) -> CcusageReport {
+pub async fn ccusage_collect(
+    now_ms: i64,
+    tz_offset_ms: i64,
+    cost_mode: String,
+) -> Result<CcusageReport, String> {
     let mode = CostMode::parse(&cost_mode);
-    let mut messages = Vec::new();
-    for res in [claude::scan(), gemini::scan(), cursor::scan()] {
-        messages.extend(res.messages);
+
+    // Fresh-enough cached scan? Rebuild the per-mode report from it in-thread —
+    // this is microsecond-scale arithmetic, no disk, no spawn needed.
+    if let Some(messages) = cached_messages() {
+        return Ok(build(messages, now_ms, tz_offset_ms, mode));
     }
-    build(messages, now_ms, tz_offset_ms, mode)
+
+    // Cache miss / stale: do the disk walk off the runtime on a blocking thread.
+    let messages = tauri::async_runtime::spawn_blocking(scan_all_sources)
+        .await
+        .map_err(|e| format!("ccusage scan task failed: {e}"))?;
+
+    // Refresh the cache for subsequent mode switches / refreshes.
+    if let Ok(mut guard) = SCAN_CACHE.lock() {
+        *guard = Some(ScanCache {
+            at: Instant::now(),
+            messages: messages.clone(),
+        });
+    }
+
+    Ok(build(messages, now_ms, tz_offset_ms, mode))
 }
 
 #[cfg(test)]
@@ -495,6 +644,7 @@ mod tests {
     ) -> Msg {
         Msg {
             source,
+            workspace: "test-ws".to_string(),
             session_id: sid.to_string(),
             ts_ms: ts,
             role,
@@ -517,7 +667,9 @@ mod tests {
     #[test]
     #[ignore]
     fn ccusage_live() {
-        let r = ccusage_collect(1_900_000_000_000, 0, "auto".into());
+        // Exercise the real disk path the command takes, minus the async/cache
+        // wrapper (which only moves the work to a worker thread).
+        let r = build(scan_all_sources(), 1_900_000_000_000, 0, CostMode::Auto);
         eprintln!(
             "totals: sessions={} messages={} tokens={} cost=${:.4}",
             r.totals.sessions, r.totals.messages, r.totals.total_tokens, r.totals.cost_usd
@@ -588,7 +740,9 @@ mod tests {
     fn blocks_split_on_window_and_gap() {
         let h = 3_600_000i64;
         // Three msgs in hour 0..1 → one block. One 6h later → new block (gap).
-        let m0 = msg(Source::Claude, "s", 0, Role::Assistant, "claude-opus", 10, 10);
+        // Timestamps must be > 0: `compute_blocks` drops epoch-0 (untimed)
+        // messages, so anchor the first message at 1ms past the hour, not 0.
+        let m0 = msg(Source::Claude, "s", 1, Role::Assistant, "claude-opus", 10, 10);
         let m1 = msg(Source::Claude, "s", h / 2, Role::Assistant, "claude-opus", 10, 10);
         let m2 = msg(Source::Claude, "s", 6 * h, Role::Assistant, "claude-opus", 10, 10);
         let blocks = compute_blocks(&[m0, m1, m2], 100 * h, CostMode::Calculate);
@@ -603,8 +757,10 @@ mod tests {
     #[test]
     fn active_block_has_burn_and_projection() {
         let h = 3_600_000i64;
-        // Block starts at 0, "now" is 1h in → active, half a window remaining.
-        let m = msg(Source::Claude, "s", 0, Role::Assistant, "claude-opus-4-7", 1_000_000, 0);
+        // Block floors to hour 0, "now" is 1h in → active, 1/5 window elapsed.
+        // ts must be > 0 (epoch-0 messages are treated as untimed and dropped),
+        // so seed at 1ms — `floor_to_hour(1)` is still 0, keeping the math.
+        let m = msg(Source::Claude, "s", 1, Role::Assistant, "claude-opus-4-7", 1_000_000, 0);
         let blocks = compute_blocks(std::slice::from_ref(&m), h, CostMode::Calculate);
         assert_eq!(blocks.len(), 1);
         let b = &blocks[0];
@@ -627,5 +783,39 @@ mod tests {
         assert_eq!(rep.totals.total_tokens, 100 + 200 + 10 + 20);
         assert_eq!(rep.daily.len(), 1, "both messages land on the same day");
         assert_eq!(rep.sources.len(), 3);
+    }
+
+    #[test]
+    fn splits_by_workspace_and_never_merges_accounts() {
+        // Two Claude messages in different workspaces (e.g. two accounts/envs),
+        // 6h apart so a merged view would (wrongly) show them in one timeframe
+        // but distinct 5h blocks. Per-workspace they must be fully separate.
+        let h = 3_600_000i64;
+        let mut a = msg(Source::Claude, "s1", 1_000 * h, Role::Assistant, "claude-opus", 100, 200);
+        a.workspace = "/home/acct-a/proj".into();
+        let mut b = msg(Source::Claude, "s2", 1_006 * h, Role::Assistant, "claude-opus", 10, 20);
+        b.workspace = "/home/acct-b/proj".into();
+
+        let rep = build(vec![a, b], 2_000 * h, 0, CostMode::Calculate);
+
+        // Merged view still totals everything.
+        assert_eq!(rep.totals.messages, 2);
+        assert_eq!(rep.totals.total_tokens, 100 + 200 + 10 + 20);
+
+        // Two workspaces, each self-contained.
+        assert_eq!(rep.workspaces.len(), 2, "one report per distinct workspace");
+        let busiest = &rep.workspaces[0]; // sorted by tokens desc
+        assert_eq!(busiest.workspace, "/home/acct-a/proj");
+        assert_eq!(busiest.report.totals.total_tokens, 300);
+        assert_eq!(busiest.report.totals.messages, 1);
+        // A workspace report carries no nested workspaces (no recursion).
+        assert!(busiest.report.workspaces.is_empty());
+        // Each workspace owns exactly its own session, not the other's.
+        assert_eq!(busiest.report.sessions.len(), 1);
+        assert_eq!(busiest.report.sessions[0].workspace, "/home/acct-a/proj");
+
+        let other = &rep.workspaces[1];
+        assert_eq!(other.workspace, "/home/acct-b/proj");
+        assert_eq!(other.report.totals.total_tokens, 30);
     }
 }

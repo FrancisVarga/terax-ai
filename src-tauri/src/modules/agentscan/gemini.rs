@@ -48,12 +48,17 @@ pub fn scan() -> SourceResult {
             json_files.push(logs);
         }
 
+        // The project-hash dir is Gemini's per-workspace identity (one hash per
+        // project root the CLI was launched from). Distinct hashes = distinct
+        // workspaces, so usage is never merged across them.
+        let workspace = dir_name(&proj_path);
+
         for file in json_files {
             let session_id = file
                 .file_stem()
                 .and_then(|s| s.to_str())
-                .map(|s| format!("{}/{}", dir_name(&proj_path), s))
-                .unwrap_or_else(|| dir_name(&proj_path));
+                .map(|s| format!("{}/{}", workspace, s))
+                .unwrap_or_else(|| workspace.clone());
 
             let Ok(content) = fs::read_to_string(&file) else {
                 continue;
@@ -65,7 +70,7 @@ pub fn scan() -> SourceResult {
             let turns = extract_turns(&v);
             let mut any = false;
             for turn in turns {
-                if let Some(m) = parse_turn(turn, &session_id) {
+                if let Some(m) = parse_turn(turn, &session_id, &workspace) {
                     any = true;
                     messages.push(m);
                 }
@@ -124,7 +129,7 @@ fn extract_turns(v: &Value) -> Vec<&Value> {
     Vec::new()
 }
 
-fn parse_turn(turn: &Value, session_id: &str) -> Option<Msg> {
+fn parse_turn(turn: &Value, session_id: &str, workspace: &str) -> Option<Msg> {
     let role_str = turn.get("role").and_then(Value::as_str)?;
     let role = match role_str {
         "user" => Role::User,
@@ -164,6 +169,7 @@ fn parse_turn(turn: &Value, session_id: &str) -> Option<Msg> {
 
     Some(Msg {
         source: Source::Gemini,
+        workspace: workspace.to_string(),
         session_id: session_id.to_string(),
         ts_ms,
         role,
@@ -192,10 +198,11 @@ mod tests {
         ]);
         let turns = extract_turns(&v);
         assert_eq!(turns.len(), 2);
-        let u = parse_turn(turns[0], "s").unwrap();
+        let u = parse_turn(turns[0], "s", "proj-hash").unwrap();
         assert_eq!(u.role, Role::User);
         assert_eq!(u.input_tokens, 2);
-        let a = parse_turn(turns[1], "s").unwrap();
+        assert_eq!(u.workspace, "proj-hash");
+        let a = parse_turn(turns[1], "s", "proj-hash").unwrap();
         assert_eq!(a.role, Role::Assistant);
         assert_eq!(a.output_tokens, 3);
         assert_eq!(a.model.as_deref(), Some("gemini"));
@@ -211,6 +218,6 @@ mod tests {
     #[test]
     fn ignores_unknown_role() {
         let t = serde_json::json!({"role": "system", "parts": [{"text": "x"}]});
-        assert!(parse_turn(&t, "s").is_none());
+        assert!(parse_turn(&t, "s", "ws").is_none());
     }
 }
