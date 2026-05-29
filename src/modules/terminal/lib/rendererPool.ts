@@ -125,6 +125,15 @@ function termOptions() {
     scrollback: prefs.terminalScrollback,
     allowProposedApi: true,
     minimumContrastRatio: bgActive(prefs) ? MCR_BG_ACTIVE : MCR_BG_INACTIVE,
+    // Mouse-wheel scrolls instantly (no animation) so scroll latency stays at
+    // zero — the WebGL renderer repaints fast enough that animating between
+    // origin and target would only add perceived lag, not smoothness.
+    smoothScrollDuration: 0,
+    // Squeeze glyphs wider than one cell (powerline separators, box-drawing,
+    // some CJK/emoji) back into the cell instead of letting them bleed and get
+    // clipped by the next paint. Crisper, stable rendering with no measurable
+    // cost on plain text — the rescale only runs for the rare wide glyph.
+    rescaleOverlappingGlyphs: true,
   };
 }
 
