@@ -31,10 +31,13 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      # Pin the Bun version so setup-bun's tool cache actually hits across runs;
+      # `latest` re-resolves and re-downloads every time, defeating the cache and
+      # making sidecar output nondeterministic between releases.
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: "1.3.14"
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -45,6 +48,12 @@ jobs:
         with:
           workspaces: ./src-tauri -> target
           key: ${{ matrix.platform }}-${{ matrix.rust-target }}
+          # tauri-action links the final crate late (lto=fat). If that step fails,
+          # still persist the cached dep compile so the retry skips rebuilding the
+          # whole AWS/arrow/parquet/russh tree.
+          cache-on-failure: true
+          # Cache the build script + proc-macro outputs too, not just deps.
+          cache-all-crates: true
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
