@@ -72,6 +72,7 @@ import {
 import { BunqueueStack } from "@/modules/bunqueue";
 import { CommandPopup } from "@/modules/command-popup";
 import { MarkdownStack } from "@/modules/markdown";
+import { DataStack, dataFormatForPath } from "@/modules/data";
 import { PreviewStack, type PreviewPaneHandle } from "@/modules/preview";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -280,6 +281,7 @@ export default function App() {
     pinTab,
     newPreviewTab,
     newMarkdownTab,
+    newDataTab,
     openBunqueueTab,
     openAnalyticsTab,
     openCcusageTab,
@@ -682,6 +684,7 @@ export default function App() {
   const isEditorTab = activeTab?.kind === "editor";
   const isPreviewTab = activeTab?.kind === "preview";
   const isMarkdownTab = activeTab?.kind === "markdown";
+  const isDataTab = activeTab?.kind === "data";
   const isAiDiffTab = activeTab?.kind === "ai-diff";
   const isGitDiffTab =
     activeTab?.kind === "git-diff" || activeTab?.kind === "git-commit-file";
@@ -1279,17 +1282,35 @@ export default function App() {
         });
         return;
       }
+      // Tabular files (sqlite/csv/parquet) open in the data-grid viewer
+      // instead of the text editor. The data tab is keyed by path, so a repeat
+      // click just refocuses it.
+      const dataFormat = dataFormatForPath(path);
+      if (dataFormat) {
+        newDataTab(path, dataFormat);
+        return;
+      }
       // Explorer defaults to preview (pin=false); explicit actions like
       // context-menu "Open" pass pin=true for a persistent tab.
       openFileTab(path, pin ?? false);
     },
-    [openFileTab],
+    [openFileTab, newDataTab],
+  );
+
+  // Context-menu "Preview Data" — same destination as a click on a data file,
+  // exposed explicitly so the action is discoverable.
+  const openDataPreview = useCallback(
+    (path: string) => {
+      const format = dataFormatForPath(path);
+      if (format) newDataTab(path, format);
+    },
+    [newDataTab],
   );
 
   const handlePathRenamed = useCallback(
     (from: string, to: string) => {
       for (const t of tabs) {
-        if (t.kind !== "editor") continue;
+        if (t.kind !== "editor" && t.kind !== "data") continue;
         if (t.path === from) {
           const i = to.lastIndexOf("/");
           updateTab(t.id, { path: to, title: i === -1 ? to : to.slice(i + 1) });
@@ -1322,6 +1343,13 @@ export default function App() {
     (path: string) => {
       const dirty: number[] = [];
       for (const t of tabs) {
+        // Data tabs are read-only previews — close them outright on delete.
+        if (t.kind === "data") {
+          if (t.path === path || t.path.startsWith(`${path}/`)) {
+            disposeTab(t.id);
+          }
+          continue;
+        }
         if (t.kind !== "editor") continue;
         if (t.path !== path && !t.path.startsWith(`${path}/`)) continue;
         if (t.dirty) {
@@ -1848,6 +1876,15 @@ export default function App() {
       <div
         className={cn(
           "absolute inset-0 px-3 pt-2 pb-2",
+          !isDataTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isDataTab}
+      >
+        <DataStack tabs={tabs} activeId={activeId} />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0 px-3 pt-2 pb-2",
           !isAiDiffTab && "invisible pointer-events-none",
         )}
         aria-hidden={!isAiDiffTab}
@@ -2011,6 +2048,7 @@ export default function App() {
                         onRevealInTerminal={cdInNewTab}
                         onAttachToAgent={handleAttachFileToAgent}
                         onOpenMarkdownPreview={openMarkdownPreview}
+                        onOpenDataPreview={openDataPreview}
                         onAddToProjects={handleAddToProjects}
                         onExitRemote={remoteRoot ? exitRemote : undefined}
                       />

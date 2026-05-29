@@ -36,11 +36,16 @@ export type EntryRowProps = {
   onRevealInTerminal?: (path: string) => void;
   onAttachToAgent?: (path: string) => void;
   onOpenMarkdownPreview?: (path: string) => void;
+  onOpenDataPreview?: (path: string) => void;
   onAddToProjects?: (path: string) => void;
 };
 
 function isMarkdownPath(path: string): boolean {
   return /\.(md|markdown|mdx)$/i.test(path);
+}
+
+function isDataPath(path: string): boolean {
+  return /\.(sqlite|sqlite3|db|csv|parquet|pq)$/i.test(path);
 }
 
 function EntryRowImpl(props: EntryRowProps) {
@@ -59,6 +64,7 @@ function EntryRowImpl(props: EntryRowProps) {
     onRevealInTerminal,
     onAttachToAgent,
     onOpenMarkdownPreview,
+    onOpenDataPreview,
     onAddToProjects,
   } = props;
 
@@ -148,6 +154,14 @@ function EntryRowImpl(props: EntryRowProps) {
             onSelect={() => onOpenMarkdownPreview(path)}
           >
             Open Preview
+          </ContextMenuItem>
+        )}
+        {!isDir && isDataPath(path) && onOpenDataPreview && (
+          <ContextMenuItem
+            className={COMPACT_ITEM}
+            onSelect={() => onOpenDataPreview(path)}
+          >
+            Preview Data
           </ContextMenuItem>
         )}
         {isDir && onAddToProjects && (

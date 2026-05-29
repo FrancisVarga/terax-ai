@@ -55,6 +55,15 @@ export type MarkdownTab = {
   path: string;
 };
 
+/** Tabular data preview (SQLite / CSV / Parquet) rendered in an AG Grid. */
+export type DataTab = {
+  id: number;
+  kind: "data";
+  title: string;
+  path: string;
+  format: "sqlite" | "csv" | "parquet";
+};
+
 export type AiDiffStatus = "pending" | "approved" | "rejected";
 
 export type AiDiffTab = {
@@ -149,6 +158,7 @@ export type Tab =
   | EditorTab
   | PreviewTab
   | MarkdownTab
+  | DataTab
   | AiDiffTab
   | GitDiffTab
   | GitHistoryTab
@@ -683,6 +693,30 @@ export function useTabs(
     return targetId;
   }, []);
 
+  const newDataTab = useCallback(
+    (path: string, format: DataTab["format"]) => {
+      let targetId: number | null = null;
+      setTabs((curr) => {
+        const existing = curr.find(
+          (t) => t.kind === "data" && t.path === path,
+        );
+        if (existing) {
+          targetId = existing.id;
+          return curr;
+        }
+        const id = nextIdRef.current++;
+        targetId = id;
+        return [
+          ...curr,
+          { id, kind: "data", title: basename(path), path, format },
+        ];
+      });
+      if (targetId !== null) setActiveId(targetId);
+      return targetId;
+    },
+    [],
+  );
+
   const openGitDiffTab = useCallback(
     (input: {
       path: string;
@@ -872,6 +906,14 @@ export function useTabs(
           return {
             ...x,
             ...(patch.title !== undefined && { title: patch.title }),
+          };
+        }
+        if (x.kind === "data") {
+          // Path-keyed tab: follow renames of the underlying file.
+          return {
+            ...x,
+            ...(patch.title !== undefined && { title: patch.title }),
+            ...(patch.path !== undefined && { path: patch.path }),
           };
         }
         // editor tab: auto-promote from preview the moment the file becomes dirty.
@@ -1079,6 +1121,7 @@ export function useTabs(
     pinTab,
     newPreviewTab,
     newMarkdownTab,
+    newDataTab,
     openBunqueueTab,
     openProjectsTab,
     openProjectDetailTab,

@@ -47,6 +47,8 @@ type Props = {
   onRevealInTerminal?: (path: string) => void;
   onAttachToAgent?: (path: string) => void;
   onOpenMarkdownPreview?: (path: string) => void;
+  /** Tabular files (sqlite/csv/parquet): open the data-grid preview. */
+  onOpenDataPreview?: (path: string) => void;
   /** Folder-only: add the right-clicked directory to the Projects list. */
   onAddToProjects?: (path: string) => void;
   /** When set, the explorer is browsing a remote SFTP root; calling it
@@ -159,6 +161,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
       onRevealInTerminal,
       onAttachToAgent,
       onOpenMarkdownPreview,
+      onOpenDataPreview,
       onAddToProjects,
       onExitRemote,
     },
@@ -351,6 +354,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
               onRevealInTerminal={onRevealInTerminal}
               onAttachToAgent={onAttachToAgent}
               onOpenMarkdownPreview={onOpenMarkdownPreview}
+              onOpenDataPreview={onOpenDataPreview}
               onAddToProjects={onAddToProjects}
             />
           );

@@ -5,6 +5,7 @@ import "@fontsource/jetbrains-mono/cyrillic-700.css";
 import "@xterm/xterm/css/xterm.css";
 import "./styles/globals.css";
 
+import { AllCommunityModule, ModuleRegistry } from "ag-grid-community";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import ReactDOM from "react-dom/client";
@@ -18,6 +19,11 @@ import { USE_CUSTOM_WINDOW_CONTROLS } from "./lib/platform";
 // ErrorBoundary below only sees render/lifecycle crashes). Install before the
 // first render so even bootstrap-time rejections are surfaced.
 installGlobalErrorHandler();
+
+// Register every AG Grid community feature once, before any grid mounts. v33+
+// requires explicit module registration; the data-preview grid uses the
+// Theming API (no legacy CSS import) so this is the only global AG Grid setup.
+ModuleRegistry.registerModules([AllCommunityModule]);
 
 if (USE_CUSTOM_WINDOW_CONTROLS) {
   document.documentElement.dataset.chrome = "borderless";
