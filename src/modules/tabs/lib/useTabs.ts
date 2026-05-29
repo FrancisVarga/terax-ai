@@ -100,6 +100,44 @@ export type GitCommitFileDiffTab = {
   originalPath: string | null;
 };
 
+export type BunqueueTab = {
+  id: number;
+  kind: "bunqueue";
+  title: string;
+};
+
+export type AnalyticsTab = {
+  id: number;
+  kind: "agentlytics";
+  title: string;
+};
+
+export type ProjectsTab = {
+  id: number;
+  kind: "projects";
+  title: string;
+};
+
+export type ProjectDetailTab = {
+  id: number;
+  kind: "project-detail";
+  title: string;
+  /** Project id (from the projects store) this detail page renders. */
+  projectId: string;
+};
+
+export type DockerDetailTab = {
+  id: number;
+  kind: "docker-detail";
+  title: string;
+  /** Container id or name passed to `docker inspect`/`docker logs`. */
+  containerId: string;
+  /** Display name (without the leading slash Docker prepends). */
+  containerName: string;
+  /** SSH alias for a remote daemon; `null` = local. */
+  host: string | null;
+};
+
 export type Tab =
   | TerminalTab
   | EditorTab
@@ -108,7 +146,12 @@ export type Tab =
   | AiDiffTab
   | GitDiffTab
   | GitHistoryTab
-  | GitCommitFileDiffTab;
+  | GitCommitFileDiffTab
+  | BunqueueTab
+  | DockerDetailTab
+  | AnalyticsTab
+  | ProjectsTab
+  | ProjectDetailTab;
 
 export type TabPatch = Partial<{
   title: string;
@@ -132,13 +175,30 @@ function titleFromUrl(url: string): string {
   }
 }
 
-export function useTabs(initial?: Partial<TerminalTab>) {
+export function useTabs(
+  initial?: Partial<TerminalTab>,
+  options?: {
+    /**
+     * When true the window opened for a specific project (via `?dir=`) and
+     * should focus the terminal on launch. When false/omitted a plain launch
+     * focuses the Projects dashboard instead.
+     */
+    focusTerminalOnLaunch?: boolean;
+  },
+) {
   const [tabs, setTabs] = useState<Tab[]>(() => {
-    const tabId = 1;
-    const leafId = 2;
+    // Seed the projects dashboard as the first (and initially active) tab,
+    // followed by the bunqueue dashboard and a default shell.
+    // IDs: projects=1, bunqueue=2, terminal=3, its leaf=4.
+    const projectsId = 1;
+    const bunqueueId = 2;
+    const termId = 3;
+    const leafId = 4;
     return [
+      { id: projectsId, kind: "projects", title: "Projects" },
+      { id: bunqueueId, kind: "bunqueue", title: "bunqueue" },
       {
-        id: tabId,
+        id: termId,
         kind: "terminal",
         title: initial?.title ?? "shell",
         cwd: initial?.cwd,
@@ -147,8 +207,12 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       },
     ];
   });
-  const [activeId, setActiveId] = useState(1);
-  const nextIdRef = useRef(3);
+  // A project window (opened via `?dir=`) focuses its terminal (id 3); a plain
+  // launch focuses the Projects dashboard (id 1).
+  const [activeId, setActiveId] = useState(
+    options?.focusTerminalOnLaunch ? 3 : 1,
+  );
+  const nextIdRef = useRef(5);
   const tabsRef = useRef(tabs);
 
   useEffect(() => {
@@ -392,6 +456,138 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     ]);
     setActiveId(id);
     return id;
+  }, []);
+
+  /** Open (or focus) the singleton bunqueue dashboard tab. */
+  const openBunqueueTab = useCallback(() => {
+    let targetId: number | null = null;
+    setTabs((curr) => {
+      const existing = curr.find((t) => t.kind === "bunqueue");
+      if (existing) {
+        targetId = existing.id;
+        return curr;
+      }
+      const id = nextIdRef.current++;
+      targetId = id;
+      return [...curr, { id, kind: "bunqueue", title: "bunqueue" }];
+    });
+    if (targetId !== null) setActiveId(targetId);
+    return targetId;
+  }, []);
+
+  /**
+   * Open (or focus) a Docker container detail tab. Keyed by host+containerId so
+   * re-clicking the same container focuses the existing tab rather than piling
+   * up duplicates.
+   */
+  const openDockerDetailTab = useCallback(
+    (input: {
+      containerId: string;
+      containerName: string;
+      host: string | null;
+    }) => {
+      let targetId: number | null = null;
+      setTabs((curr) => {
+        const existing = curr.find(
+          (t) =>
+            t.kind === "docker-detail" &&
+            t.containerId === input.containerId &&
+            t.host === input.host,
+        );
+        if (existing) {
+          targetId = existing.id;
+          return curr;
+        }
+        const id = nextIdRef.current++;
+        targetId = id;
+        return [
+          ...curr,
+          {
+            id,
+            kind: "docker-detail",
+            title: input.containerName,
+            containerId: input.containerId,
+            containerName: input.containerName,
+            host: input.host,
+          } satisfies DockerDetailTab,
+        ];
+      });
+      if (targetId !== null) setActiveId(targetId);
+      return targetId;
+    },
+    [],
+  );
+
+  /** Open (or focus) the singleton projects dashboard tab. */
+  const openProjectsTab = useCallback(() => {
+    let targetId: number | null = null;
+    setTabs((curr) => {
+      const existing = curr.find((t) => t.kind === "projects");
+      if (existing) {
+        targetId = existing.id;
+        return curr;
+      }
+      const id = nextIdRef.current++;
+      targetId = id;
+      return [...curr, { id, kind: "projects", title: "Projects" }];
+    });
+    if (targetId !== null) setActiveId(targetId);
+    return targetId;
+  }, []);
+
+  /**
+   * Open (or focus) a project detail tab. Keyed by project id so re-opening the
+   * same project focuses the existing tab instead of stacking duplicates. The
+   * title is refreshed on focus to track project renames.
+   */
+  const openProjectDetailTab = useCallback(
+    (input: { projectId: string; title: string }) => {
+      let targetId: number | null = null;
+      setTabs((curr) => {
+        const existing = curr.find(
+          (t) => t.kind === "project-detail" && t.projectId === input.projectId,
+        );
+        if (existing) {
+          targetId = existing.id;
+          return existing.title === input.title
+            ? curr
+            : curr.map((t) =>
+                t.id === existing.id ? { ...t, title: input.title } : t,
+              );
+        }
+        const id = nextIdRef.current++;
+        targetId = id;
+        return [
+          ...curr,
+          {
+            id,
+            kind: "project-detail",
+            title: input.title,
+            projectId: input.projectId,
+          } satisfies ProjectDetailTab,
+        ];
+      });
+      if (targetId !== null) setActiveId(targetId);
+      return targetId;
+    },
+    [],
+  );
+
+  /** Open (or focus) the singleton Agentlytics analytics dashboard tab. */
+  const openAnalyticsTab = useCallback(() => {
+    let targetId: number | null = null;
+    setTabs((curr) => {
+      const existing = curr.find((t) => t.kind === "agentlytics");
+      if (existing) {
+        targetId = existing.id;
+        return curr;
+      }
+      const id = nextIdRef.current++;
+      targetId = id;
+      return [...curr, { id, kind: "agentlytics", title: "Agentlytics" }];
+    });
+    if (targetId !== null) setActiveId(targetId);
+    return targetId;
   }, []);
 
   const newMarkdownTab = useCallback((path: string) => {
@@ -678,7 +874,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
 
   /** Split the active leaf of `tabId` along `dir`. Returns the new leaf id. */
   const splitActivePane = useCallback(
-    (tabId: number, dir: SplitDir): number | null => {
+    (tabId: number, dir: SplitDir, cwd?: string): number | null => {
       let newLeafId: number | null = null;
       setTabs((curr) =>
         curr.map((t) => {
@@ -693,7 +889,9 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             splitId,
             leafId,
             dir,
-            t.cwd,
+            // Caller may pin a cwd (e.g. launch claude at project root);
+            // otherwise inherit the tab's working directory.
+            cwd ?? t.cwd,
           );
           return { ...t, paneTree, activeLeafId: leafId };
         }),
@@ -805,6 +1003,11 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     pinTab,
     newPreviewTab,
     newMarkdownTab,
+    openBunqueueTab,
+    openProjectsTab,
+    openProjectDetailTab,
+    openAnalyticsTab,
+    openDockerDetailTab,
     openAiDiffTab,
     openGitDiffTab,
     openCommitHistoryTab,

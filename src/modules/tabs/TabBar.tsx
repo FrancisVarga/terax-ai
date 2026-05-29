@@ -11,8 +11,12 @@ import { cn } from "@/lib/utils";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
 import {
   Cancel01Icon,
+  ChartLineData01Icon,
   Clock01Icon,
   ComputerTerminal02Icon,
+  ContainerIcon,
+  Database02Icon,
+  FolderLibraryIcon,
   GitBranchIcon,
   GitCompareIcon,
   Globe02Icon,
@@ -33,6 +37,8 @@ type Props = {
   onNewPreview: () => void;
   onNewEditor: () => void;
   onNewGitGraph: () => void;
+  onOpenBunqueue: () => void;
+  onOpenAnalytics: () => void;
   onClose: (id: number) => void;
   /** Pin (promote) a preview tab to persistent on double-click. */
   onPin: (id: number) => void;
@@ -48,6 +54,8 @@ export function TabBar({
   onNewPreview,
   onNewEditor,
   onNewGitGraph,
+  onOpenBunqueue,
+  onOpenAnalytics,
   onClose,
   onPin,
   compact,
@@ -212,6 +220,22 @@ export function TabBar({
               <HugeiconsIcon icon={GitBranchIcon} size={14} strokeWidth={1.75} />
               <span className="flex-1">Git Graph</span>
             </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onOpenBunqueue()}>
+              <HugeiconsIcon
+                icon={Database02Icon}
+                size={14}
+                strokeWidth={1.75}
+              />
+              <span className="flex-1">bunqueue</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onOpenAnalytics()}>
+              <HugeiconsIcon
+                icon={ChartLineData01Icon}
+                size={14}
+                strokeWidth={1.75}
+              />
+              <span className="flex-1">Agentlytics</span>
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -274,6 +298,46 @@ function TabIcon({ tab }: { tab: Tab }) {
       />
     );
   }
+  if (tab.kind === "bunqueue") {
+    return (
+      <HugeiconsIcon
+        icon={Database02Icon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
+    );
+  }
+  if (tab.kind === "docker-detail") {
+    return (
+      <HugeiconsIcon
+        icon={ContainerIcon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
+    );
+  }
+  if (tab.kind === "agentlytics") {
+    return (
+      <HugeiconsIcon
+        icon={ChartLineData01Icon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
+    );
+  }
+  if (tab.kind === "projects" || tab.kind === "project-detail") {
+    return (
+      <HugeiconsIcon
+        icon={FolderLibraryIcon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
+    );
+  }
   return (
     <HugeiconsIcon
       icon={ComputerTerminal02Icon}
@@ -292,6 +356,11 @@ function labelFor(t: Tab): string {
   if (t.kind === "git-diff") return t.title;
   if (t.kind === "git-history") return t.title;
   if (t.kind === "git-commit-file") return t.title;
+  if (t.kind === "bunqueue") return t.title;
+  if (t.kind === "docker-detail") return t.title;
+  if (t.kind === "agentlytics") return t.title;
+  if (t.kind === "projects") return t.title;
+  if (t.kind === "project-detail") return t.title;
   if (!t.cwd) return t.title;
   const parts = t.cwd.split(/[\\/]/).filter(Boolean);
   return parts.length ? parts[parts.length - 1] : "/";

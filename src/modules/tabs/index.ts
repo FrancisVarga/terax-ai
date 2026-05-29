@@ -11,6 +11,11 @@ export {
   type GitDiffTab,
   type GitHistoryTab,
   type GitCommitFileDiffTab,
+  type BunqueueTab,
+  type DockerDetailTab,
+  type AnalyticsTab,
+  type ProjectsTab,
+  type ProjectDetailTab,
   type AiDiffStatus,
   type TabPatch,
 } from "./lib/useTabs";
