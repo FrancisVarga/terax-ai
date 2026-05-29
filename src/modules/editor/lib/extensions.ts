@@ -33,6 +33,12 @@ export function buildSharedExtensions(): Extension[] {
         fontSize: "13px",
         lineHeight: "1.55",
         backgroundColor: "transparent !important",
+        // Grayscale AA matches the rest of the app chrome and avoids subpixel
+        // fringing on the dark editor background; geometricPrecision keeps
+        // monospace glyph advances stable so the caret/gutter stay aligned.
+        WebkitFontSmoothing: "antialiased",
+        MozOsxFontSmoothing: "grayscale",
+        textRendering: "geometricPrecision",
       },
       ".cm-content": {
         caretColor: "var(--foreground)",

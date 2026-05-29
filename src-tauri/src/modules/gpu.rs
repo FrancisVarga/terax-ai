@@ -21,11 +21,20 @@
 /// - `--enable-zero-copy`: upload GPU tiles without a CPU staging copy.
 /// - `--disable-frame-rate-limit`: let the compositor run above the default
 ///   cap so fast scrollback paints smoothly.
+/// - `--enable-features=CanvasOopRasterization`: rasterize 2D/WebGL canvas in
+///   the GPU process (out-of-process) instead of round-tripping through the
+///   renderer — sharper, lower-latency glyph compositing for the xterm canvas.
+/// - `--font-render-hinting=none`: disable FreeType/DirectWrite hinting so
+///   glyph outlines keep their true antialiased shape instead of being snapped
+///   to the pixel grid. On HiDPI/fractional-scale displays grid-snapping is
+///   what makes WebView2 text look uneven; `none` is what Chrome itself uses.
 #[cfg(target_os = "windows")]
 const WEBVIEW2_GPU_ARGS: &str = "--ignore-gpu-blocklist \
 --enable-gpu-rasterization \
 --enable-zero-copy \
---disable-frame-rate-limit";
+--disable-frame-rate-limit \
+--enable-features=CanvasOopRasterization \
+--font-render-hinting=none";
 
 /// Apply platform GPU forcing. Idempotent and best-effort: if a user has
 /// already set the override env var we respect it and don't clobber it.

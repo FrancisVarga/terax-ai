@@ -134,6 +134,17 @@
     }
   html {
     @apply font-sans;
+    /* Crisper UI text on the embedded webview. On WebView2/WKWebView the
+     * default is subpixel (LCD) AA, which fringes on the dark terminal chrome
+     * and shifts hue against translucent/blurred surfaces. Forcing grayscale
+     * AA gives uniform, non-fringing glyphs across light/dark + transparent
+     * windows. optimizeLegibility turns on kerning + common ligatures, and
+     * optical-sizing: auto lets Inter Variable use its small-text master at
+     * the 11-13px sizes the chrome runs at. */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    font-optical-sizing: auto;
     }
 }
 
@@ -224,6 +235,18 @@ html[data-chrome="borderless"] #settings-root {
 .xterm:focus,
 .xterm.focus {
   outline: none !important;
+}
+
+/* DOM-renderer fallback crispness. When the GPU probe reports a software
+ * backend (SwiftShader / WARP / llvmpipe) the WebGL addon is skipped and xterm
+ * paints glyphs into the DOM (.xterm-rows). That path honors CSS text
+ * smoothing; the WebGL path rasterizes its own atlas and ignores these. Force
+ * grayscale AA + geometricPrecision so monospace cells stay sharp and don't
+ * sub-pixel-fringe on the dark background. No effect when WebGL is active. */
+.xterm .xterm-rows {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: geometricPrecision;
 }
 
 .cm-editor,
