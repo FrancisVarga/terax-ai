@@ -21,7 +21,7 @@ import { useCallback, useEffect, useState } from "react";
 
 /** localStorage cache identity. Bump VERSION when `Analytics` shape changes. */
 const CACHE_KEY = "agentlytics";
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 
 export type ModelUsage = {
   model: string;

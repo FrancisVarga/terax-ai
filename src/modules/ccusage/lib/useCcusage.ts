@@ -24,7 +24,7 @@ import { useCallback, useEffect, useState } from "react";
  */
 
 /** localStorage cache identity. Bump VERSION when `CcusageReport` shape changes. */
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 /** Cache key is per cost mode — each mode produces a distinct report. */
 function cacheKey(mode: CostMode): string {
   return `ccusage:${mode}`;
