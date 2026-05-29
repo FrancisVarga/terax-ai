@@ -4,8 +4,18 @@
 //! standalone server that Terax spawns on startup so the app — and any AI
 //! agents driving it — get a persistent scheduler/queue with an HTTP API.
 //!
-//! Defaults match the requirement: HTTP API enabled on port 6790, no auth.
-//! TCP wire protocol on 6789. See <https://bunqueue.dev/guide/server/>.
+//! The server exposes an HTTP API and a TCP wire protocol with NO
+//! authentication (a bunqueue limitation — the CLI has no auth flag). To keep
+//! that surface off the network we:
+//!   - bind only to loopback (127.0.0.1, never 0.0.0.0), and
+//!   - use non-default ports (see TCP_PORT/HTTP_PORT) so we don't collide with
+//!     a standalone bunqueue.
+//! SECURITY CAVEAT: loopback is shared by all processes of the local user (and,
+//! via DNS-rebinding, a co-resident browser), so this is a per-user trust
+//! boundary, not a per-process one. A hostile local process on the same box can
+//! drive the queue. Tightening this to a per-launch shared secret or a Unix
+//! domain socket / named pipe requires upstream auth support in bunqueue and is
+//! tracked as future hardening. See <https://bunqueue.dev/guide/server/>.
 //!
 //! Runtime strategy (dev target): bunqueue ships as an npm dependency, so the
 //! CLI entry lives at `node_modules/bunqueue/dist/cli/index.js`. Because it is
@@ -171,7 +181,8 @@ fn build_command(data_path: Option<&Path>) -> Result<(Command, String), String> 
     // in dev; packaged sidecar support is a separate task.
     //
     // Ports are passed explicitly (non-default) so we never clash with a
-    // standalone bunqueue. HTTP API + no-auth remain bunqueue defaults.
+    // standalone bunqueue. The server binds loopback-only; HTTP API + no-auth
+    // remain bunqueue defaults (see the module-level SECURITY CAVEAT).
     let tcp = TCP_PORT.to_string();
     let http = HTTP_PORT.to_string();
     let mut cmd = Command::new("bun");
