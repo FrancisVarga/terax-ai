@@ -17,10 +17,15 @@
   WriteRegStr HKCU "Software\Classes\Drive\shell\OpenInCamelot" "Icon" '"$INSTDIR\terax.exe",0'
   WriteRegStr HKCU "Software\Classes\Drive\shell\OpenInCamelot" "NoWorkingDirectory" ""
   WriteRegStr HKCU "Software\Classes\Drive\shell\OpenInCamelot\command" "" '"$INSTDIR\terax.exe" "%V"'
+
+  ; Desktop shortcut (current-user). Tauri NSIS makes the Start Menu item; this adds the desktop icon.
+  CreateShortcut "$DESKTOP\Terax-Camelot.lnk" "$INSTDIR\terax.exe" "" "$INSTDIR\terax.exe" 0
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
   DeleteRegKey HKCU "Software\Classes\Directory\shell\OpenInCamelot"
   DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\OpenInCamelot"
   DeleteRegKey HKCU "Software\Classes\Drive\shell\OpenInCamelot"
+
+  Delete "$DESKTOP\Terax-Camelot.lnk"
 !macroend
