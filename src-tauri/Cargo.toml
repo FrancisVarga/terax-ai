@@ -5,6 +5,9 @@ description = "Terax — an open-source AI-native terminal emulator"
 authors = ["crynta"]
 license = "Apache-2.0"
 edition = "2021"
+# Two bins (terax, terax-dbg) make `cargo run` ambiguous; pin the prod bin so
+# `pnpm tauri dev` / `cargo run` keep working without `--bin`.
+default-run = "terax"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -14,6 +17,18 @@ edition = "2021"
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "terax_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Prod binary. Tauri targets this by default (`tauri.conf.json` mainBinaryName).
+[[bin]]
+name = "terax"
+path = "src/main.rs"
+
+# Debug binary — same entry point, separate exe so `cargo run --bin terax-dbg`
+# builds and runs without colliding with a running `terax.exe` lock, and can be
+# killed independently by name.
+[[bin]]
+name = "terax-dbg"
+path = "src/bin/terax-dbg.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

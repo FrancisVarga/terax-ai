@@ -9,11 +9,18 @@ const HOOK_EVENTS: [(&str, &str); 3] = [
 // Includes the pre-v2.1.139 /dev/tty variant so re-running migrates it.
 const OWNED_MARKERS: [&str; 2] = ["notify;Terax;", "terax;notify"];
 
-// Gated on TERAX_TERMINAL; no-op outside Terax. Returns the sequence via
-// `terminalSequence` because hooks lost /dev/tty access in v2.1.139.
+// Gated on TERAX_TERMINAL; no-op outside Terax. Emits the OSC 777 marker two
+// ways for robustness across Claude Code versions and platforms:
+//   1. Raw write to /dev/tty — the controlling terminal device. Under Windows
+//      ConPTY this is the only path the parent PTY reader actually sees;
+//      `terminalSequence` writes are swallowed by ConPTY and never reflected
+//      back into Terax's read pipe.
+//   2. `terminalSequence` JSON on stdout — sanctioned channel for builds where
+//      hooks have no /dev/tty (kept as a fallback; harmless when /dev/tty works
+//      since Claude parses stdout, not the tty bytes).
 fn hook_cmd(event: &str) -> String {
     format!(
-        r#"[ -n "$TERAX_TERMINAL" ] && printf '{{"terminalSequence":"\\u001b]777;notify;Terax;{event}\\u0007"}}' || true"#
+        r#"[ -n "$TERAX_TERMINAL" ] && {{ printf '\033]777;notify;Terax;{event}\007' > /dev/tty 2>/dev/null; printf '{{"terminalSequence":"\\u001b]777;notify;Terax;{event}\\u0007"}}'; }} || true"#
     )
 }
 
@@ -144,7 +151,9 @@ mod tests {
         assert!(command(&out, "Stop", 0).contains("notify;Terax;finished"));
         assert!(command(&out, "UserPromptSubmit", 0).contains("notify;Terax;working"));
         assert!(command(&out, "Stop", 0).contains("terminalSequence"));
-        assert!(!command(&out, "Stop", 0).contains("/dev/tty"));
+        // Raw /dev/tty write is the path ConPTY actually reflects to the parent
+        // PTY reader; terminalSequence is kept as a fallback.
+        assert!(command(&out, "Stop", 0).contains("/dev/tty"));
     }
 
     #[test]
@@ -170,7 +179,9 @@ mod tests {
         let out = merge_hooks(legacy);
         assert_eq!(hook_count(&out, "Notification"), 1);
         assert!(command(&out, "Notification", 0).contains("terminalSequence"));
-        assert!(!command(&out, "Notification", 0).contains("/dev/tty"));
+        // Legacy `terax;notify` marker is replaced by the current `notify;Terax;`.
+        assert!(!command(&out, "Notification", 0).contains("terax;notify"));
+        assert!(command(&out, "Notification", 0).contains("notify;Terax;attention"));
     }
 
     #[test]
