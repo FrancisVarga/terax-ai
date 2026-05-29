@@ -1,0 +1,44 @@
+# Normalize line endings: store LF in the repo, check out native on each OS.
+# Prevents Windows (core.autocrlf=true) from phantom-dirtying tracked files
+# (notably src-tauri/Cargo.toml) on every branch switch / merge.
+* text=auto
+
+# Pin LF for files where tooling or the repo blob must stay byte-stable across
+# platforms. Cargo + Rust toolchain expect LF; keeping these LF stops the
+# CRLF<->LF churn that aborted merges during releases.
+*.toml   text eol=lf
+*.lock   text eol=lf
+*.rs     text eol=lf
+*.json   text eol=lf
+*.mjs    text eol=lf
+*.js     text eol=lf
+*.ts     text eol=lf
+*.tsx    text eol=lf
+*.css    text eol=lf
+*.html   text eol=lf
+*.md     text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.sh     text eol=lf
+
+# Windows scripts need CRLF to run correctly.
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+*.ps1    text eol=crlf
+
+# Binary assets: never normalize or diff as text.
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.icns   binary
+*.woff   binary
+*.woff2  binary
+*.ttf    binary
+*.otf    binary
+*.wasm   binary
+*.exe    binary
+*.dll    binary
+*.dylib  binary
+*.so     binary

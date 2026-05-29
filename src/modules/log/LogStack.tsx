@@ -1,14 +1,15 @@
+import { memo } from "react";
 import { cn } from "@/lib/utils";
-import type { LogTab, Tab } from "@/modules/tabs";
+import type { LogTab } from "@/modules/tabs";
 import { LogViewerPane } from "./LogViewerPane";
 
 type Props = {
-  tabs: Tab[];
+  /** Pre-filtered, referentially-stable slice (see `useStableTabSlice`). */
+  logs: LogTab[];
   activeId: number;
 };
 
-export function LogStack({ tabs, activeId }: Props) {
-  const logs = tabs.filter((t): t is LogTab => t.kind === "log");
+export const LogStack = memo(function LogStack({ logs, activeId }: Props) {
   if (logs.length === 0) return null;
   return (
     <div className="relative h-full w-full">
@@ -29,4 +30,4 @@ export function LogStack({ tabs, activeId }: Props) {
       })}
     </div>
   );
-}
+});

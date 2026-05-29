@@ -73,10 +73,11 @@ function EntryRowImpl(props: EntryRowProps) {
 
   const [isConfirming, setIsConfirming] = useState(false);
   const iconUrl = isDir ? folderIconUrl(name, isExpanded) : fileIconUrl(name);
-  // Files and folders share one 20px glyph column: file icons at 16px read too
-  // small next to the folder art, and a uniform size keeps icon edges aligned
-  // down the tree.
-  const iconSize = "size-5";
+  // Folders render at 24px; files at half that (12px) so the colored folder art
+  // stays prominent while file-type glyphs read as secondary. The glyph column
+  // width stays 24px (centered) so icon centers align down the tree.
+  const iconSize = "size-6";
+  const glyphSize = isDir ? "size-6" : "size-[17px]";
   const createTarget = isDir ? path : path.slice(0, path.lastIndexOf("/")) || rootPath;
   const paddingLeft = 6 + depth * 12;
 
@@ -98,10 +99,10 @@ function EntryRowImpl(props: EntryRowProps) {
             <span className="size-4 shrink-0" />
             {iconUrl ? (
               <span className={cn(iconSize, "flex shrink-0 items-center justify-center")}>
-                <img src={iconUrl} alt="" className="size-full object-contain" />
+                <img src={iconUrl} alt="" className={cn(glyphSize, "object-contain")} />
               </span>
             ) : (
-              <span className="size-5 shrink-0" />
+              <span className="size-6 shrink-0" />
             )}
             <InlineInput
               initial={name}
@@ -138,7 +139,7 @@ function EntryRowImpl(props: EntryRowProps) {
             </span>
             <span className={cn(iconSize, "flex shrink-0 items-center justify-center")}>
               {iconUrl ? (
-                <img src={iconUrl} alt="" className="size-full object-contain" />
+                <img src={iconUrl} alt="" className={cn(glyphSize, "object-contain")} />
               ) : null}
             </span>
             <span className="min-w-0 flex-1 truncate">{name}</span>
@@ -213,6 +214,21 @@ function EntryRowImpl(props: EntryRowProps) {
         <ContextMenuSeparator />
         <ContextMenuItem
           className={COMPACT_ITEM}
+          onSelect={() => tree.copyPath(path)}
+        >
+          Copy
+        </ContextMenuItem>
+        {tree.copySource && (
+          <ContextMenuItem
+            className={COMPACT_ITEM}
+            onSelect={() => void tree.pasteInto(createTarget)}
+          >
+            Paste
+          </ContextMenuItem>
+        )}
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          className={COMPACT_ITEM}
           onSelect={() => void copyToClipboard(path)}
         >
           Copy Path
@@ -266,12 +282,14 @@ export function PendingRow({ depth, kind, onCommit, onCancel }: PendingRowProps)
       className="flex h-8 w-full min-w-0 items-center gap-2 px-1.5 text-[13px]"
       style={{ paddingLeft: 6 + depth * 12 }}
     >
-      <span className="size-5 shrink-0" />
-      <img
-        src={kind === "dir" ? folderIconUrl("", false) : fileIconUrl("untitled")}
-        alt=""
-        className="size-5 shrink-0 opacity-70"
-      />
+      <span className="size-6 shrink-0" />
+      <span className="flex size-6 shrink-0 items-center justify-center">
+        <img
+          src={kind === "dir" ? folderIconUrl("", false) : fileIconUrl("untitled")}
+          alt=""
+          className={cn(kind === "dir" ? "size-6" : "size-[17px]", "object-contain opacity-70")}
+        />
+      </span>
       <InlineInput
         initial=""
         placeholder={kind === "dir" ? "New folder" : "New file"}

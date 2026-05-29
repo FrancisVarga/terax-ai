@@ -3,7 +3,8 @@ import { currentWorkspaceEnv } from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { parseLog, type LogLevel, type LogLine } from "./lib/parseLog";
+import { type LogLevel, type LogLine } from "./lib/parseLog";
+import { parseLogAsync } from "./lib/parseLogAsync";
 
 type ReadResult =
   | { kind: "text"; content: string; size: number }
@@ -46,10 +47,14 @@ export function LogViewerPane({ path, visible }: Props) {
       path,
       workspace: currentWorkspaceEnv(),
     })
-      .then((res) => {
+      .then(async (res) => {
         if (cancelled) return;
         if (res.kind === "text") {
-          setStatus({ kind: "ready", lines: parseLog(res.content) });
+          // Large logs parse in a worker; await it but re-check `cancelled`
+          // afterward so a fast tab switch can't paint stale lines.
+          const lines = await parseLogAsync(res.content);
+          if (cancelled) return;
+          setStatus({ kind: "ready", lines });
         } else if (res.kind === "binary") {
           setStatus({ kind: "binary" });
         } else {

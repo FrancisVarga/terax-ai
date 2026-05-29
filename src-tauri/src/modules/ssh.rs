@@ -281,6 +281,13 @@ impl RemoteConn {
     /// still prints everything it could walk, mirroring the local rg exit-2
     /// behavior in `fs_glob_rg`.
     async fn exec(&self, command: &str) -> Result<String, String> {
+        Ok(self.exec_full(command).await?.stdout_string())
+    }
+
+    /// Run a command over a fresh exec channel, capturing stdout, stderr, and the
+    /// exit code separately. Used by remote git/grep where the exit code and
+    /// stderr drive control flow (e.g. "no commits yet", "not a repository").
+    async fn exec_full(&self, command: &str) -> Result<RemoteExec, String> {
         let mut channel = self
             .handle
             .channel_open_session()
@@ -292,18 +299,48 @@ impl RemoteConn {
             .map_err(|e| format!("exec failed: {e}"))?;
 
         let mut stdout: Vec<u8> = Vec::new();
-        // Drain the channel until EOF/close. `data` carries stdout; `extended_data`
-        // (stream 1) is stderr, which we ignore.
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut exit_code: Option<i32> = None;
         loop {
             match channel.wait().await {
+                // `data` is stdout; `extended_data` stream 1 is stderr.
                 Some(ChannelMsg::Data { ref data }) => stdout.extend_from_slice(data),
-                Some(ChannelMsg::ExtendedData { .. }) => {}
-                Some(ChannelMsg::ExitStatus { .. }) => {}
+                Some(ChannelMsg::ExtendedData { ref data, .. }) => {
+                    stderr.extend_from_slice(data)
+                }
+                Some(ChannelMsg::ExitStatus { exit_status }) => {
+                    exit_code = Some(exit_status as i32)
+                }
                 Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
                 _ => {}
             }
         }
-        Ok(String::from_utf8_lossy(&stdout).into_owned())
+        Ok(RemoteExec {
+            stdout,
+            stderr,
+            exit_code,
+        })
+    }
+}
+
+/// Captured result of a one-shot remote command.
+struct RemoteExec {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    exit_code: Option<i32>,
+}
+
+impl RemoteExec {
+    fn stdout_string(&self) -> String {
+        String::from_utf8_lossy(&self.stdout).into_owned()
+    }
+
+    fn stderr_string(&self) -> String {
+        String::from_utf8_lossy(&self.stderr).into_owned()
+    }
+
+    fn ok(&self) -> bool {
+        self.exit_code == Some(0)
     }
 }
 
@@ -575,21 +612,70 @@ fn whoami() -> String {
         .unwrap_or_else(|_| "root".to_string())
 }
 
-/// Authenticate with public keys, honoring the host's `IdentityFile`/
-/// `IdentitiesOnly` from `~/.ssh/config`:
+/// Try every identity loaded into the running ssh-agent. Encrypted on-disk keys
+/// are deliberately not unlocked in-app (no passphrase prompt this milestone);
+/// the supported path for them is `ssh-add` into the agent, which this honors.
 ///
-/// - `IdentityFile` entries are tried first, in config order;
-/// - with `IdentitiesOnly yes`, ONLY those entries are tried;
+/// Returns `Ok(true)` only when an agent identity authenticates. Any other
+/// outcome (no agent, no identities, all rejected, transport error) yields
+/// `Ok(false)` so the caller falls back to on-disk keys — the agent is an
+/// addition, never a hard requirement.
+///
+/// russh-keys 0.45 only implements the Unix-domain-socket agent client
+/// (`connect_env` reads `SSH_AUTH_SOCK`); it has no Windows named-pipe support,
+/// so this is a no-op on Windows and on-disk keys are used there.
+#[cfg(unix)]
+async fn try_agent_auth(handle: &mut Handle<ClientHandler>, user: &str) -> bool {
+    use russh::keys::agent::client::AgentClient;
+
+    let mut agent = match AgentClient::connect_env().await {
+        Ok(a) => a,
+        // No SSH_AUTH_SOCK, or the socket is gone — nothing to try.
+        Err(_) => return false,
+    };
+    let identities = match agent.request_identities().await {
+        Ok(ids) => ids,
+        Err(_) => return false,
+    };
+    for key in identities {
+        // `authenticate_future` moves the agent in and hands it back so the same
+        // connection can sign the next identity; thread it through the loop.
+        let (returned, result) = handle.authenticate_future(user, key, agent).await;
+        agent = returned;
+        if let Ok(true) = result {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(not(unix))]
+async fn try_agent_auth(_handle: &mut Handle<ClientHandler>, _user: &str) -> bool {
+    false
+}
+
+/// Authenticate, preferring the ssh-agent then falling back to on-disk keys,
+/// honoring the host's `IdentityFile` / `IdentitiesOnly` from `~/.ssh/config`:
+///
+/// - the running ssh-agent's identities are tried first (covers encrypted keys
+///   the user has `ssh-add`ed — the supported path for passphrase keys);
+/// - then `IdentityFile` entries, in config order;
+/// - with `IdentitiesOnly yes`, ONLY those entries are tried after the agent;
 /// - otherwise we fall back to the conventional default key names.
 ///
-/// Returns the first key that successfully authenticates. Passphrase-protected
-/// keys are skipped (loaded with no passphrase) — consistent with the
-/// keys-only, no-prompt policy.
+/// Returns once a key successfully authenticates. Encrypted on-disk keys are
+/// skipped (loaded with no passphrase) — consistent with the keys-only,
+/// no-in-app-prompt policy; load them into the agent instead.
 async fn authenticate(
     handle: &mut Handle<ClientHandler>,
     user: &str,
     identity: &ResolvedIdentity,
 ) -> Result<(), String> {
+    // ssh-agent first: this is how passphrase-protected keys are supported.
+    if try_agent_auth(handle, user).await {
+        return Ok(());
+    }
+
     let Some(ssh_dir) = dirs::home_dir().map(|h| h.join(".ssh")) else {
         return Err("no home directory".to_string());
     };
@@ -613,7 +699,7 @@ async fn authenticate(
         }
         let key = match russh::keys::load_secret_key(key_path, None) {
             Ok(k) => k,
-            // Encrypted / unsupported key — move on.
+            // Encrypted / unsupported key — move on (use ssh-agent for these).
             Err(_) => continue,
         };
         tried += 1;
@@ -626,9 +712,11 @@ async fn authenticate(
 
     if tried == 0 {
         if identity.only {
-            Err("no usable IdentityFile keys for this host (IdentitiesOnly yes)".to_string())
+            Err("no usable IdentityFile keys for this host (IdentitiesOnly yes); \
+                 add the key to ssh-agent if it is passphrase-protected"
+                .to_string())
         } else {
-            Err("no usable private keys (IdentityFile or ~/.ssh defaults)".to_string())
+            Err("no usable private keys (ssh-agent, IdentityFile, or ~/.ssh defaults)".to_string())
         }
     } else {
         Err(format!("public-key authentication rejected for user '{user}'"))
@@ -777,6 +865,249 @@ pub async fn ssh_fs_read_file(
         .await
         .map_err(|e| format!("read {path}: {e}"))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Reject a remote path that carries control bytes (NUL, ESC, CR/LF). These are
+/// never legitimate in a path and are a classic injection/truncation vector.
+/// The richer secret-path deny-list runs frontend-side (`ai/lib/security.ts`)
+/// before these commands are invoked; this is the backend defense-in-depth
+/// floor that holds regardless of caller.
+fn reject_control_bytes(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("empty path".into());
+    }
+    if path.chars().any(|c| c.is_control()) {
+        return Err("path contains control characters".into());
+    }
+    Ok(())
+}
+
+/// Write `content` to a remote file over SFTP, creating or truncating it.
+/// Mirrors the local `fs_write_file` contract (overwrite allowed). SFTP has no
+/// atomic-rename-into-place primitive exposed here, so this is a direct write;
+/// the no-clobber guards live on the create/rename commands instead.
+#[tauri::command]
+pub async fn ssh_fs_write_file(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    reject_control_bytes(&path)?;
+    let state = state.inner().clone();
+    let conn = get_conn(&state, &alias).await?;
+    conn.sftp
+        .write(&path, content.as_bytes())
+        .await
+        .map_err(|e| format!("write {path}: {e}"))
+}
+
+/// Create an empty remote file. Fails if it already exists (no-clobber), matching
+/// `fs_create_file`.
+#[tauri::command]
+pub async fn ssh_fs_create_file(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    path: String,
+) -> Result<(), String> {
+    reject_control_bytes(&path)?;
+    let state = state.inner().clone();
+    let conn = get_conn(&state, &alias).await?;
+    if conn.sftp.try_exists(&path).await.unwrap_or(false) {
+        return Err(format!("already exists: {path}"));
+    }
+    conn.sftp
+        .write(&path, b"")
+        .await
+        .map_err(|e| format!("create file {path}: {e}"))
+}
+
+/// Create a remote directory. Fails if it already exists, matching
+/// `fs_create_dir`. Unlike the local command this does not create missing
+/// parents — SFTP `mkdir` is single-level; the explorer only ever creates one
+/// level at a time.
+#[tauri::command]
+pub async fn ssh_fs_create_dir(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    path: String,
+) -> Result<(), String> {
+    reject_control_bytes(&path)?;
+    let state = state.inner().clone();
+    let conn = get_conn(&state, &alias).await?;
+    if conn.sftp.try_exists(&path).await.unwrap_or(false) {
+        return Err(format!("already exists: {path}"));
+    }
+    conn.sftp
+        .create_dir(&path)
+        .await
+        .map_err(|e| format!("create dir {path}: {e}"))
+}
+
+/// Rename (or move) a remote path. Refuses to overwrite an existing target —
+/// the data-loss guard, matching `fs_rename`. The explicit `try_exists` check
+/// makes the no-clobber contract independent of server-specific rename
+/// semantics.
+#[tauri::command]
+pub async fn ssh_fs_rename(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    from: String,
+    to: String,
+) -> Result<(), String> {
+    reject_control_bytes(&from)?;
+    reject_control_bytes(&to)?;
+    let state = state.inner().clone();
+    let conn = get_conn(&state, &alias).await?;
+    if !conn.sftp.try_exists(&from).await.unwrap_or(false) {
+        return Err(format!("not found: {from}"));
+    }
+    if conn.sftp.try_exists(&to).await.unwrap_or(false) {
+        return Err(format!("already exists: {to}"));
+    }
+    conn.sftp
+        .rename(&from, &to)
+        .await
+        .map_err(|e| format!("rename {from} -> {to}: {e}"))
+}
+
+/// Copy a remote file or directory (recursively for dirs) to a new location.
+/// Refuses to overwrite an existing target — the data-loss guard, matching
+/// `fs_copy` and `ssh_fs_rename`. The `try_exists` check is done once up front;
+/// `remote_copy` then recurses without re-checking, since a fresh subtree under
+/// a guaranteed-empty destination can't collide.
+#[tauri::command]
+pub async fn ssh_fs_copy(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    from: String,
+    to: String,
+) -> Result<(), String> {
+    reject_control_bytes(&from)?;
+    reject_control_bytes(&to)?;
+    let state = state.inner().clone();
+    let conn = get_conn(&state, &alias).await?;
+    if !conn.sftp.try_exists(&from).await.unwrap_or(false) {
+        return Err(format!("not found: {from}"));
+    }
+    if conn.sftp.try_exists(&to).await.unwrap_or(false) {
+        return Err(format!("already exists: {to}"));
+    }
+    remote_copy(&conn, &from, &to).await
+}
+
+/// Recursively copy a remote path. `symlink_metadata` (not `metadata`) keeps us
+/// from following a symlink into its target: only a real directory is recursed
+/// into; a symlink is copied through the file branch (its bytes) and never
+/// walked into. SFTP exposes no link-creation primitive here, so a symlink to a
+/// file ends up as a regular file copy — a remote-only divergence from local
+/// `fs_copy`, which recreates the link. Files are streamed whole via
+/// `read`/`write`, matching how the rest of this module moves remote bytes.
+async fn remote_copy(conn: &RemoteConn, from: &str, to: &str) -> Result<(), String> {
+    let meta = conn
+        .sftp
+        .symlink_metadata(from)
+        .await
+        .map_err(|e| format!("stat {from}: {e}"))?;
+
+    // Only a *real* directory is recursed into. A symlink (even one resolving to
+    // a dir) goes through the file branch and is never walked into.
+    if meta.file_type() != FileType::Dir {
+        let bytes = conn
+            .sftp
+            .read(from)
+            .await
+            .map_err(|e| format!("read {from}: {e}"))?;
+        return conn
+            .sftp
+            .write(to, &bytes)
+            .await
+            .map_err(|e| format!("write {to}: {e}"));
+    }
+
+    conn.sftp
+        .create_dir(to)
+        .await
+        .map_err(|e| format!("create dir {to}: {e}"))?;
+    let entries = conn
+        .sftp
+        .read_dir(from)
+        .await
+        .map_err(|e| format!("readdir {from}: {e}"))?;
+    for entry in entries {
+        let name = entry.file_name();
+        if name == "." || name == ".." {
+            continue;
+        }
+        let join = |base: &str| {
+            if base.ends_with('/') {
+                format!("{base}{name}")
+            } else {
+                format!("{base}/{name}")
+            }
+        };
+        Box::pin(remote_copy(conn, &join(from), &join(to))).await?;
+    }
+    Ok(())
+}
+
+/// Delete a remote file or directory. Directories are removed recursively
+/// (depth-first), matching `fs_delete`'s `remove_dir_all` behavior. A symlink is
+/// removed as the link itself (`remove_file`), never followed into its target.
+#[tauri::command]
+pub async fn ssh_fs_delete(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    path: String,
+) -> Result<(), String> {
+    reject_control_bytes(&path)?;
+    let state = state.inner().clone();
+    let conn = get_conn(&state, &alias).await?;
+    remote_delete(&conn, &path).await
+}
+
+/// Recursively delete a remote path. `symlink_metadata` (not `metadata`) keeps
+/// us from following a symlink into its target: a linked file/dir is unlinked,
+/// not recursed into.
+async fn remote_delete(conn: &RemoteConn, path: &str) -> Result<(), String> {
+    let meta = conn
+        .sftp
+        .symlink_metadata(path)
+        .await
+        .map_err(|e| format!("stat {path}: {e}"))?;
+
+    // A symlink (even one pointing at a dir) is unlinked as a plain file so we
+    // never recurse through it and wipe the target's contents.
+    let is_real_dir = meta.file_type() == FileType::Dir;
+    if !is_real_dir {
+        return conn
+            .sftp
+            .remove_file(path)
+            .await
+            .map_err(|e| format!("delete {path}: {e}"));
+    }
+
+    let entries = conn
+        .sftp
+        .read_dir(path)
+        .await
+        .map_err(|e| format!("readdir {path}: {e}"))?;
+    for entry in entries {
+        let name = entry.file_name();
+        if name == "." || name == ".." {
+            continue;
+        }
+        let child = if path.ends_with('/') {
+            format!("{path}{name}")
+        } else {
+            format!("{path}/{name}")
+        };
+        Box::pin(remote_delete(conn, &child)).await?;
+    }
+    conn.sftp
+        .remove_dir(path)
+        .await
+        .map_err(|e| format!("delete dir {path}: {e}"))
 }
 
 /// Single-quote a string for a POSIX shell: wrap in `'…'` and escape any
@@ -930,6 +1261,780 @@ pub async fn ssh_bg_list(
     Ok(out)
 }
 
+// ───────────────────────── Remote git over SSH exec ─────────────────────────
+//
+// Remote git reuses the host's own `git` binary over an exec channel, exactly as
+// the WSL backend runs `wsl.exe --exec git`. The repo root and every path arg are
+// POSIX-single-quoted before being spliced into `cd <root> && git <args>`, so a
+// path containing spaces or shell metacharacters can never break out of the
+// command. Output is parsed with the SAME parsers the local backend uses
+// (`git::parser::parse_porcelain_v2`), so local and remote status render
+// identically. The SSH connection is the trust boundary (host-key-verified +
+// authenticated), so there is no separate workspace-authorization registry here.
+
+use crate::modules::git::parser::parse_porcelain_v2;
+use crate::modules::git::types::{
+    GitCommitResult, GitDiffContentResult, GitDiffResult, GitLogEntry, GitPanelSnapshot,
+    GitRepoInfo, GitStatusSnapshot,
+};
+
+const REMOTE_GIT_TIMEOUT_HINT: &str = "remote git";
+
+/// A hex commit identifier safe to splice into a git revision argument.
+fn sha_is_safe(sha: &str) -> bool {
+    !sha.is_empty() && sha.len() <= 64 && sha.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Build `cd '<root>' && git <single-quoted args...>`. `LC_ALL=C` and
+/// `GIT_OPTIONAL_LOCKS=0` mirror the local runner's environment so output is
+/// parseable and read-only commands don't take the index lock.
+fn remote_git_command(root: &str, args: &[&str]) -> String {
+    let mut cmd = format!(
+        "cd {} && LC_ALL=C GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 git",
+        sh_single_quote(root)
+    );
+    for a in args {
+        cmd.push(' ');
+        cmd.push_str(&sh_single_quote(a));
+    }
+    cmd
+}
+
+async fn remote_git(
+    state: &SshFsState,
+    alias: &str,
+    root: &str,
+    args: &[&str],
+) -> Result<RemoteExec, String> {
+    let conn = get_conn(state, alias).await?;
+    conn.exec_full(&remote_git_command(root, args)).await
+}
+
+/// stdout decoded as lossy UTF-8 (git output is normally UTF-8; non-UTF-8 bytes
+/// are replaced rather than failing the whole command).
+fn git_text(out: &RemoteExec) -> String {
+    out.stdout_string()
+}
+
+#[tauri::command]
+pub async fn ssh_git_panel_snapshot(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    cwd: String,
+) -> Result<GitPanelSnapshot, String> {
+    let state = state.inner().clone();
+    // Resolve the repo toplevel from the browsed cwd.
+    let top = remote_git(&state, &alias, &cwd, &["rev-parse", "--show-toplevel"]).await?;
+    if !top.ok() {
+        // Not a git repository — empty snapshot, not an error (matches local).
+        return Ok(GitPanelSnapshot {
+            repo: None,
+            status: None,
+        });
+    }
+    let repo_root = top.stdout_string().trim().to_string();
+    if repo_root.is_empty() {
+        return Ok(GitPanelSnapshot {
+            repo: None,
+            status: None,
+        });
+    }
+    let status = remote_status_inner(&state, &alias, &repo_root).await?;
+    let repo = GitRepoInfo {
+        repo_root: repo_root.clone(),
+        branch: status.branch.clone(),
+        upstream: status.upstream.clone(),
+        is_detached: status.is_detached,
+    };
+    Ok(GitPanelSnapshot {
+        repo: Some(repo),
+        status: Some(status),
+    })
+}
+
+#[tauri::command]
+pub async fn ssh_git_status(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    repo_root: String,
+) -> Result<GitStatusSnapshot, String> {
+    let state = state.inner().clone();
+    remote_status_inner(&state, &alias, &repo_root).await
+}
+
+async fn remote_status_inner(
+    state: &SshFsState,
+    alias: &str,
+    repo_root: &str,
+) -> Result<GitStatusSnapshot, String> {
+    let out = remote_git(
+        state,
+        alias,
+        repo_root,
+        &[
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+            "--untracked-files=all",
+        ],
+    )
+    .await?;
+    if !out.ok() {
+        return Err(format!(
+            "{REMOTE_GIT_TIMEOUT_HINT} status failed: {}",
+            out.stderr_string().trim()
+        ));
+    }
+    let parsed = parse_porcelain_v2(&out.stdout_string());
+    Ok(GitStatusSnapshot {
+        repo_root: repo_root.to_string(),
+        branch: parsed.branch,
+        upstream: parsed.upstream,
+        ahead: parsed.ahead,
+        behind: parsed.behind,
+        is_detached: parsed.is_detached,
+        truncated: false,
+        changed_files: parsed.files,
+    })
+}
+
+#[tauri::command]
+pub async fn ssh_git_diff(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    repo_root: String,
+    path: Option<String>,
+    staged: bool,
+) -> Result<GitDiffResult, String> {
+    let state = state.inner().clone();
+    let mut args: Vec<&str> = vec!["diff", "--no-ext-diff"];
+    if staged {
+        args.push("--cached");
+    }
+    let rel = path.as_deref().filter(|p| !p.is_empty());
+    if let Some(p) = rel {
+        args.push("--");
+        args.push(p);
+    }
+    let out = remote_git(&state, &alias, &repo_root, &args).await?;
+    if !out.ok() {
+        return Err(format!("remote git diff failed: {}", out.stderr_string().trim()));
+    }
+    Ok(GitDiffResult {
+        diff_text: git_text(&out),
+        truncated: false,
+    })
+}
+
+#[tauri::command]
+pub async fn ssh_git_diff_content(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    repo_root: String,
+    path: String,
+    staged: bool,
+    original_path: Option<String>,
+) -> Result<GitDiffContentResult, String> {
+    let state = state.inner().clone();
+    let rel = path.trim_start_matches('/').to_string();
+    let orig_rel = original_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .map(|p| p.trim_start_matches('/').to_string());
+
+    // Original side: index (`:path`) or HEAD (`HEAD:path`) when staged.
+    let original_spec = if staged {
+        format!("HEAD:{}", orig_rel.as_deref().unwrap_or(&rel))
+    } else {
+        format!(":{rel}")
+    };
+    let original = remote_git(
+        &state,
+        &alias,
+        &repo_root,
+        &["show", "--no-textconv", &original_spec],
+    )
+    .await?;
+
+    // Modified side: index (`:path`) when staged, else the worktree file.
+    let modified_text = if staged {
+        let m = remote_git(
+            &state,
+            &alias,
+            &repo_root,
+            &["show", "--no-textconv", &format!(":{rel}")],
+        )
+        .await?;
+        if m.ok() { m.stdout_string() } else { String::new() }
+    } else {
+        // Read the worktree file via SFTP for the modified side.
+        let conn = get_conn(&state, &alias).await?;
+        let abs = if repo_root.ends_with('/') {
+            format!("{repo_root}{rel}")
+        } else {
+            format!("{repo_root}/{rel}")
+        };
+        match conn.sftp.read(&abs).await {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(_) => String::new(),
+        }
+    };
+
+    let mut diff_args: Vec<&str> = vec!["diff", "--no-ext-diff"];
+    if staged {
+        diff_args.push("--cached");
+    }
+    diff_args.push("--");
+    diff_args.push(&rel);
+    let patch = remote_git(&state, &alias, &repo_root, &diff_args).await?;
+
+    Ok(GitDiffContentResult {
+        original_content: if original.ok() {
+            original.stdout_string()
+        } else {
+            String::new()
+        },
+        modified_content: modified_text,
+        is_binary: false,
+        fallback_patch: git_text(&patch),
+        truncated: false,
+    })
+}
+
+#[tauri::command]
+pub async fn ssh_git_stage(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    repo_root: String,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let state = state.inner().clone();
+    let mut args: Vec<&str> = vec!["add", "--"];
+    for p in &paths {
+        args.push(p);
+    }
+    let out = remote_git(&state, &alias, &repo_root, &args).await?;
+    if out.ok() {
+        Ok(())
+    } else {
+        Err(format!("remote git add failed: {}", out.stderr_string().trim()))
+    }
+}
+
+#[tauri::command]
+pub async fn ssh_git_unstage(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    repo_root: String,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let state = state.inner().clone();
+    let mut args: Vec<&str> = vec!["reset", "HEAD", "--"];
+    for p in &paths {
+        args.push(p);
+    }
+    let out = remote_git(&state, &alias, &repo_root, &args).await?;
+    if out.ok() {
+        return Ok(());
+    }
+    // No HEAD yet (unborn branch): fall back to `rm --cached`.
+    let lower = out.stderr_string().to_ascii_lowercase();
+    let no_head = lower.contains("ambiguous argument 'head'")
+        || lower.contains("unknown revision")
+        || lower.contains("does not have any commits yet");
+    if !no_head {
+        return Err(format!("remote git reset failed: {}", out.stderr_string().trim()));
+    }
+    let mut rm_args: Vec<&str> = vec!["rm", "--cached", "-r", "--"];
+    for p in &paths {
+        rm_args.push(p);
+    }
+    let out = remote_git(&state, &alias, &repo_root, &rm_args).await?;
+    if out.ok() {
+        Ok(())
+    } else {
+        Err(format!("remote git rm --cached failed: {}", out.stderr_string().trim()))
+    }
+}
+
+#[tauri::command]
+pub async fn ssh_git_discard(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    repo_root: String,
+    tracked: Vec<String>,
+    untracked: Vec<String>,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    if !tracked.is_empty() {
+        let mut args: Vec<&str> = vec!["restore", "--worktree", "--"];
+        for p in &tracked {
+            args.push(p);
+        }
+        let out = remote_git(&state, &alias, &repo_root, &args).await?;
+        if !out.ok() {
+            return Err(format!("remote git restore failed: {}", out.stderr_string().trim()));
+        }
+    }
+    if !untracked.is_empty() {
+        let mut args: Vec<&str> = vec!["clean", "-f", "-d", "--"];
+        for p in &untracked {
+            args.push(p);
+        }
+        let out = remote_git(&state, &alias, &repo_root, &args).await?;
+        if !out.ok() {
+            return Err(format!("remote git clean failed: {}", out.stderr_string().trim()));
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn ssh_git_commit(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    repo_root: String,
+    message: String,
+) -> Result<GitCommitResult, String> {
+    let trimmed = message.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("empty commit message".into());
+    }
+    let state = state.inner().clone();
+    let out = remote_git(&state, &alias, &repo_root, &["commit", "-m", &trimmed]).await?;
+    if !out.ok() {
+        let lower = format!("{}{}", out.stderr_string(), out.stdout_string()).to_ascii_lowercase();
+        if lower.contains("nothing to commit") {
+            return Err("nothing staged to commit".into());
+        }
+        return Err(format!("remote git commit failed: {}", out.stderr_string().trim()));
+    }
+    let shown = remote_git(
+        &state,
+        &alias,
+        &repo_root,
+        &["show", "-s", "--format=%H%n%s", "HEAD"],
+    )
+    .await?;
+    let text = shown.stdout_string();
+    let mut lines = text.lines();
+    let sha = lines.next().unwrap_or("").trim().to_string();
+    let summary = lines.next().unwrap_or("").trim().to_string();
+    Ok(GitCommitResult {
+        commit_sha: sha,
+        summary,
+    })
+}
+
+const REMOTE_LOG_FORMAT: &str = "%H%x1f%an%x1f%ae%x1f%at%x1f%P%x1f%s";
+
+#[tauri::command]
+pub async fn ssh_git_log(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    repo_root: String,
+    limit: u32,
+    before_sha: Option<String>,
+) -> Result<Vec<GitLogEntry>, String> {
+    let state = state.inner().clone();
+    let bounded = limit.clamp(1, 200);
+    let count_arg = format!("--max-count={bounded}");
+    let format_arg = format!("--format={REMOTE_LOG_FORMAT}");
+    let cursor = match before_sha.as_deref().filter(|s| !s.is_empty()) {
+        Some(sha) => {
+            if !sha_is_safe(sha) {
+                return Err("invalid cursor sha".into());
+            }
+            Some(format!("{sha}^"))
+        }
+        None => None,
+    };
+    let mut args: Vec<&str> = vec!["log", "--no-color", "--shortstat", &count_arg, &format_arg];
+    if let Some(c) = cursor.as_deref() {
+        args.push(c);
+    }
+    let out = remote_git(&state, &alias, &repo_root, &args).await?;
+    if !out.ok() {
+        let lower = out.stderr_string().to_ascii_lowercase();
+        if lower.contains("does not have any commits yet")
+            || lower.contains("bad default revision")
+            || lower.contains("unknown revision")
+            || lower.contains("ambiguous argument 'head'")
+        {
+            return Ok(Vec::new());
+        }
+        return Err(format!("remote git log failed: {}", out.stderr_string().trim()));
+    }
+    Ok(parse_remote_log(&out.stdout_string(), bounded as usize))
+}
+
+fn parse_remote_log(stdout: &str, cap: usize) -> Vec<GitLogEntry> {
+    let mut entries: Vec<GitLogEntry> = Vec::with_capacity(cap);
+    for raw in stdout.lines() {
+        let line = raw.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        if line.contains('\x1f') {
+            let mut f = line.splitn(6, '\x1f');
+            let sha = f.next().unwrap_or("").to_string();
+            if !sha_is_safe(&sha) {
+                continue;
+            }
+            let author = f.next().unwrap_or("").to_string();
+            let author_email = f.next().unwrap_or("").to_string();
+            let timestamp = f.next().unwrap_or("0").parse::<i64>().unwrap_or(0);
+            let parents: Vec<String> = f
+                .next()
+                .unwrap_or("")
+                .split_ascii_whitespace()
+                .map(str::to_string)
+                .collect();
+            let subject = f.next().unwrap_or("").to_string();
+            let short_sha = sha.chars().take(7).collect::<String>();
+            entries.push(GitLogEntry {
+                sha,
+                short_sha,
+                author,
+                author_email,
+                timestamp_secs: timestamp,
+                parents,
+                subject,
+                files_changed: 0,
+                insertions: 0,
+                deletions: 0,
+            });
+            continue;
+        }
+        if let Some(cur) = entries.last_mut() {
+            if line.contains("file changed") || line.contains("files changed") {
+                let (fc, ins, del) = parse_remote_shortstat(line);
+                cur.files_changed = fc;
+                cur.insertions = ins;
+                cur.deletions = del;
+            }
+        }
+    }
+    entries
+}
+
+fn parse_remote_shortstat(line: &str) -> (u32, u32, u32) {
+    let trimmed = line.trim();
+    let mut files = 0u32;
+    let mut ins = 0u32;
+    let mut del = 0u32;
+    for part in trimmed.split(',') {
+        let part = part.trim();
+        let n: u32 = part
+            .split_ascii_whitespace()
+            .next()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0);
+        if part.contains("file") {
+            files = n;
+        } else if part.contains("insertion") {
+            ins = n;
+        } else if part.contains("deletion") {
+            del = n;
+        }
+    }
+    (files, ins, del)
+}
+
+#[tauri::command]
+pub async fn ssh_git_show_commit(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    repo_root: String,
+    sha: String,
+) -> Result<GitDiffResult, String> {
+    if !sha_is_safe(&sha) {
+        return Err("invalid commit identifier".into());
+    }
+    let state = state.inner().clone();
+    let out = remote_git(
+        &state,
+        &alias,
+        &repo_root,
+        &[
+            "show",
+            "--no-color",
+            "--no-ext-diff",
+            "--patch-with-stat",
+            &sha,
+            "--",
+        ],
+    )
+    .await?;
+    if !out.ok() {
+        return Err(format!("remote git show failed: {}", out.stderr_string().trim()));
+    }
+    Ok(GitDiffResult {
+        diff_text: git_text(&out),
+        truncated: false,
+    })
+}
+
+#[tauri::command]
+pub async fn ssh_git_resolve_repo(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    cwd: String,
+) -> Result<Option<GitRepoInfo>, String> {
+    let state = state.inner().clone();
+    let top = remote_git(&state, &alias, &cwd, &["rev-parse", "--show-toplevel"]).await?;
+    if !top.ok() {
+        return Ok(None);
+    }
+    let repo_root = top.stdout_string().trim().to_string();
+    if repo_root.is_empty() {
+        return Ok(None);
+    }
+    let branch_out = remote_git(
+        &state,
+        &alias,
+        &repo_root,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+    )
+    .await?;
+    let branch = branch_out.stdout_string().trim().to_string();
+    let upstream_out = remote_git(
+        &state,
+        &alias,
+        &repo_root,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )
+    .await?;
+    let upstream = if upstream_out.ok() {
+        let u = upstream_out.stdout_string().trim().to_string();
+        if u.is_empty() {
+            None
+        } else {
+            Some(u)
+        }
+    } else {
+        None
+    };
+    Ok(Some(GitRepoInfo {
+        repo_root,
+        branch: branch.clone(),
+        upstream,
+        is_detached: branch == "HEAD" || branch.is_empty(),
+    }))
+}
+
+#[tauri::command]
+pub async fn ssh_git_remote_url(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    repo_root: String,
+    name: String,
+) -> Result<Option<String>, String> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Ok(None);
+    }
+    let state = state.inner().clone();
+    let key = format!("remote.{name}.url");
+    let out = remote_git(&state, &alias, &repo_root, &["config", "--get", &key]).await?;
+    if !out.ok() {
+        return Ok(None);
+    }
+    let url = out.stdout_string().trim().to_string();
+    Ok(if url.is_empty() { None } else { Some(url) })
+}
+
+// ───────────────────────── Remote search + grep over SSH exec ─────────────────────────
+//
+// File search and content search run the host's own tools over an exec channel:
+// `rg` is preferred (fast, gitignore-aware) with a POSIX `find` / `grep -rn`
+// fallback so a host without ripgrep still works. Results are shaped to match the
+// local `SearchResult`/`GrepResponse` so the fuzzy finder and content-search UI
+// render remote and local hits identically. All user-supplied strings (root,
+// query, pattern, globs) are POSIX-single-quoted before splicing.
+
+use crate::modules::fs::grep::{GrepHit, GrepResponse};
+use crate::modules::fs::search::{SearchHit, SearchResult};
+
+const REMOTE_SEARCH_PRUNE: &str =
+    "-not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/target/*' \
+     -not -path '*/dist/*' -not -path '*/.next/*'";
+
+/// Strip the `root` prefix from an absolute remote path to get a display-relative
+/// path. Both are POSIX (`/`-separated).
+fn remote_rel(root: &str, abs: &str) -> String {
+    let root_trim = root.trim_end_matches('/');
+    abs.strip_prefix(root_trim)
+        .map(|s| s.trim_start_matches('/').to_string())
+        .unwrap_or_else(|| abs.to_string())
+}
+
+fn remote_basename(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
+/// Fuzzy-ish file search on the remote host. Lists candidate files via
+/// `rg --files` (gitignore-aware) and filters them to those whose path contains
+/// the query substring (case-insensitive), mirroring the local explorer search
+/// feel. Falls back to `find` when ripgrep is absent.
+#[tauri::command]
+pub async fn ssh_fs_search(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    root: String,
+    query: String,
+    limit: Option<usize>,
+) -> Result<SearchResult, String> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Ok(SearchResult {
+            hits: Vec::new(),
+            truncated: false,
+        });
+    }
+    let cap = limit.unwrap_or(200).min(1000);
+    let state = state.inner().clone();
+    let conn = get_conn(&state, &alias).await?;
+
+    // Prefer rg --files; fall back to a pruned find. `2>/dev/null` so a missing
+    // tool or unreadable dir doesn't pollute stdout.
+    let root_q = sh_single_quote(&root);
+    let cmd = format!(
+        "(cd {root_q} && rg --files --hidden --glob '!.git' 2>/dev/null) \
+         || find {root_q} -type f {prune} 2>/dev/null",
+        prune = REMOTE_SEARCH_PRUNE,
+    );
+    let stdout = conn.exec(&cmd).await?;
+
+    let mut hits: Vec<SearchHit> = Vec::new();
+    let mut truncated = false;
+    for raw in stdout.lines() {
+        let line = raw.trim_end_matches('\r').trim();
+        if line.is_empty() {
+            continue;
+        }
+        // rg --files prints paths relative to root; find prints absolute. Build
+        // a canonical absolute path either way.
+        let abs = if line.starts_with('/') {
+            line.replace('\\', "/")
+        } else {
+            let root_trim = root.trim_end_matches('/');
+            format!("{root_trim}/{}", line.replace('\\', "/"))
+        };
+        let rel = remote_rel(&root, &abs);
+        if !rel.to_lowercase().contains(&q) {
+            continue;
+        }
+        if hits.len() >= cap {
+            truncated = true;
+            break;
+        }
+        let name = remote_basename(&abs);
+        hits.push(SearchHit {
+            path: abs,
+            rel,
+            name,
+            is_dir: false,
+        });
+    }
+    Ok(SearchResult { hits, truncated })
+}
+
+/// Content search on the remote host. Runs `rg` with JSON output for precise
+/// line/column parsing, falling back to `grep -rn` when ripgrep is absent.
+#[tauri::command]
+pub async fn ssh_fs_grep(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    pattern: String,
+    root: String,
+    case_insensitive: Option<bool>,
+    max_results: Option<usize>,
+) -> Result<GrepResponse, String> {
+    if pattern.trim().is_empty() {
+        return Err("empty pattern".into());
+    }
+    let cap = max_results.unwrap_or(200).clamp(1, 2000);
+    let state = state.inner().clone();
+    let conn = get_conn(&state, &alias).await?;
+
+    let root_q = sh_single_quote(&root);
+    let pat_q = sh_single_quote(&pattern);
+    let ci = if case_insensitive.unwrap_or(false) {
+        "-i "
+    } else {
+        ""
+    };
+    // rg with --no-heading --line-number --with-filename gives `path:line:text`.
+    // grep -rn fallback emits the same shape. Both prune VCS/build dirs.
+    let cmd = format!(
+        "(cd {root_q} && rg --no-heading --line-number --with-filename --color=never {ci}-e {pat_q} . 2>/dev/null) \
+         || grep -rn {ci}-e {pat_q} {root_q} {prune} 2>/dev/null",
+        prune = "--exclude-dir=node_modules --exclude-dir=.git --exclude-dir=target --exclude-dir=dist",
+    );
+    let stdout = conn.exec(&cmd).await?;
+
+    let mut hits: Vec<GrepHit> = Vec::new();
+    let mut truncated = false;
+    let mut files: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for raw in stdout.lines() {
+        let line = raw.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        // Parse `path:line:text`. The path may itself contain ':' (rare on
+        // POSIX) — split on the first two colons only.
+        let mut parts = line.splitn(3, ':');
+        let path_raw = match parts.next() {
+            Some(p) => p,
+            None => continue,
+        };
+        let line_no = match parts.next().and_then(|n| n.trim().parse::<u64>().ok()) {
+            Some(n) => n,
+            None => continue,
+        };
+        let text = parts.next().unwrap_or("").to_string();
+
+        let abs = if path_raw.starts_with('/') {
+            path_raw.replace('\\', "/")
+        } else {
+            // rg with `.` prints `./rel`; normalize against root.
+            let rel = path_raw.trim_start_matches("./");
+            let root_trim = root.trim_end_matches('/');
+            format!("{root_trim}/{}", rel.replace('\\', "/"))
+        };
+        files.insert(abs.clone());
+        if hits.len() >= cap {
+            truncated = true;
+            break;
+        }
+        let rel = remote_rel(&root, &abs);
+        hits.push(GrepHit {
+            path: abs,
+            rel,
+            line: line_no,
+            text,
+        });
+    }
+    Ok(GrepResponse {
+        hits,
+        truncated,
+        files_scanned: files.len(),
+    })
+}
+
 #[tauri::command]
 pub async fn ssh_fs_disconnect(
     state: tauri::State<'_, SshFsState>,
@@ -963,5 +2068,106 @@ mod tests {
             Some(("port".into(), "2222".into()))
         );
         assert_eq!(split_directive("# comment"), None);
+    }
+
+    #[test]
+    fn single_quote_escapes_embedded_quote() {
+        // The classic command-injection guard: a path with a single quote must
+        // close, escape, and reopen so it stays one shell argument.
+        assert_eq!(sh_single_quote("a'b"), "'a'\\''b'");
+        assert_eq!(sh_single_quote("plain"), "'plain'");
+        // A path that tries to break out stays fully contained: every embedded
+        // quote is escaped as `'\''`, so the metacharacters that follow are
+        // literal bytes inside the quoting, not shell syntax. (The result DOES
+        // contain the substring "; rm" — that's fine, it is inert text.)
+        let evil = "/tmp/x'; rm -rf / #";
+        let quoted = sh_single_quote(evil);
+        // Exact expected POSIX quoting: the lone `'` becomes `'\''`, everything
+        // else is wrapped verbatim. A shell parses this as one argument equal to
+        // the original string — the `;`, `rm`, `#` are inert literal bytes.
+        assert_eq!(quoted, "'/tmp/x'\\''; rm -rf / #'");
+    }
+
+    #[test]
+    fn remote_git_command_quotes_root_and_args() {
+        let cmd = remote_git_command("/srv/repo with space", &["status", "--short"]);
+        assert!(cmd.contains("cd '/srv/repo with space' &&"));
+        assert!(cmd.ends_with("git 'status' '--short'"));
+    }
+
+    #[test]
+    fn remote_git_command_contains_injection_attempt() {
+        // A repo path containing shell metacharacters cannot escape the cd arg:
+        // the embedded `'` is escaped as `'\''`, so `; rm -rf /;` survives only
+        // as inert bytes inside the single-quoted path, never as shell syntax.
+        let cmd = remote_git_command("/repo'; rm -rf /; '", &["status"]);
+        assert!(cmd.starts_with("cd '/repo'\\''; rm -rf /; '\\''' &&"));
+        assert!(cmd.ends_with("git 'status'"));
+    }
+
+    #[test]
+    fn reject_control_bytes_blocks_nul_and_newline() {
+        assert!(reject_control_bytes("/ok/path").is_ok());
+        assert!(reject_control_bytes("").is_err());
+        assert!(reject_control_bytes("/bad\npath").is_err());
+        assert!(reject_control_bytes("/bad\0path").is_err());
+        assert!(reject_control_bytes("/bad\x1bpath").is_err());
+    }
+
+    #[test]
+    fn sha_safety() {
+        assert!(sha_is_safe("abc123"));
+        assert!(sha_is_safe(&"f".repeat(40)));
+        assert!(!sha_is_safe(""));
+        assert!(!sha_is_safe("abcg"));
+        assert!(!sha_is_safe(";rm -rf /"));
+        assert!(!sha_is_safe(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn shortstat_parsing() {
+        assert_eq!(
+            parse_remote_shortstat(" 5 files changed, 12 insertions(+), 3 deletions(-)"),
+            (5, 12, 3)
+        );
+        assert_eq!(
+            parse_remote_shortstat(" 1 file changed, 1 insertion(+)"),
+            (1, 1, 0)
+        );
+        assert_eq!(parse_remote_shortstat("no stat"), (0, 0, 0));
+    }
+
+    #[test]
+    fn remote_log_parsing_interleaves_shortstat() {
+        let sha = "a".repeat(40);
+        let stdout = format!(
+            "{sha}\x1fAda\x1fada@x\x1f1700000000\x1f\x1fInitial commit\n \
+             2 files changed, 9 insertions(+), 1 deletion(-)\n"
+        );
+        let entries = parse_remote_log(&stdout, 10);
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.sha, sha);
+        assert_eq!(e.author, "Ada");
+        assert_eq!(e.subject, "Initial commit");
+        assert_eq!(e.files_changed, 2);
+        assert_eq!(e.insertions, 9);
+        assert_eq!(e.deletions, 1);
+    }
+
+    #[test]
+    fn remote_log_skips_non_hex_sha_lines() {
+        // A subject line that happens to contain the unit separator must not be
+        // mistaken for a commit header when its first field isn't a valid sha.
+        let stdout = "not-a-sha\x1fx\x1fx\x1f0\x1f\x1fsubject\n";
+        assert!(parse_remote_log(stdout, 10).is_empty());
+    }
+
+    #[test]
+    fn remote_rel_strips_root_prefix() {
+        assert_eq!(remote_rel("/srv/app", "/srv/app/src/main.rs"), "src/main.rs");
+        assert_eq!(remote_rel("/srv/app/", "/srv/app/x"), "x");
+        // A path outside the root is returned unchanged.
+        assert_eq!(remote_rel("/srv/app", "/etc/passwd"), "/etc/passwd");
     }
 }

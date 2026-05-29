@@ -10,6 +10,13 @@ export function useWorkspaceCwd(
   activeTab: Tab | undefined,
   tabs: Tab[],
   home: string | null,
+  /**
+   * When set (project windows opened via `?dir=`), the explorer stays pinned to
+   * this root and stops mirroring the active shell's cwd — so a `cd` inside a
+   * terminal no longer moves the file tree off the project. New terminals still
+   * inherit the live cwd via `inheritedCwdForNewTab`.
+   */
+  pinnedRoot?: string | null,
 ): Result {
   const lastTerminalCwd = useRef<string | null>(null);
 
@@ -20,12 +27,13 @@ export function useWorkspaceCwd(
   }, [activeTab]);
 
   const explorerRoot = useMemo<string | null>(() => {
+    if (pinnedRoot) return pinnedRoot;
     if (activeTab?.kind === "terminal" && activeTab.cwd) return activeTab.cwd;
     if (lastTerminalCwd.current) return lastTerminalCwd.current;
     const anyTerm = tabs.find((t) => t.kind === "terminal" && t.cwd);
     if (anyTerm?.kind === "terminal" && anyTerm.cwd) return anyTerm.cwd;
     return home;
-  }, [activeTab, tabs, home]);
+  }, [activeTab, tabs, home, pinnedRoot]);
 
   const inheritedCwdForNewTab = useCallback((): string | undefined => {
     if (activeTab?.kind === "terminal" && activeTab.cwd) return activeTab.cwd;

@@ -1,15 +1,20 @@
+import { memo } from "react";
 import { cn } from "@/lib/utils";
-import type { MarkdownTab, Tab } from "@/modules/tabs";
+import type { MarkdownTab } from "@/modules/tabs";
 import { MarkdownSplitPane } from "./MarkdownSplitPane";
 
 type Props = {
-  tabs: Tab[];
+  /** Pre-filtered, referentially-stable slice (see `useStableTabSlice`). */
+  markdowns: MarkdownTab[];
   activeId: number;
   onDirtyChange?: (id: number, dirty: boolean) => void;
 };
 
-export function MarkdownStack({ tabs, activeId, onDirtyChange }: Props) {
-  const markdowns = tabs.filter((t): t is MarkdownTab => t.kind === "markdown");
+export const MarkdownStack = memo(function MarkdownStack({
+  markdowns,
+  activeId,
+  onDirtyChange,
+}: Props) {
   if (markdowns.length === 0) return null;
   return (
     <div className="relative h-full w-full">
@@ -34,4 +39,4 @@ export function MarkdownStack({ tabs, activeId, onDirtyChange }: Props) {
       })}
     </div>
   );
-}
+});

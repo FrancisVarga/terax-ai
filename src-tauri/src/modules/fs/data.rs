@@ -502,6 +502,442 @@ pub(crate) fn arrow_value_to_string(col: &arrow::array::ArrayRef, row: usize) ->
     }
 }
 
+// ---------------------------------------------------------------------------
+// SQL query editor (cross-format)
+// ---------------------------------------------------------------------------
+//
+// The data viewer's SQL editor runs arbitrary user `SELECT`s against the open
+// file. Two engines back it, each native to its format so neither needs a
+// network-loaded extension:
+//
+//   * SQLite  → `rusqlite` (already bundled), opened read-only. The user's SQL
+//     runs verbatim against the real database, so joins/views/pragmas all work.
+//   * CSV/Parquet → an in-memory DuckDB whose core `read_csv_auto`/`read_parquet`
+//     table functions expose the file as a view named `data`. The user query
+//     references `data` (a `SELECT * FROM data` default is offered by the UI).
+//
+// Both paths share the `DataPreview` wire shape and the same paging contract as
+// the browse-mode commands, so the grid's infinite row model is unchanged.
+
+/// The format of the file a query runs against. Mirrors the TS `Format` union.
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DataFormat {
+    Sqlite,
+    Csv,
+    Parquet,
+}
+
+/// Reject anything that isn't a single read-only statement. DuckDB and SQLite
+/// are both opened read-only so a write would error anyway, but rejecting it up
+/// front gives a clear message and blocks multi-statement batches (`;`-joined)
+/// that could smuggle a second command past the read-only intent.
+fn ensure_read_only_query(sql: &str) -> Result<&str, String> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if trimmed.is_empty() {
+        return Err("Empty query.".into());
+    }
+    // A bare `;` inside string literals is legal, but a preview query has no need
+    // for multiple statements; the simplest safe rule is "no interior semicolon".
+    if trimmed.contains(';') {
+        return Err("Only a single statement is allowed.".into());
+    }
+    let head = trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    // Allow the read-only entry keywords. `WITH` covers CTEs that end in SELECT;
+    // `PRAGMA`/`EXPLAIN`/`DESCRIBE`/`SHOW`/`VALUES`/`TABLE` are read-only too.
+    const ALLOWED: &[&str] = &[
+        "SELECT", "WITH", "PRAGMA", "EXPLAIN", "DESCRIBE", "SHOW", "VALUES", "TABLE",
+    ];
+    if !ALLOWED.contains(&head.as_str()) {
+        return Err(format!(
+            "Only read-only queries are allowed (got `{head}`)."
+        ));
+    }
+    Ok(trimmed)
+}
+
+/// Build the DuckDB SQL that exposes a CSV/Parquet file as a view named `data`.
+/// The path is bound as a parameter to the table function, never spliced, so a
+/// path containing quotes can't break out. Returns the `CREATE VIEW` statement.
+fn duckdb_view_sql(format: DataFormat) -> &'static str {
+    match format {
+        DataFormat::Csv => "CREATE VIEW data AS SELECT * FROM read_csv_auto(?)",
+        DataFormat::Parquet => "CREATE VIEW data AS SELECT * FROM read_parquet(?)",
+        // SQLite never reaches DuckDB.
+        DataFormat::Sqlite => unreachable!("sqlite uses rusqlite"),
+    }
+}
+
+/// Open an in-memory, read-only DuckDB with the file mounted as view `data`.
+fn open_duckdb_with_view(p: &std::path::Path, format: DataFormat) -> Result<duckdb::Connection, String> {
+    let conn = duckdb::Connection::open_in_memory().map_err(|e| format!("duckdb: {e}"))?;
+    let path_str = p.to_string_lossy();
+    conn.execute(duckdb_view_sql(format), duckdb::params![path_str.as_ref()])
+        .map_err(|e| format!("open {}: {e}", path_str))?;
+    // Belt-and-suspenders: forbid writes for the rest of the session. The view is
+    // already created; the user query runs after this flips.
+    conn.execute_batch("SET access_mode='READ_ONLY';").ok();
+    Ok(conn)
+}
+
+/// Run a user query through DuckDB (CSV/Parquet) and collect every cell as an
+/// `Option<String>`. `paged` adds an outer `LIMIT/OFFSET`; when `None` the full
+/// result is returned (used by export). Returns `(columns, rows)`.
+fn duckdb_run(
+    conn: &duckdb::Connection,
+    user_sql: &str,
+    paged: Option<(u32, u32)>,
+) -> Result<(Vec<String>, Vec<Vec<Option<String>>>), String> {
+    let sql = match paged {
+        Some((limit, offset)) => {
+            format!("SELECT * FROM ({user_sql}) AS _q LIMIT {limit} OFFSET {offset}")
+        }
+        None => format!("SELECT * FROM ({user_sql}) AS _q"),
+    };
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut rows_iter = stmt.query([]).map_err(|e| e.to_string())?;
+
+    let mut columns: Vec<String> = Vec::new();
+    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+    let mut col_count = 0usize;
+    let mut first = true;
+    while let Some(row) = rows_iter.next().map_err(|e| e.to_string())? {
+        if first {
+            // Column names are only known from the statement after the first
+            // query; pull them once.
+            let stmt_ref = row.as_ref();
+            columns = stmt_ref
+                .column_names()
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
+            col_count = columns.len();
+            first = false;
+        }
+        let mut cells = Vec::with_capacity(col_count);
+        for i in 0..col_count {
+            cells.push(duckdb_value_to_string(row, i));
+        }
+        rows.push(cells);
+    }
+    // Zero-row result: recover column names from the prepared statement directly.
+    if first {
+        columns = stmt
+            .column_names()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+    }
+    Ok((columns, rows))
+}
+
+/// Stringify one DuckDB cell. DuckDB's row API exposes values as `duckdb::types::
+/// Value`; we render each variant to text mirroring `sqlite_value_to_string`.
+fn duckdb_value_to_string(row: &duckdb::Row, idx: usize) -> Option<String> {
+    use duckdb::types::Value;
+    match row.get::<_, Value>(idx).ok()? {
+        Value::Null => None,
+        Value::Boolean(b) => Some(b.to_string()),
+        Value::TinyInt(v) => Some(v.to_string()),
+        Value::SmallInt(v) => Some(v.to_string()),
+        Value::Int(v) => Some(v.to_string()),
+        Value::BigInt(v) => Some(v.to_string()),
+        Value::HugeInt(v) => Some(v.to_string()),
+        Value::UTinyInt(v) => Some(v.to_string()),
+        Value::USmallInt(v) => Some(v.to_string()),
+        Value::UInt(v) => Some(v.to_string()),
+        Value::UBigInt(v) => Some(v.to_string()),
+        Value::Float(v) => Some(v.to_string()),
+        Value::Double(v) => Some(v.to_string()),
+        Value::Decimal(v) => Some(v.to_string()),
+        Value::Text(s) => Some(s),
+        Value::Blob(b) => Some(format!("<blob {} bytes>", b.len())),
+        // Temporal / nested types: fall back to debug formatting, which DuckDB's
+        // Value implements for every variant.
+        other => Some(format!("{other:?}")),
+    }
+}
+
+/// Run a user SQL query against a SQLite file via rusqlite (read-only) and
+/// collect cells. `paged` wraps with LIMIT/OFFSET like the DuckDB path.
+fn sqlite_run(
+    conn: &rusqlite::Connection,
+    user_sql: &str,
+    paged: Option<(u32, u32)>,
+) -> Result<(Vec<String>, Vec<Vec<Option<String>>>), String> {
+    let sql = match paged {
+        Some((limit, offset)) => {
+            format!("SELECT * FROM ({user_sql}) LIMIT {limit} OFFSET {offset}")
+        }
+        None => format!("SELECT * FROM ({user_sql})"),
+    };
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let columns: Vec<String> = stmt
+        .column_names()
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+    let col_count = columns.len();
+    let mut q = stmt.query([]).map_err(|e| e.to_string())?;
+    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+    while let Some(row) = q.next().map_err(|e| e.to_string())? {
+        let mut cells = Vec::with_capacity(col_count);
+        for i in 0..col_count {
+            cells.push(sqlite_value_to_string(row, i));
+        }
+        rows.push(cells);
+    }
+    Ok((columns, rows))
+}
+
+/// Count rows of a user query without materializing them, for the grid's scroll
+/// bounds. Wraps the query in `SELECT COUNT(*) FROM (<sql>)`.
+fn count_sql(user_sql: &str) -> String {
+    format!("SELECT COUNT(*) FROM ({user_sql}) AS _c")
+}
+
+/// Run a single read-only SQL query against the open data file and return one
+/// page of results plus the total row count, mirroring the browse-mode preview
+/// commands so the grid pages identically. SQLite uses `rusqlite`; CSV/Parquet
+/// use an in-memory DuckDB exposing the file as view `data`.
+#[tauri::command]
+pub fn data_query(
+    path: String,
+    format: DataFormat,
+    sql: String,
+    limit: u32,
+    offset: u32,
+    workspace: Option<WorkspaceEnv>,
+) -> Result<DataPreview, String> {
+    let workspace = WorkspaceEnv::from_option(workspace);
+    let p = resolve_path(&path, &workspace);
+    let limit = clamp_limit(limit);
+    let user_sql = ensure_read_only_query(&sql)?;
+
+    let (columns, rows, total) = if format == DataFormat::Sqlite {
+        let conn = rusqlite::Connection::open_with_flags(
+            &p,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(|e| format!("open sqlite: {e}"))?;
+        let total: u64 = conn
+            .query_row(&count_sql(user_sql), [], |r| r.get::<_, i64>(0))
+            .map_err(|e| e.to_string())? as u64;
+        let (columns, rows) = sqlite_run(&conn, user_sql, Some((limit, offset)))?;
+        (columns, rows, total)
+    } else {
+        let conn = open_duckdb_with_view(&p, format)?;
+        // DuckDB COUNT(*) is a BIGINT (i64); cast to the u64 the grid expects.
+        let total: u64 = conn
+            .query_row(&count_sql(user_sql), [], |r| r.get::<_, i64>(0))
+            .map_err(|e| e.to_string())? as u64;
+        let (columns, rows) = duckdb_run(&conn, user_sql, Some((limit, offset)))?;
+        (columns, rows, total)
+    };
+
+    Ok(DataPreview {
+        columns,
+        rows,
+        total: Some(total),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Export
+// ---------------------------------------------------------------------------
+
+/// Output format for [`data_export`]. Serialized lowercase from the UI.
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    Csv,
+    Json,
+    Parquet,
+    Xlsx,
+}
+
+/// Run a query (or a whole table) and write the *entire* result set to
+/// `dest_path` in the chosen format. Unlike [`data_query`] this never pages —
+/// export is "give me everything the query returns". The same read-only rules
+/// and per-format engine routing as `data_query` apply.
+///
+/// `dest_path` is taken verbatim from a native save dialog the user picked, so
+/// it is intentionally *not* run through `resolve_path` (it's an output target
+/// the user explicitly chose, not a workspace-relative read).
+#[tauri::command]
+pub fn data_export(
+    path: String,
+    format: DataFormat,
+    sql: String,
+    dest_path: String,
+    out_format: ExportFormat,
+    workspace: Option<WorkspaceEnv>,
+) -> Result<u64, String> {
+    let workspace = WorkspaceEnv::from_option(workspace);
+    let p = resolve_path(&path, &workspace);
+    let user_sql = ensure_read_only_query(&sql)?;
+
+    // Materialize the full result. For a preview/export tool the result set is
+    // user-bounded (they write the query), so collecting it is acceptable.
+    let (columns, rows) = if format == DataFormat::Sqlite {
+        let conn = rusqlite::Connection::open_with_flags(
+            &p,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(|e| format!("open sqlite: {e}"))?;
+        sqlite_run(&conn, user_sql, None)?
+    } else {
+        let conn = open_duckdb_with_view(&p, format)?;
+        duckdb_run(&conn, user_sql, None)?
+    };
+
+    let dest = std::path::Path::new(&dest_path);
+    match out_format {
+        ExportFormat::Csv => write_csv(dest, &columns, &rows)?,
+        ExportFormat::Json => write_json(dest, &columns, &rows)?,
+        ExportFormat::Parquet => write_parquet(dest, &columns, &rows)?,
+        ExportFormat::Xlsx => write_xlsx(dest, &columns, &rows)?,
+    }
+    Ok(rows.len() as u64)
+}
+
+/// Quote a CSV field per RFC 4180 when it contains a comma, quote, or newline.
+fn csv_quote(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn write_csv(
+    dest: &std::path::Path,
+    columns: &[String],
+    rows: &[Vec<Option<String>>],
+) -> Result<(), String> {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    out.push_str(
+        &columns
+            .iter()
+            .map(|c| csv_quote(c))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    out.push('\n');
+    for row in rows {
+        let line = row
+            .iter()
+            .map(|c| csv_quote(c.as_deref().unwrap_or("")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let _ = writeln!(out, "{line}");
+    }
+    std::fs::write(dest, out).map_err(|e| format!("write csv: {e}"))
+}
+
+fn write_json(
+    dest: &std::path::Path,
+    columns: &[String],
+    rows: &[Vec<Option<String>>],
+) -> Result<(), String> {
+    // Array of objects keyed by column name; NULL cells serialize as JSON null.
+    let records: Vec<serde_json::Map<String, serde_json::Value>> = rows
+        .iter()
+        .map(|row| {
+            let mut obj = serde_json::Map::with_capacity(columns.len());
+            for (i, col) in columns.iter().enumerate() {
+                let v = match row.get(i).and_then(|c| c.as_ref()) {
+                    Some(s) => serde_json::Value::String(s.clone()),
+                    None => serde_json::Value::Null,
+                };
+                obj.insert(col.clone(), v);
+            }
+            obj
+        })
+        .collect();
+    let json = serde_json::to_vec_pretty(&records).map_err(|e| format!("json: {e}"))?;
+    std::fs::write(dest, json).map_err(|e| format!("write json: {e}"))
+}
+
+fn write_parquet(
+    dest: &std::path::Path,
+    columns: &[String],
+    rows: &[Vec<Option<String>>],
+) -> Result<(), String> {
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    // Every cell is already a string (the engines stringify on read), so the
+    // export schema is all-Utf8. This keeps types lossless-as-text and avoids
+    // re-inferring numeric/temporal types we already flattened.
+    let fields: Vec<Field> = columns
+        .iter()
+        .map(|c| Field::new(c, DataType::Utf8, true))
+        .collect();
+    let schema = Arc::new(Schema::new(fields));
+
+    // Build one StringArray per column (column-major) from the row-major rows.
+    let mut col_arrays: Vec<Arc<dyn arrow::array::Array>> = Vec::with_capacity(columns.len());
+    for ci in 0..columns.len() {
+        let values: Vec<Option<&str>> = rows
+            .iter()
+            .map(|r| r.get(ci).and_then(|c| c.as_deref()))
+            .collect();
+        col_arrays.push(Arc::new(StringArray::from(values)));
+    }
+    let batch = RecordBatch::try_new(schema.clone(), col_arrays)
+        .map_err(|e| format!("parquet batch: {e}"))?;
+
+    let file = std::fs::File::create(dest).map_err(|e| format!("create parquet: {e}"))?;
+    let mut writer =
+        ArrowWriter::try_new(file, schema, None).map_err(|e| format!("parquet: {e}"))?;
+    writer.write(&batch).map_err(|e| format!("parquet: {e}"))?;
+    writer.close().map_err(|e| format!("parquet: {e}"))?;
+    Ok(())
+}
+
+fn write_xlsx(
+    dest: &std::path::Path,
+    columns: &[String],
+    rows: &[Vec<Option<String>>],
+) -> Result<(), String> {
+    use rust_xlsxwriter::{Format, Workbook};
+
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet();
+    let header_fmt = Format::new().set_bold();
+
+    for (ci, col) in columns.iter().enumerate() {
+        sheet
+            .write_string_with_format(0, ci as u16, col, &header_fmt)
+            .map_err(|e| format!("xlsx header: {e}"))?;
+    }
+    for (ri, row) in rows.iter().enumerate() {
+        for (ci, cell) in row.iter().enumerate() {
+            // Row 0 is the header, so data starts at row 1.
+            let r = (ri + 1) as u32;
+            if let Some(s) = cell {
+                sheet
+                    .write_string(r, ci as u16, s)
+                    .map_err(|e| format!("xlsx cell: {e}"))?;
+            }
+            // None → leave the cell blank.
+        }
+    }
+    workbook
+        .save(dest)
+        .map_err(|e| format!("save xlsx: {e}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -625,5 +1061,93 @@ mod tests {
         let err =
             data_sqlite_rows(path, "a; DROP TABLE a".into(), 10, 0, None, None, None).unwrap_err();
         assert!(err.contains("no such table"));
+    }
+
+    #[test]
+    fn read_only_guard_rejects_writes_and_multistatement() {
+        assert!(ensure_read_only_query("SELECT 1").is_ok());
+        assert!(ensure_read_only_query("  with t as (select 1) select * from t ").is_ok());
+        assert!(ensure_read_only_query("DELETE FROM t").is_err());
+        assert!(ensure_read_only_query("UPDATE t SET x=1").is_err());
+        assert!(ensure_read_only_query("DROP TABLE t").is_err());
+        assert!(ensure_read_only_query("").is_err());
+        // Trailing `;` is fine (stripped); an interior one is not.
+        assert!(ensure_read_only_query("SELECT 1;").is_ok());
+        assert!(ensure_read_only_query("SELECT 1; DROP TABLE t").is_err());
+    }
+
+    #[test]
+    fn sqlite_query_pages_and_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE people (id INTEGER, name TEXT);
+                 INSERT INTO people VALUES (1,'Ann'),(2,'Bob'),(3,'Cat');",
+            )
+            .unwrap();
+        }
+        let path = db.to_string_lossy().into_owned();
+        let p = data_query(
+            path,
+            DataFormat::Sqlite,
+            "SELECT name FROM people ORDER BY id".into(),
+            2,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(p.columns, vec!["name"]);
+        assert_eq!(p.total, Some(3)); // count spans the full query, not the page
+        assert_eq!(p.rows.len(), 2); // limit=2
+        assert_eq!(p.rows[0][0], Some("Ann".to_string()));
+    }
+
+    #[test]
+    fn export_csv_and_json_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE t (a TEXT, b INTEGER);
+                 INSERT INTO t VALUES ('x',1),('has,comma',2),(NULL,3);",
+            )
+            .unwrap();
+        }
+        let path = db.to_string_lossy().into_owned();
+
+        let csv_dest = dir.path().join("out.csv");
+        let n = data_export(
+            path.clone(),
+            DataFormat::Sqlite,
+            "SELECT a, b FROM t ORDER BY b".into(),
+            csv_dest.to_string_lossy().into_owned(),
+            ExportFormat::Csv,
+            None,
+        )
+        .unwrap();
+        assert_eq!(n, 3);
+        let csv = std::fs::read_to_string(&csv_dest).unwrap();
+        assert!(csv.starts_with("a,b\n"));
+        assert!(csv.contains("\"has,comma\",2")); // comma field quoted
+        assert!(csv.contains("\n,3\n") || csv.ends_with(",3\n")); // NULL → empty
+
+        let json_dest = dir.path().join("out.json");
+        data_export(
+            path,
+            DataFormat::Sqlite,
+            "SELECT a, b FROM t ORDER BY b".into(),
+            json_dest.to_string_lossy().into_owned(),
+            ExportFormat::Json,
+            None,
+        )
+        .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&json_dest).unwrap()).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[2]["a"], serde_json::Value::Null); // NULL preserved
     }
 }

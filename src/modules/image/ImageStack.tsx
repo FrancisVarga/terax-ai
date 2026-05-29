@@ -1,14 +1,15 @@
+import { memo } from "react";
 import { cn } from "@/lib/utils";
-import type { ImageTab, Tab } from "@/modules/tabs";
+import type { ImageTab } from "@/modules/tabs";
 import { ImagePreviewPane } from "./ImagePreviewPane";
 
 type Props = {
-  tabs: Tab[];
+  /** Pre-filtered, referentially-stable slice (see `useStableTabSlice`). */
+  images: ImageTab[];
   activeId: number;
 };
 
-export function ImageStack({ tabs, activeId }: Props) {
-  const images = tabs.filter((t): t is ImageTab => t.kind === "image");
+export const ImageStack = memo(function ImageStack({ images, activeId }: Props) {
   if (images.length === 0) return null;
   return (
     <div className="relative h-full w-full">
@@ -29,4 +30,4 @@ export function ImageStack({ tabs, activeId }: Props) {
       })}
     </div>
   );
-}
+});

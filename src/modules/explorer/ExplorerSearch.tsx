@@ -15,6 +15,7 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
 import { currentWorkspaceEnv } from "@/modules/workspace";
+import { parseRemote, remoteUri } from "./lib/remote";
 import { motion } from "motion/react";
 import {
   forwardRef,
@@ -111,15 +112,28 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(function E
     let alive = true;
     const handle = setTimeout(async () => {
       try {
-        const res = await invoke<SearchResult>("fs_search", {
-          root: rootPath,
-          query: q,
-          limit: 200,
-          showHidden,
-          workspace: currentWorkspaceEnv(),
-        });
+        const ref = parseRemote(rootPath);
+        const res = ref
+          ? await invoke<SearchResult>("ssh_fs_search", {
+              alias: ref.alias,
+              root: ref.path,
+              query: q,
+              limit: 200,
+            })
+          : await invoke<SearchResult>("fs_search", {
+              root: rootPath,
+              query: q,
+              limit: 200,
+              showHidden,
+              workspace: currentWorkspaceEnv(),
+            });
         if (alive) {
-          setResults(res.hits);
+          // Remote search returns bare POSIX paths; re-wrap as `ssh://alias/...`
+          // so selecting a hit opens it through the remote editor path.
+          const hits = ref
+            ? res.hits.map((h) => ({ ...h, path: remoteUri(ref.alias, h.path) }))
+            : res.hits;
+          setResults(hits);
           setTruncated(res.truncated);
           setSelectedIndex(0);
         }

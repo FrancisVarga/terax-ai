@@ -18,6 +18,8 @@ export {
   type BunqueueTab,
   type DockerDetailTab,
   type AnalyticsTab,
+  type OtelTab,
+  type DataGridMasterTab,
   type CcusageTab,
   type ProjectsTab,
   type ProjectDetailTab,
@@ -25,3 +27,4 @@ export {
   type TabPatch,
 } from "./lib/useTabs";
 export { useWorkspaceCwd } from "./lib/useWorkspaceCwd";
+export { useStableTabSlice } from "./lib/useStableTabSlice";
