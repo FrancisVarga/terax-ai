@@ -116,7 +116,7 @@ function EntryRowImpl(props: EntryRowProps) {
             onClick={handleClick}
             onDoubleClick={() => !isDir && tree.beginRename(path)}
             className={cn(
-              "group flex h-8 w-full min-w-0 cursor-pointer items-center gap-2 rounded-sm px-1.5 text-left text-[13px] text-foreground/85 transition-colors hover:bg-accent/70",
+              "group flex h-8 w-full min-w-0 cursor-pointer items-center gap-2 rounded-sm px-1.5 text-left text-[13px] text-foreground/85 outline-none transition-colors hover:bg-accent/70 focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset",
               isSelected && "bg-accent text-foreground",
               // Dim git-ignored entries (text + icon). Hover restores legibility.
               ignored && "opacity-45 hover:opacity-100",

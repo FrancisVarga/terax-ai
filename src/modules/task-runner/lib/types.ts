@@ -23,6 +23,12 @@ export type PackageManifest = {
   packageManager: PackageManager;
   /** Parsed runnable scripts, sorted with common ones first. */
   scripts: TaskScript[];
+  /**
+   * SSH config alias when this manifest lives on a remote host (`dir` is then a
+   * remote absolute path). Undefined for local/WSL manifests. Drives whether a
+   * run is dispatched over SSH or to the local background-process backend.
+   */
+  remoteAlias?: string;
 };
 
 export type PackageManager = "npm" | "pnpm" | "yarn" | "bun";
@@ -51,6 +57,8 @@ export type RunningTask = {
   output: string;
   /** Cursor into the backend ring buffer for incremental reads. */
   offset: number;
+  /** SSH alias when this task runs on a remote host; undefined when local. */
+  remoteAlias?: string;
 };
 
 /** Tree node: either a manifest leaf or a grouping directory. */

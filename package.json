@@ -1,15 +1,16 @@
 {
   "name": "terax",
   "private": true,
-  "version": "0.11.0",
+  "version": "0.12.0",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "build:sidecars": "bun scripts/build-sidecars.mjs",
+    "build:sidecars": "node scripts/build-sidecars.mjs",
+    "fetch:sidecars": "node scripts/fetch-sidecar-binaries.mjs",
     "preview": "vite preview",
-    "pretauri": "bun scripts/build-sidecars.mjs",
+    "pretauri": "node scripts/build-sidecars.mjs && node scripts/fetch-sidecar-binaries.mjs",
     "tauri": "tauri",
     "test": "vitest run",
     "test:watch": "vitest"

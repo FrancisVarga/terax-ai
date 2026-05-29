@@ -180,6 +180,18 @@ export const native = {
       maxResults: params.maxResults ?? null,
       workspace: currentWorkspaceEnv(),
     }),
+  /**
+   * Like {@link glob} but driven by the bundled ripgrep sidecar in an async
+   * backend command (off the IPC thread), so a deep-tree scan can't hang the
+   * UI. Same ignore semantics (node_modules / .gitignore pruned).
+   */
+  globRg: (params: { pattern: string; root: string; maxResults?: number }) =>
+    invoke<GlobResponse>("fs_glob_rg", {
+      pattern: params.pattern,
+      root: params.root,
+      maxResults: params.maxResults ?? null,
+      workspace: currentWorkspaceEnv(),
+    }),
   runCommand: (
     command: string,
     cwd?: string | null,
@@ -234,6 +246,20 @@ export const native = {
       exit_code: number | null;
     }>("shell_bg_logs", { handle, sinceOffset: sinceOffset ?? null }),
   shellBgKill: (handle: number) => invoke<void>("shell_bg_kill", { handle }),
+  // Remote (SSH) background tasks. Same poll/kill shape as the local shellBg*
+  // commands so the task-runner store can route by alias without special-casing
+  // the log/kill loop. `cwd` is an absolute remote path.
+  sshBgSpawn: (alias: string, command: string, cwd?: string | null) =>
+    invoke<number>("ssh_bg_spawn", { alias, command, cwd: cwd ?? null }),
+  sshBgLogs: (handle: number, sinceOffset?: number) =>
+    invoke<{
+      bytes: string;
+      next_offset: number;
+      dropped: number;
+      exited: boolean;
+      exit_code: number | null;
+    }>("ssh_bg_logs", { handle, sinceOffset: sinceOffset ?? null }),
+  sshBgKill: (handle: number) => invoke<void>("ssh_bg_kill", { handle }),
   shellBgList: () =>
     invoke<
       {

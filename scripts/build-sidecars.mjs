@@ -18,8 +18,8 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, statSync } from "node:fs";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -27,6 +27,45 @@ const ROOT = resolve(__dirname, "..");
 const OUT_DIR = join(ROOT, "src-tauri", "binaries");
 
 const EXE = process.platform === "win32" ? ".exe" : "";
+
+/**
+ * Resolve a real Bun executable, NOT the placeholder stub that pnpm leaves in
+ * node_modules/.bin when bun's binary-download postinstall is skipped (the
+ * `bunqueue` dependency only needs Bun's JS, so we disable that postinstall in
+ * pnpm-workspace.yaml). Running scripts via pnpm prepends node_modules/.bin to
+ * PATH, so a bare "bun" would hit the ~450-byte stub and fail with "not
+ * compatible with the version of Windows you're running". Walk PATH and pick
+ * the first bun that is a plausibly-real binary (skip the tiny stub).
+ */
+function resolveBun() {
+  const dirs = (process.env.PATH ?? "")
+    .split(delimiter)
+    .filter(Boolean)
+    // pnpm injects node_modules/.bin into PATH; that is exactly where the stub
+    // lives, so skip any .bin directory under this repo's node_modules.
+    .filter((dir) => !dir.includes(join("node_modules", ".bin")));
+  // Prefer a real native bun.exe (no shell needed) over a .cmd/.ps1 shim, which
+  // would force spawn's shell:true and trip DEP0190. Scan ALL dirs for the .exe
+  // first, then fall back to shims, then to a bare "bun".
+  const tiers =
+    process.platform === "win32"
+      ? [["bun.exe", 100_000], ["bun.cmd", 0], ["bun.bat", 0], ["bun", 0]]
+      : [["bun", 0]];
+  for (const [name, minSize] of tiers) {
+    for (const dir of dirs) {
+      const candidate = join(dir, name);
+      try {
+        const st = statSync(candidate);
+        if (st.isFile() && st.size >= minSize) return candidate;
+      } catch {
+        // not here, keep looking
+      }
+    }
+  }
+  return "bun"; // fall back; will surface a clear error if truly missing
+}
+
+const BUN = resolveBun();
 
 /**
  * Map a Rust/Tauri target triple to bun's `--target=bun-<os>-<arch>` flag.
@@ -96,9 +135,9 @@ for (const { base, entry } of TARGETS) {
   const outfile = join(OUT_DIR, `${base}-${triple}${EXE}`);
   console.log(`  ${base}  <-  ${entry}`);
   const r = spawnSync(
-    "bun",
+    BUN,
     ["build", "--compile", `--target=${bunTarget}`, entry, "--outfile", outfile],
-    { stdio: "inherit", cwd: ROOT },
+    { stdio: "inherit", cwd: ROOT, shell: /\.(cmd|bat)$/i.test(BUN) },
   );
   if (r.status !== 0) {
     console.error(`bun build failed for ${base} (exit ${r.status})`);

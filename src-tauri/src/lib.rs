@@ -334,6 +334,7 @@ pub fn run() {
         .manage(LaunchFile(Mutex::new(cli_file)))
         .manage(bunqueue::BunqueueState::default())
         .manage(ssh::SshFsState::default())
+        .manage(ssh::SshBgState::default())
         .manage(s3::S3State::default())
         .manage(ProjectWindows::default())
         .setup(|app| {
@@ -406,6 +407,7 @@ pub fn run() {
             fs::mutate::fs_create_file,
             fs::mutate::fs_create_dir,
             fs::mutate::fs_rename,
+            fs::mutate::fs_copy,
             fs::mutate::fs_delete,
             fs::watch::fs_watch_add,
             fs::watch::fs_watch_remove,
@@ -413,6 +415,7 @@ pub fn run() {
             fs::search::fs_list_files,
             fs::grep::fs_grep,
             fs::grep::fs_glob,
+            fs::grep::fs_glob_rg,
             git::commands::git_resolve_repo,
             git::commands::git_panel_snapshot,
             git::commands::git_status,
@@ -442,6 +445,11 @@ pub fn run() {
             ssh::ssh_fs_connect,
             ssh::ssh_fs_read_dir,
             ssh::ssh_fs_read_file,
+            ssh::ssh_fs_glob,
+            ssh::ssh_bg_spawn,
+            ssh::ssh_bg_logs,
+            ssh::ssh_bg_kill,
+            ssh::ssh_bg_list,
             ssh::ssh_fs_disconnect,
             docker::docker_list_containers,
             docker::docker_inspect_container,
