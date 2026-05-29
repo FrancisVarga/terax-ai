@@ -22,6 +22,14 @@ pub struct SshHost {
     pub hostname: Option<String>,
     pub user: Option<String>,
     pub port: Option<u16>,
+    /// `IdentityFile` paths declared for this host, in config order (`~` and
+    /// relative paths expanded). Honored before the built-in default key list.
+    #[serde(skip)]
+    pub identity_files: Vec<PathBuf>,
+    /// `IdentitiesOnly yes` — when set, ONLY `identity_files` are tried; the
+    /// default key list and any agent identities are not.
+    #[serde(skip)]
+    pub identities_only: bool,
     /// Source config file (the main file or an `Include`d one) for debugging.
     pub source: String,
 }
@@ -95,6 +103,25 @@ fn resolve_includes(value: &str, ssh_dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Expand a single config path value (`IdentityFile`): strip surrounding
+/// quotes, expand a leading `~/`, and resolve relative paths against `~/.ssh`.
+/// Returns `None` for an empty value.
+fn expand_user_path(raw: &str, ssh_dir: &Path) -> Option<PathBuf> {
+    let raw = raw.trim().trim_matches('"');
+    if raw.is_empty() {
+        return None;
+    }
+    if let Some(stripped) = raw.strip_prefix("~/") {
+        return Some(
+            dirs::home_dir()
+                .map(|h| h.join(stripped))
+                .unwrap_or_else(|| PathBuf::from(raw)),
+        );
+    }
+    let p = PathBuf::from(raw);
+    Some(if p.is_absolute() { p } else { ssh_dir.join(raw) })
+}
+
 /// Minimal glob matcher supporting `*` and `?` — enough for SSH `Include`
 /// filenames. Not a general-purpose globber.
 fn glob_match(pattern: &str, text: &str) -> bool {
@@ -151,6 +178,8 @@ fn parse_file(path: &Path, ssh_dir: &Path, visited: &mut HashSet<PathBuf>, out: 
                         hostname: None,
                         user: None,
                         port: None,
+                        identity_files: Vec::new(),
+                        identities_only: false,
                         source: source.clone(),
                     });
                 }
@@ -173,6 +202,20 @@ fn parse_file(path: &Path, ssh_dir: &Path, visited: &mut HashSet<PathBuf>, out: 
                     for h in current.iter_mut() {
                         h.port = Some(port);
                     }
+                }
+            }
+            "identityfile" => {
+                // A host may list multiple IdentityFile lines; accumulate them.
+                if let Some(path) = expand_user_path(&value, ssh_dir) {
+                    for h in current.iter_mut() {
+                        h.identity_files.push(path.clone());
+                    }
+                }
+            }
+            "identitiesonly" => {
+                let yes = value.eq_ignore_ascii_case("yes");
+                for h in current.iter_mut() {
+                    h.identities_only = yes;
                 }
             }
             _ => {}
@@ -299,10 +342,20 @@ impl Handler for ClientHandler {
     }
 }
 
-/// Resolve a host alias to (hostname, user, port) using the parsed config,
-/// falling back to the alias itself as the hostname when no `HostName` is set —
-/// mirroring how the ssh client treats a bare alias.
-fn resolve_host(alias: &str) -> Result<(String, Option<String>, u16), String> {
+/// Identity selection resolved from `~/.ssh/config` for a host.
+struct ResolvedIdentity {
+    /// `IdentityFile` paths in config order (may be empty).
+    files: Vec<PathBuf>,
+    /// `IdentitiesOnly yes` — restrict auth to `files` only.
+    only: bool,
+}
+
+/// Resolve a host alias to (hostname, user, port, identity) using the parsed
+/// config, falling back to the alias itself as the hostname when no `HostName`
+/// is set — mirroring how the ssh client treats a bare alias.
+fn resolve_host(
+    alias: &str,
+) -> Result<(String, Option<String>, u16, ResolvedIdentity), String> {
     let hosts = ssh_list_hosts()?;
     let entry = hosts.into_iter().find(|h| h.alias == alias);
     match entry {
@@ -310,9 +363,21 @@ fn resolve_host(alias: &str) -> Result<(String, Option<String>, u16), String> {
             h.hostname.unwrap_or_else(|| alias.to_string()),
             h.user,
             h.port.unwrap_or(22),
+            ResolvedIdentity {
+                files: h.identity_files,
+                only: h.identities_only,
+            },
         )),
         // Not in config — still allow a bare host:port style alias.
-        None => Ok((alias.to_string(), None, 22)),
+        None => Ok((
+            alias.to_string(),
+            None,
+            22,
+            ResolvedIdentity {
+                files: Vec::new(),
+                only: false,
+            },
+        )),
     }
 }
 
@@ -323,22 +388,43 @@ fn whoami() -> String {
         .unwrap_or_else(|_| "root".to_string())
 }
 
-/// Try the user's default identity files under `~/.ssh`, in preference order.
+/// Authenticate with public keys, honoring the host's `IdentityFile`/
+/// `IdentitiesOnly` from `~/.ssh/config`:
+///
+/// - `IdentityFile` entries are tried first, in config order;
+/// - with `IdentitiesOnly yes`, ONLY those entries are tried;
+/// - otherwise we fall back to the conventional default key names.
+///
 /// Returns the first key that successfully authenticates. Passphrase-protected
 /// keys are skipped (loaded with no passphrase) — consistent with the
-/// agent/keys-only, no-prompt policy.
-async fn authenticate(handle: &mut Handle<ClientHandler>, user: &str) -> Result<(), String> {
+/// keys-only, no-prompt policy.
+async fn authenticate(
+    handle: &mut Handle<ClientHandler>,
+    user: &str,
+    identity: &ResolvedIdentity,
+) -> Result<(), String> {
     let Some(ssh_dir) = dirs::home_dir().map(|h| h.join(".ssh")) else {
         return Err("no home directory".to_string());
     };
 
+    // Build the ordered candidate list: configured IdentityFiles first, then
+    // the default names unless IdentitiesOnly restricts us to the configured set.
+    let mut candidates: Vec<PathBuf> = identity.files.clone();
+    if !identity.only {
+        for name in ["id_ed25519", "id_ecdsa", "id_rsa", "id_dsa"] {
+            let p = ssh_dir.join(name);
+            if !candidates.contains(&p) {
+                candidates.push(p);
+            }
+        }
+    }
+
     let mut tried = 0;
-    for name in ["id_ed25519", "id_ecdsa", "id_rsa", "id_dsa"] {
-        let key_path = ssh_dir.join(name);
+    for key_path in &candidates {
         if !key_path.exists() {
             continue;
         }
-        let key = match russh::keys::load_secret_key(&key_path, None) {
+        let key = match russh::keys::load_secret_key(key_path, None) {
             Ok(k) => k,
             // Encrypted / unsupported key — move on.
             Err(_) => continue,
@@ -352,7 +438,11 @@ async fn authenticate(handle: &mut Handle<ClientHandler>, user: &str) -> Result<
     }
 
     if tried == 0 {
-        Err("no usable private keys in ~/.ssh (id_ed25519/id_ecdsa/id_rsa)".to_string())
+        if identity.only {
+            Err("no usable IdentityFile keys for this host (IdentitiesOnly yes)".to_string())
+        } else {
+            Err("no usable private keys (IdentityFile or ~/.ssh defaults)".to_string())
+        }
     } else {
         Err(format!("public-key authentication rejected for user '{user}'"))
     }
@@ -360,7 +450,7 @@ async fn authenticate(handle: &mut Handle<ClientHandler>, user: &str) -> Result<
 
 /// Establish a fresh SSH transport + SFTP session for `alias`.
 async fn open_conn(alias: &str) -> Result<Arc<RemoteConn>, String> {
-    let (host, user, port) = resolve_host(alias)?;
+    let (host, user, port, identity) = resolve_host(alias)?;
     let user = user.unwrap_or_else(whoami);
 
     let config = Arc::new(client::Config {
@@ -384,7 +474,7 @@ async fn open_conn(alias: &str) -> Result<Arc<RemoteConn>, String> {
             )
         })?;
 
-    authenticate(&mut handle, &user).await?;
+    authenticate(&mut handle, &user, &identity).await?;
 
     let channel = handle
         .channel_open_session()
