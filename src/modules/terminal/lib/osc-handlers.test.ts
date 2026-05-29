@@ -4,6 +4,7 @@ import {
   createShellIntegrationState,
   registerCwdHandler,
   registerPromptTracker,
+  registerRemoteCwdHandler,
 } from "./osc-handlers";
 
 /**
@@ -94,5 +95,38 @@ describe("OSC 7 cwd handler — gated by OSC 133 in-command state", () => {
 
     handlers.get(7)?.("file:///C:/Users/me/project");
     expect(onCwd).toHaveBeenCalledWith("C:/Users/me/project");
+  });
+});
+
+describe("OSC 7704 remote cwd handler — nonce-gated, NOT in-command-gated", () => {
+  it("fires the payload callback while a command is running", () => {
+    // The whole point: an interactive ssh session is one long-running command,
+    // so OSC 7704 MUST be honored despite inCommand=true (unlike OSC 7).
+    const { term, handlers } = makeFakeTerm();
+    const onPayload = vi.fn();
+    registerRemoteCwdHandler(term, onPayload);
+
+    handlers.get(7704)?.("abc123;%2Fhome%2Fme");
+    expect(onPayload).toHaveBeenCalledWith("abc123", "%2Fhome%2Fme");
+  });
+
+  it("splits only on the first semicolon (encoded path may contain none, never raw ;)", () => {
+    const { term, handlers } = makeFakeTerm();
+    const onPayload = vi.fn();
+    registerRemoteCwdHandler(term, onPayload);
+
+    handlers.get(7704)?.("nonce;%2Fsrv%2Fa%3Bb");
+    expect(onPayload).toHaveBeenCalledWith("nonce", "%2Fsrv%2Fa%3Bb");
+  });
+
+  it("ignores malformed payloads (missing separator or empty parts)", () => {
+    const { term, handlers } = makeFakeTerm();
+    const onPayload = vi.fn();
+    registerRemoteCwdHandler(term, onPayload);
+
+    handlers.get(7704)?.("noseparator");
+    handlers.get(7704)?.(";%2Fpath"); // empty nonce
+    handlers.get(7704)?.("nonce;"); // empty path
+    expect(onPayload).not.toHaveBeenCalled();
   });
 });

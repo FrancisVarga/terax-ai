@@ -9,6 +9,17 @@ export {
   writeToSession,
 } from "./lib/useTerminalSession";
 export {
+  bindRemoteCwd,
+  unbindRemoteCwd,
+  newRemoteCwdNonce,
+  buildRemoteCwdHookCommand,
+} from "./lib/remote-cwd";
+export {
+  probeGpuStatus,
+  type GpuAcceleration,
+  type GpuStatus,
+} from "./lib/gpuStatus";
+export {
   findLeafCwd,
   hasLeaf,
   isLeaf,

@@ -73,6 +73,30 @@ export function registerPromptTracker(
   };
 }
 
+/**
+ * App-private OSC 7704 — remote (SSH) cwd. Payload: `<nonce>;<percent-encoded
+ * abs path>`. Unlike OSC 7 this is NOT gated by the in-command guard: an
+ * interactive ssh session is one long-running local command, so its remote
+ * shell hook always fires "in command". The per-leaf nonce (verified by the
+ * caller) replaces the in-command guard as the trust check — only output from
+ * the hook we injected, carrying the matching nonce, is honored. See
+ * remote-cwd.ts.
+ */
+export function registerRemoteCwdHandler(
+  term: Terminal,
+  onPayload: (nonce: string, encodedPath: string) => void,
+): () => void {
+  const d = term.parser.registerOscHandler(7704, (data) => {
+    const sep = data.indexOf(";");
+    if (sep === -1) return true;
+    const nonce = data.slice(0, sep);
+    const encodedPath = data.slice(sep + 1);
+    if (nonce && encodedPath) onPayload(nonce, encodedPath);
+    return true;
+  });
+  return () => d.dispose();
+}
+
 function parseOsc7(data: string): string | null {
   const m = data.match(/^file:\/\/[^/]*(\/.*)$/);
   if (!m) return null;

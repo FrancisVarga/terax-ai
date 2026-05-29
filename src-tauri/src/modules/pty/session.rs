@@ -19,6 +19,12 @@ const AGENT_EVENT: &str = "terax:agent-signal";
 // not single bytes. MAX_IDLE is only a safety net for missed signals.
 const FLUSH_COALESCE: Duration = Duration::from_millis(4);
 const FLUSH_MAX_IDLE: Duration = Duration::from_millis(50);
+// Latency-first adaptive flush: a pending buffer at/under this size is treated
+// as interactive echo (a keystroke the shell bounced back) and flushed
+// immediately with no coalesce sleep, so keypress→glyph isn't padded by 4ms.
+// Above it, output is a burst (program writing many lines) and we coalesce for
+// throughput. 512 B comfortably covers an echoed line + its prompt redraw.
+const FLUSH_ECHO_THRESHOLD: usize = 512;
 const READ_BUF: usize = 16 * 1024;
 // Cap on buffered-but-not-yet-flushed bytes. On overflow we discard the
 // entire pending buffer and emit an SGR-reset + notice in its place.
@@ -223,6 +229,7 @@ pub fn spawn(
         .spawn(move || {
             let (lock, cv) = &*pending_f;
             loop {
+                let pending_len;
                 {
                     let mut g = lock.lock().unwrap();
                     while g.is_empty() {
@@ -232,9 +239,14 @@ pub fn spawn(
                         let (next, _) = cv.wait_timeout(g, FLUSH_MAX_IDLE).unwrap();
                         g = next;
                     }
+                    pending_len = g.len();
                 }
-                // Coalesce a short window so a burst flushes as one chunk.
-                thread::sleep(FLUSH_COALESCE);
+                // Interactive echo (small payload) flushes immediately to keep
+                // keypress→glyph latency minimal. Only a burst — already a big
+                // pending buffer — pays the coalesce window for throughput.
+                if pending_len > FLUSH_ECHO_THRESHOLD {
+                    thread::sleep(FLUSH_COALESCE);
+                }
                 let chunk = std::mem::take(&mut *lock.lock().unwrap());
                 if chunk.is_empty() {
                     continue;

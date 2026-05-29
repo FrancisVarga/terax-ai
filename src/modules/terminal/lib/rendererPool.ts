@@ -8,6 +8,7 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
+import { probeGpuStatus } from "./gpuStatus";
 import {
   terminalDeleteSequence,
   terminalLineNavigationSequence,
@@ -54,7 +55,14 @@ export type Slot = {
   lastRows: number;
   lastW: number;
   lastH: number;
+  // Most recent box from the ResizeObserver callback, captured without a
+  // layout flush; read by the debounced fit instead of re-querying the DOM.
+  pendingW: number;
+  pendingH: number;
   lastUsedAt: number;
+  // Set when WebGL was disposed because the slot went dormant; tells the next
+  // unhide to reattach the renderer before repainting.
+  webglDormant: boolean;
 };
 
 const slots: Slot[] = [];
@@ -154,7 +162,10 @@ function createSlot(): Slot {
     lastRows: term.rows,
     lastW: 0,
     lastH: 0,
+    pendingW: 0,
+    pendingH: 0,
     lastUsedAt: 0,
+    webglDormant: false,
   };
 
   attachWebgl(slot);
@@ -165,9 +176,11 @@ function createSlot(): Slot {
     // Raw keydown events — including the Enter that commits a candidate —
     // must NOT be forwarded to the PTY; xterm will receive the final
     // composed string through its own compositionend handler instead.
-    // keyCode 229 ("Process") is what Chromium reports for every key
-    // pressed inside an active IME session when isComposing is not yet set.
-    if (event.isComposing || event.keyCode === 229) return false;
+    // key === "Process" is what every current engine (WebView2/Chromium,
+    // WKWebView, WebKitGTK) reports for any key pressed inside an active IME
+    // session when isComposing is not yet set. Replaces the deprecated
+    // keyCode === 229 check — all webviews Terax targets surface "Process".
+    if (event.isComposing || event.key === "Process") return false;
 
     const leafId = slot.currentLeafId;
     if (leafId === null) return false;
@@ -228,6 +241,7 @@ function createSlot(): Slot {
   });
 
   slots.push(slot);
+  ensureDormantSweep();
   return slot;
 }
 
@@ -303,9 +317,50 @@ export function acquireSlot(params: AcquireParams): Slot {
   return pick.slot;
 }
 
+// Above this, a one-shot term.write of the whole serialized snapshot parses
+// every line in a single internal flush before xterm yields, hitching the
+// frame on pane switch. Replaying in line-bounded chunks lets xterm's write
+// scheduler interleave parsing across tasks. Line boundaries guarantee we
+// never slice a CSI/SGR escape run mid-sequence.
+const SNAPSHOT_CHUNK_BYTES = 64 * 1024;
+
+function writeSnapshotChunked(slot: Slot, snapshot: string): void {
+  if (snapshot.length <= SNAPSHOT_CHUNK_BYTES) {
+    try {
+      slot.term.write(snapshot);
+    } catch (e) {
+      console.warn("[terax] snapshot replay failed:", e);
+    }
+    return;
+  }
+  // Split on newline boundaries, accumulating up to ~chunk size per write.
+  let start = 0;
+  while (start < snapshot.length) {
+    let end = start + SNAPSHOT_CHUNK_BYTES;
+    if (end < snapshot.length) {
+      const nl = snapshot.indexOf("\n", end);
+      end = nl === -1 ? snapshot.length : nl + 1;
+    } else {
+      end = snapshot.length;
+    }
+    try {
+      slot.term.write(snapshot.slice(start, end));
+    } catch (e) {
+      console.warn("[terax] snapshot replay failed:", e);
+      return;
+    }
+    start = end;
+  }
+}
+
 function bindSlot(slot: Slot, p: AcquireParams): void {
+  // Stale when WebGL is missing (incl. dormancy-disposed), or the slot has been
+  // idle long enough that its last paint can't be trusted — either way the
+  // unhide path reattaches WebGL and forces a full repaint.
   const stale =
-    !slot.webglAddon || performance.now() - slot.lastUsedAt > SLOT_STALE_MS;
+    !slot.webglAddon ||
+    slot.webglDormant ||
+    performance.now() - slot.lastUsedAt > SLOT_STALE_MS;
   slot.currentLeafId = p.leafId;
   slot.lastUsedAt = performance.now();
 
@@ -329,11 +384,7 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   }
 
   if (p.snapshot) {
-    try {
-      slot.term.write(p.snapshot);
-    } catch (e) {
-      console.warn("[terax] snapshot replay failed:", e);
-    }
+    writeSnapshotChunked(slot, p.snapshot);
   }
   if (p.altScreen) {
     // Discard the dormant ring. TUI output is incremental cursor-positioned
@@ -443,13 +494,25 @@ function setupResizeObserver(slot: Slot, p: AcquireParams): void {
     adapter?.resolveLeaf(p.leafId)?.resizePty(slot.lastCols, slot.lastRows);
   };
 
-  slot.observer = new ResizeObserver(() => {
+  slot.observer = new ResizeObserver((entries) => {
+    // Read the box the browser already computed for this callback instead of
+    // touching container.clientWidth/Height, which forces a synchronous layout
+    // flush. During a window drag-resize the observer fires continuously, so
+    // avoiding the reflow per tick keeps resizing smooth.
+    const box = entries[0]?.contentBoxSize?.[0];
+    if (box) {
+      slot.pendingW = Math.round(box.inlineSize);
+      slot.pendingH = Math.round(box.blockSize);
+    } else {
+      slot.pendingW = container.clientWidth;
+      slot.pendingH = container.clientHeight;
+    }
     if (slot.fitTimer) clearTimeout(slot.fitTimer);
     slot.fitTimer = setTimeout(() => {
       slot.fitTimer = null;
       if (slot.currentLeafId !== p.leafId) return;
-      const w = container.clientWidth;
-      const h = container.clientHeight;
+      const w = slot.pendingW;
+      const h = slot.pendingH;
       if (w === slot.lastW && h === slot.lastH) return;
       slot.lastW = w;
       slot.lastH = h;
@@ -526,9 +589,29 @@ const WEBGL_RECOVERY_DELAY_MS = 250;
 // unhide to defeat silent GPU/context staleness.
 const SLOT_STALE_MS = 10_000;
 
+// The GPU backend is fixed for the lifetime of the webview process, so probe
+// once and cache. On a software backend (SwiftShader / llvmpipe / WARP) xterm's
+// WebGL renderer is actually SLOWER than the DOM renderer — every glyph-atlas
+// upload runs on the CPU with GL overhead piled on top — so we skip WebGL there
+// and let xterm fall back to DOM. "unavailable" (no WebGL at all) also skips.
+let cachedWebglWorthwhile: boolean | null = null;
+function webglWorthwhile(): boolean {
+  if (cachedWebglWorthwhile === null) {
+    const status = probeGpuStatus();
+    cachedWebglWorthwhile = status.acceleration === "hardware";
+    if (!cachedWebglWorthwhile) {
+      console.info(
+        `[terax-webgl] GPU backend "${status.renderer ?? "unknown"}" (${status.acceleration}) — using DOM renderer for better performance`,
+      );
+    }
+  }
+  return cachedWebglWorthwhile;
+}
+
 function attachWebgl(slot: Slot): void {
   if (slot.webglAddon || !slot.term.element) return;
   if (!usePreferencesStore.getState().terminalWebglEnabled) return;
+  if (!webglWorthwhile()) return;
   const elem = slot.term.element;
   const before = new Set<HTMLCanvasElement>(
     elem.querySelectorAll<HTMLCanvasElement>("canvas"),
@@ -564,9 +647,36 @@ function attachWebgl(slot: Slot): void {
     for (const c of after) if (!before.has(c)) added.push(c);
     slot.webglAddon = webgl;
     slot.webglCanvases = added;
+    slot.webglDormant = false;
   } catch (e) {
     console.warn("[terax-webgl] unavailable:", e);
   }
+}
+
+// Idle GPU reclaim. Each live WebglAddon holds a glyph-atlas texture + a WebGL2
+// context; with POOL_MAX_SIZE slots that's up to 5 contexts pinned even when
+// only one pane is visible. On weak GPUs this raises context-loss risk (and a
+// loss forces a full repaint hitch). Sweep periodically and dispose WebGL on
+// slots that are unbound and stale, marking them so the next bind reattaches
+// before unhide. Disabled while the pool is small enough to be cheap.
+const DORMANT_SWEEP_MS = SLOT_STALE_MS;
+let dormantSweepTimer: ReturnType<typeof setInterval> | null = null;
+
+function sweepDormantWebgl(): void {
+  if (!usePreferencesStore.getState().terminalWebglEnabled) return;
+  const now = performance.now();
+  for (const slot of slots) {
+    if (slot.currentLeafId !== null) continue; // bound/visible — keep hot
+    if (!slot.webglAddon) continue;
+    if (now - slot.lastUsedAt < SLOT_STALE_MS) continue;
+    disposeSlotWebgl(slot);
+    slot.webglDormant = true;
+  }
+}
+
+function ensureDormantSweep(): void {
+  if (dormantSweepTimer !== null) return;
+  dormantSweepTimer = setInterval(sweepDormantWebgl, DORMANT_SWEEP_MS);
 }
 
 function disposeSlotWebgl(slot: Slot): void {
@@ -682,6 +792,23 @@ export function applyTheme(): void {
 export function focusSlot(leafId: number): void {
   const slot = slots.find((s) => s.currentLeafId === leafId);
   slot?.term.focus();
+}
+
+// Re-measure + refit a bound slot. Called after web fonts settle so the cell
+// grid that was painted eagerly (possibly with fallback metrics on the very
+// first tab) snaps to the real font's cell size. No-op if the dims are already
+// correct, so it's cheap on every tab after the first.
+export function refitLeaf(leafId: number): void {
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  if (!slot) return;
+  try {
+    slot.fitAddon.fit();
+  } catch {}
+  if (slot.term.cols !== slot.lastCols || slot.term.rows !== slot.lastRows) {
+    slot.lastCols = slot.term.cols;
+    slot.lastRows = slot.term.rows;
+    adapter?.resolveLeaf(leafId)?.resizePty(slot.term.cols, slot.term.rows);
+  }
 }
 
 export function setSlotFocused(leafId: number, focused: boolean): void {

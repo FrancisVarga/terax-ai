@@ -33,6 +33,22 @@ impl Default for PtyState {
     }
 }
 
+/// Raise the Windows multimedia timer resolution to 1ms for the process
+/// lifetime. Without this the default ~15.6ms timer granularity rounds the
+/// flusher's `thread::sleep(FLUSH_COALESCE)` (4ms) up to a full tick, adding
+/// up to ~15ms of latency to coalesced output. Process-global; never paired
+/// with `timeEndPeriod` because we want it for the whole run.
+pub fn raise_timer_resolution() {
+    #[cfg(windows)]
+    {
+        // SAFETY: timeBeginPeriod takes a millisecond value and has no
+        // memory-safety contract; 1 is the minimum supported period.
+        unsafe {
+            windows_sys::Win32::Media::timeBeginPeriod(1);
+        }
+    }
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn pty_open(

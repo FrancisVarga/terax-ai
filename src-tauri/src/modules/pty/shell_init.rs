@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+#[cfg(windows)]
+use std::sync::OnceLock;
 
 use portable_pty::CommandBuilder;
 
@@ -725,7 +727,18 @@ mod windows {
 }
 
 #[cfg(windows)]
+static WINDOWS_SHELL_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+// Resolving the shell binary walks $PATH doing per-dir is_file() syscalls plus
+// ProgramFiles/System32 probes. The result can't change mid-session, so cache
+// it on first spawn — every later new tab then skips the filesystem scan.
+#[cfg(windows)]
 pub fn windows_shell_path() -> PathBuf {
+    WINDOWS_SHELL_PATH.get_or_init(resolve_windows_shell_path).clone()
+}
+
+#[cfg(windows)]
+fn resolve_windows_shell_path() -> PathBuf {
     if let Some(p) = which_in_path("pwsh.exe") {
         return p;
     }

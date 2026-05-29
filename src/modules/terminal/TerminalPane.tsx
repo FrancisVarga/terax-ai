@@ -50,11 +50,19 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onCwd: (c) => onCwd?.(leafId, c),
     });
 
+    // Hold the session in a ref so the theme effect below depends only on the
+    // actual theme inputs. session is a fresh useMemo object whenever any of
+    // its callback deps change; including it here would refire applyTheme() —
+    // a full theme rebuild across every pooled slot, forcing a WebGL glyph
+    // atlas rebuild — on unrelated re-renders.
+    const sessionRef = useRef(session);
+    sessionRef.current = session;
+
     useEffect(() => {
       // Defer one frame so CSS-variable token resolution sees the new class.
-      const id = requestAnimationFrame(() => session.applyTheme());
+      const id = requestAnimationFrame(() => sessionRef.current.applyTheme());
       return () => cancelAnimationFrame(id);
-    }, [resolvedMode, themeId, customThemes, session]);
+    }, [resolvedMode, themeId, customThemes]);
 
     useImperativeHandle(
       ref,

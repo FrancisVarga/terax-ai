@@ -7,7 +7,10 @@ import {
   createShellIntegrationState,
   registerCwdHandler,
   registerPromptTracker,
+  registerRemoteCwdHandler,
 } from "./osc-handlers";
+import { decodeRemoteCwd, getRemoteCwdBinding } from "./remote-cwd";
+import { remoteUri } from "@/modules/explorer/lib/remote";
 import { openPty, type PtySession } from "./pty-bridge";
 import {
   acquireSlot,
@@ -21,6 +24,7 @@ import {
   configureRendererPool,
   focusSlot,
   getSlotForLeaf,
+  refitLeaf,
   releaseSlot,
   setSlotFocused,
 } from "./rendererPool";
@@ -185,6 +189,14 @@ function ensureSession(leafId: number, initialCwd?: string): Session {
   };
   sessions.set(leafId, session);
 
+  // Open the PTY immediately — shell spawn + init has no dependency on browser
+  // fonts, so gating it behind font loading just pads every new tab's boot by
+  // the font-settle time. Early output before the slot binds lands in the
+  // dormant ring (see deliverPtyBytes) and replays on bind, so nothing is lost.
+  openPtyEagerly(leafId, session);
+
+  // The slot bind is what actually needs fonts (correct cell metrics for fit),
+  // so only the *visual* attach waits on them.
   session.ready = (async () => {
     await ensureMonoFontsLoaded();
     await document.fonts.ready;
@@ -193,12 +205,83 @@ function ensureSession(leafId: number, initialCwd?: string): Session {
   return session;
 }
 
+// Spawn the backend PTY without waiting for the font gate. Idempotent with
+// attachSession's own open guard (both check pty/ptyOpening/shellExited).
+function openPtyEagerly(leafId: number, s: Session): void {
+  if (s.pty || s.ptyOpening || s.shellExited) return;
+  s.ptyOpening = true;
+  openPtyForSession(leafId, s, s.initialCwd)
+    .then((pty) => {
+      s.ptyOpening = false;
+      if (s.disposed) {
+        pty.close();
+        return;
+      }
+      s.pty = pty;
+      if (s.cols > 0 && s.rows > 0) pty.resize(s.cols, s.rows);
+    })
+    .catch((e) => {
+      s.ptyOpening = false;
+      console.error("[terax] eager openPty failed:", e);
+    });
+}
+
+// Per-leaf coalescing of inbound PTY chunks. The backend already batches, but
+// a single burst can still arrive as several IPC messages within one frame;
+// merging them into one term.write per microtask collapses N synchronous VT
+// parser runs (and N renderer refreshes) into one, cutting main-thread jank on
+// heavy output (vim repaint, cat of a large file) while adding no latency to
+// the interactive case (a lone echo flushes on the very next microtask).
+const writeQueues = new Map<number, Uint8Array[]>();
+const writeScheduled = new Set<number>();
+
+function flushWriteQueue(leafId: number): void {
+  writeScheduled.delete(leafId);
+  const queue = writeQueues.get(leafId);
+  if (!queue || queue.length === 0) return;
+  writeQueues.set(leafId, []);
+
+  const slot = getSlotForLeaf(leafId);
+  if (!slot) {
+    // Slot was released between enqueue and flush — preserve the bytes in the
+    // dormant ring so they replay on the next bind instead of being dropped.
+    const s = sessions.get(leafId);
+    if (s) for (const b of queue) s.dormantRing.push(b);
+    return;
+  }
+
+  if (queue.length === 1) {
+    slot.term.write(queue[0]);
+    return;
+  }
+  let total = 0;
+  for (const b of queue) total += b.length;
+  const merged = new Uint8Array(total);
+  let off = 0;
+  for (const b of queue) {
+    merged.set(b, off);
+    off += b.length;
+  }
+  slot.term.write(merged);
+}
+
 function deliverPtyBytes(leafId: number, bytes: Uint8Array): void {
   const s = sessions.get(leafId);
   if (!s) return;
-  const slot = getSlotForLeaf(leafId);
-  if (slot) slot.term.write(bytes);
-  else s.dormantRing.push(bytes);
+  if (!getSlotForLeaf(leafId)) {
+    s.dormantRing.push(bytes);
+    return;
+  }
+  let queue = writeQueues.get(leafId);
+  if (!queue) {
+    queue = [];
+    writeQueues.set(leafId, queue);
+  }
+  queue.push(bytes);
+  if (!writeScheduled.has(leafId)) {
+    writeScheduled.add(leafId);
+    queueMicrotask(() => flushWriteQueue(leafId));
+  }
 }
 
 async function openPtyForSession(
@@ -257,7 +340,17 @@ function bindLeafToSlot(leafId: number, s: Session): void {
         },
         shellState,
       );
-      return [prompt.dispose, cwd];
+      // App-private OSC 7704: remote (SSH) cwd. Honored only when this leaf has
+      // an active remote binding (set by connectSsh) AND the payload nonce
+      // matches that binding's token — see remote-cwd.ts.
+      const remoteCwd = registerRemoteCwdHandler(term, (nonce, encodedPath) => {
+        const binding = getRemoteCwdBinding(leafId);
+        if (!binding || binding.nonce !== nonce) return;
+        const path = decodeRemoteCwd(encodedPath);
+        if (!path) return;
+        binding.onRemoteCwd(remoteUri(binding.alias, path));
+      });
+      return [prompt.dispose, cwd, remoteCwd];
     },
     onSearchReady: (addon) => s.callbacks.onSearchReady?.(addon),
   });
@@ -273,6 +366,11 @@ function bindLeafToSlot(leafId: number, s: Session): void {
 
 function unbindLeafFromSlot(leafId: number, s: Session): void {
   if (!s.hasSlot) return;
+  // Drain any microtask-queued writes into the slot before releasing it, so
+  // the serialized snapshot taken below includes them. Otherwise a pending
+  // flush would fire after release, see no slot, and shove already-rendered
+  // bytes back onto the dormant ring — duplicating them on the next bind.
+  if (writeScheduled.has(leafId)) flushWriteQueue(leafId);
   const out = releaseSlot(leafId);
   if (out) {
     s.snapshot = out.snapshot;
@@ -293,7 +391,9 @@ function attachSession(
   s.callbacks = callbacks;
   s.container = container;
 
-  if (s.visibleNow) bindLeafToSlot(leafId, s);
+  // Idempotent: a second call (eager paint, then post-font refit) must not
+  // re-acquire an already-bound slot.
+  if (s.visibleNow && !s.hasSlot) bindLeafToSlot(leafId, s);
 
   if (!s.pty && !s.ptyOpening && !s.shellExited) {
     s.ptyOpening = true;
@@ -369,6 +469,8 @@ export function disposeSession(leafId: number): void {
   s.snapshot = null;
   s.pty?.close();
   s.pty = null;
+  writeQueues.delete(leafId);
+  writeScheduled.delete(leafId);
   sessions.delete(leafId);
   readyLeaves.delete(leafId);
   const waiters = readyWaiters.get(leafId);
@@ -408,15 +510,35 @@ export function useTerminalSession({
   useEffect(() => {
     let cancelled = false;
     const s = ensureSession(leafId, initialCwd);
+    const node = container.current;
+    const cbs = {
+      onSearchReady: (a: SearchAddon) => cbRef.current.onSearchReady?.(a),
+      onExit: (c: number) => cbRef.current.onExit?.(c),
+      onCwd: (c: string) => cbRef.current.onCwd?.(c),
+    };
+
+    // Attach + bind the slot synchronously so the pane's cell grid + cursor
+    // paint immediately on tab open / split — like iTerm2, the terminal shows
+    // before the shell finishes booting. The slot is fit() again once fonts
+    // settle (below) to correct cell metrics; the eager paint uses whatever
+    // metrics are live now, which for any tab after the first is already the
+    // real font (fonts are process-global and cached).
+    if (node) {
+      attachSession(leafId, node, cbs);
+      if (s.visibleNow && s.focusedNow) focusSlot(leafId);
+    }
+
+    // After fonts settle, re-fit so cell measurements are exact. On the first
+    // ever tab this is when the real font first becomes available; on every
+    // later tab ready resolves in a microtask and this is a cheap no-op refit.
     s.ready.then(() => {
       if (cancelled || s.disposed) return;
-      const node = container.current;
-      if (!node) return;
-      attachSession(leafId, node, {
-        onSearchReady: (a) => cbRef.current.onSearchReady?.(a),
-        onExit: (c) => cbRef.current.onExit?.(c),
-        onCwd: (c) => cbRef.current.onCwd?.(c),
-      });
+      const n = container.current;
+      if (!n) return;
+      // attachSession is idempotent (guards on container/pty/hasSlot); this
+      // covers the race where container.current was null on first run.
+      attachSession(leafId, n, cbs);
+      refitLeaf(leafId);
       if (s.visibleNow && s.focusedNow) focusSlot(leafId);
     });
     return () => {
