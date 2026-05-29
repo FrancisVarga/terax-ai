@@ -43,9 +43,21 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 bytes = "1"
 futures-util = "0.3"
-tokio = { version = "1", default-features = false, features = ["rt"] }
+tokio = { version = "1", default-features = false, features = [
+	"rt",
+	"rt-multi-thread",
+	"net",
+	"io-util",
+	"time",
+	"macros",
+	"process",
+] }
 tempfile = "3"
 notify = "8.2.0"
+russh = "0.45"
+russh-sftp = "2"
+russh-keys = "0.45"
+async-trait = "0.1"
 
 [dev-dependencies]
 proptest = "1"
@@ -67,6 +79,7 @@ windows-sys = { version = "0.59", features = [
 	"Win32_Security",
 	"Win32_System_JobObjects",
 	"Win32_System_Threading",
+	"Win32_Media",
 ] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

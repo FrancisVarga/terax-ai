@@ -1,8 +1,9 @@
 pub mod modules;
 
-use modules::{agent, fs, git, net, pty, secrets, shell, workspace};
+use modules::{agent, bunqueue, docker, fs, git, gpu, net, pty, secrets, shell, ssh, workspace};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
-use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_window_state::StateFlags;
 
 /// Drained on first read so HMR / re-mounts can't replay the launch dir.
@@ -46,8 +47,14 @@ async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Res
         return Ok(());
     }
 
+    // Match the dev title suffix applied to the main window in setup().
+    let settings_title = if cfg!(debug_assertions) {
+        "Settings Dev"
+    } else {
+        "Settings"
+    };
     let mut builder = WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App(url_path.into()))
-        .title("Settings")
+        .title(settings_title)
         .inner_size(900.0, 700.0)
         .min_inner_size(820.0, 620.0)
         .resizable(true)
@@ -83,8 +90,92 @@ async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Res
     Ok(())
 }
 
+/// Monotonic counter for unique secondary-window labels. The first app window
+/// is "main"; spawned windows are "main-2", "main-3", … Tauri rejects duplicate
+/// labels, so a process-wide counter guarantees uniqueness across the session.
+static WINDOW_SEQ: AtomicU32 = AtomicU32::new(2);
+
+/// Percent-encode a string for safe inclusion in a URL query component.
+/// Keeps the RFC 3986 unreserved set (`A-Z a-z 0-9 - _ . ~`) verbatim and
+/// `%XX`-escapes everything else — enough to carry an arbitrary filesystem path
+/// through `?dir=` without pulling in a urlencoding crate.
+fn encode_query_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+#[tauri::command]
+async fn open_main_window(app: tauri::AppHandle, dir: Option<String>) -> Result<(), String> {
+    let n = WINDOW_SEQ.fetch_add(1, Ordering::Relaxed);
+    let label = format!("main-{n}");
+
+    // Match the dev title suffix applied to the main window in setup().
+    let title = if cfg!(debug_assertions) {
+        "Terax Dev"
+    } else {
+        "Terax"
+    };
+
+    // A target directory is carried to the new window as a `?dir=` query param;
+    // the frontend reads it (preferring it over the process-global launch dir)
+    // so the window's default tab opens there. Authorize it for fs access too.
+    let url_path = match dir.as_deref().filter(|d| !d.is_empty()) {
+        Some(d) => {
+            let _ = app.state::<workspace::WorkspaceRegistry>().authorize(d);
+            format!("/?dir={}", encode_query_component(d))
+        }
+        None => "/".to_string(),
+    };
+
+    // Mirror the main window defined in tauri.conf.json. WebviewWindowBuilder
+    // does not inherit the config window defaults, so size/chrome are restated.
+    let builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url_path.into()))
+        .title(title)
+        .inner_size(800.0, 600.0)
+        .min_inner_size(420.0, 280.0)
+        .resizable(true)
+        // New windows open maximized; the primary window keeps its restored
+        // size from the window-state plugin (it isn't built here).
+        .maximized(true)
+        .visible(false);
+
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true);
+
+    // On Linux/Windows we render our own titlebar, so drop native chrome
+    // and make the window transparent.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let builder = builder.decorations(false).transparent(true);
+
+    let window = builder.build().map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = window.set_decorations(false);
+    }
+    let _ = window;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Force the webview onto the GPU compositing path before the runtime boots.
+    // Chromium/WebKitGTK read these knobs once at startup, so this must precede
+    // tauri::Builder. Without it WebView2 silently falls back to software
+    // compositing on integrated GPUs / RDP / blocklisted drivers, which makes
+    // the WebGL-rendered terminal janky despite WebGL "working". See gpu.rs.
+    gpu::configure();
+
     let cli_dir = parse_launch_dir();
     workspace::init_launch_cwd(cli_dir.as_deref());
 
@@ -122,6 +213,46 @@ pub fn run() {
             registry
         })
         .manage(LaunchDir(Mutex::new(cli_dir)))
+        .manage(bunqueue::BunqueueState::default())
+        .manage(ssh::SshFsState::default())
+        .setup(|app| {
+            // In dev builds, suffix window titles with " Dev" so a running dev
+            // instance is visually distinct from an installed release.
+            #[cfg(debug_assertions)]
+            {
+                for window in app.webview_windows().values() {
+                    let current = window.title().unwrap_or_default();
+                    let dev_title = if current.is_empty() {
+                        "Terax Dev".to_string()
+                    } else {
+                        format!("{current} Dev")
+                    };
+                    let _ = window.set_title(&dev_title);
+                }
+            }
+
+            // Raise the OS timer resolution so the PTY flusher's sub-tick
+            // coalesce sleep is honored instead of rounding to ~15ms (Windows).
+            pty::raise_timer_resolution();
+
+            // Resolve a persistent SQLite path under the app data dir so the
+            // queue survives restarts (bunqueue defaults to in-memory).
+            let data_path = app
+                .path()
+                .app_data_dir()
+                .ok()
+                .map(|dir| dir.join("bunqueue").join("queue.db"));
+
+            // Start the bunqueue job-queue server on boot (HTTP API + no auth,
+            // persistent SQLite). Non-fatal if Bun is unavailable.
+            let state = app.state::<bunqueue::BunqueueState>();
+            bunqueue::set_data_path(&state, data_path);
+            bunqueue::start_on_boot(&state);
+            // Supervise: a background watchdog restarts the server/workers if
+            // they die.
+            bunqueue::start_watchdog(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             pty::pty_open,
             pty::pty_write,
@@ -169,6 +300,15 @@ pub fn run() {
             shell::shell_bg_logs,
             shell::shell_bg_kill,
             shell::shell_bg_list,
+            ssh::ssh_list_hosts,
+            ssh::ssh_fs_connect,
+            ssh::ssh_fs_read_dir,
+            ssh::ssh_fs_read_file,
+            ssh::ssh_fs_disconnect,
+            docker::docker_list_containers,
+            docker::docker_inspect_container,
+            docker::docker_logs,
+            docker::docker_stats,
             workspace::wsl_list_distros,
             workspace::wsl_default_distro,
             workspace::wsl_home,
@@ -176,6 +316,7 @@ pub fn run() {
             workspace::workspace_current_dir,
             get_launch_dir,
             open_settings_window,
+            open_main_window,
             agent::agent_enable_claude_hooks,
             agent::agent_claude_hooks_status,
             secrets::secrets_get,
@@ -185,7 +326,20 @@ pub fn run() {
             net::lm_ping,
             net::ai_http_request,
             net::ai_http_stream,
+            bunqueue::bunqueue_status,
+            bunqueue::bunqueue_logs,
+            bunqueue::bunqueue_restart,
+            bunqueue::bunqueue_ensure,
+            bunqueue::bunqueue_workers,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Kill the bunqueue child on shutdown so it doesn't outlive the app.
+            // ServerProc::Drop also covers this, but ExitRequested fires before
+            // state teardown — kill eagerly to avoid an orphaned port hold.
+            if let RunEvent::ExitRequested { .. } = event {
+                bunqueue::shutdown(&app.state::<bunqueue::BunqueueState>());
+            }
+        });
 }
