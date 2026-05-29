@@ -1,6 +1,6 @@
 [package]
 name = "terax"
-version = "0.12.0"
+version = "0.13.0"
 description = "Terax — an open-source AI-native terminal emulator"
 authors = ["crynta"]
 license = "Apache-2.0"
@@ -75,11 +75,22 @@ aws-smithy-types = "1"
 # Arrow with default features so `arrow::util::display::array_value_to_string`
 # (used to stringify cells) is always available.
 arrow = "53"
+# DuckDB (bundled = compiles libduckdb from source, no system lib) powers the
+# SQL query editor for CSV/Parquet files via the core `read_csv_auto` /
+# `read_parquet` table functions — no network-loaded extension needed. SQLite
+# query files go through `rusqlite` instead (genuine SQLite SQL, already bundled),
+# so we never depend on DuckDB's network-installed `sqlite_scanner`. Accessed via
+# the row API only (not its Arrow bridge) to avoid pulling a second `arrow` major.
+duckdb = { version = "1", features = ["bundled"] }
+# Excel (.xlsx) export of query results. Pure-Rust writer, no native dep.
+rust_xlsxwriter = "0.79"
 tauri-plugin-log = "2"
 tauri-plugin-os = "2"
 tauri-plugin-store = "2"
 tauri-plugin-process = "2"
 tauri-plugin-notification = "2"
+# Native Save dialog for exporting query results to a user-chosen path.
+tauri-plugin-dialog = "2"
 reqwest = { version = "0.12", default-features = false, features = [
 	"rustls-tls",
 	"stream",
@@ -155,9 +166,13 @@ tauri-plugin-window-state = "2"
 [profile.dev]
 incremental = true
 
+# Release tuned for CI wall-clock, not minimum binary size. codegen-units=16
+# lets LLVM parallelize across the runner's cores; lto="thin" keeps most of
+# fat-LTO's runtime win while parallelizing + caching the link step (the slow
+# tail after "Compiling" finishes). opt-level="s" still favors a small binary.
 [profile.release]
-codegen-units = 1
-lto = "fat"
+codegen-units = 16
+lto = "thin"
 opt-level = "s"
 panic = "abort"
 strip = true

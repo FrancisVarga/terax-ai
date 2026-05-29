@@ -4,6 +4,13 @@ on:
   push:
     tags:
       - "v*"
+    # Build (but do not release) on main so swatinem/rust-cache populates a cache
+    # on the DEFAULT branch. GitHub Actions cache scope is per-ref: sibling v*
+    # tags can't read each other's cache, but every ref (including each tag) CAN
+    # read the default-branch cache. Without this, each release recompiles the
+    # whole dep tree cold (~27m). The release step is gated on the tag ref below.
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
@@ -47,7 +54,9 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: ./src-tauri -> target
-          key: ${{ matrix.platform }}-${{ matrix.rust-target }}
+          # Empty rust-target collapses to a trailing dash; drop it so the key is
+          # just the platform. swatinem still appends Cargo.lock + toolchain hashes.
+          key: ${{ matrix.platform }}${{ matrix.rust-target != '' && format('-{0}', matrix.rust-target) || '' }}
           # tauri-action links the final crate late (lto=fat). If that step fails,
           # still persist the cached dep compile so the retry skips rebuilding the
           # whole AWS/arrow/parquet/russh tree.
@@ -65,7 +74,19 @@ jobs:
       - name: Build bunqueue sidecars
         run: pnpm build:sidecars ${{ matrix.rust-target != '' && format('--target={0}', matrix.rust-target) || '' }}
 
+      # main-branch runs stop here: the cache is already populated above by the
+      # cargo compile that tauri-action would do, so on main we run a plain
+      # release build purely to warm the cache (no release artifacts/publish).
+      - name: Warm cache (main only, no release)
+        if: github.ref == 'refs/heads/main'
+        run: pnpm tauri build --no-bundle
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+
+      # Tag runs create + publish the release. Reuses the warm cache from main.
       - uses: tauri-apps/tauri-action@v0
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           # Fork repos get a read-only GITHUB_TOKEN that cannot create releases
           # ("Resource not accessible by integration"). Use a PAT with repo scope
