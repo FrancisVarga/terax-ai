@@ -31,6 +31,8 @@ export type EntryRowProps = {
   tree: Tree;
   isSelected: boolean;
   isRenaming: boolean;
+  /** Git-ignored: the row is dimmed to de-emphasize untracked/ignored paths. */
+  ignored: boolean;
   onOpenFile: (path: string, pin?: boolean) => void;
   onSelectPath: (path: string) => void;
   onRevealInTerminal?: (path: string) => void;
@@ -59,6 +61,7 @@ function EntryRowImpl(props: EntryRowProps) {
     tree,
     isSelected,
     isRenaming,
+    ignored,
     onOpenFile,
     onSelectPath,
     onRevealInTerminal,
@@ -70,7 +73,10 @@ function EntryRowImpl(props: EntryRowProps) {
 
   const [isConfirming, setIsConfirming] = useState(false);
   const iconUrl = isDir ? folderIconUrl(name, isExpanded) : fileIconUrl(name);
-  const iconSize = isDir ? "size-5" : "size-4";
+  // Files and folders share one 20px glyph column: file icons at 16px read too
+  // small next to the folder art, and a uniform size keeps icon edges aligned
+  // down the tree.
+  const iconSize = "size-5";
   const createTarget = isDir ? path : path.slice(0, path.lastIndexOf("/")) || rootPath;
   const paddingLeft = 6 + depth * 12;
 
@@ -89,9 +95,11 @@ function EntryRowImpl(props: EntryRowProps) {
             className="flex h-8 w-full min-w-0 items-center gap-2 px-1.5 text-[13px]"
             style={{ paddingLeft }}
           >
-            <span className="size-5 shrink-0" />
+            <span className="size-4 shrink-0" />
             {iconUrl ? (
-              <img src={iconUrl} alt="" className={cn(iconSize, "shrink-0")} />
+              <span className={cn(iconSize, "flex shrink-0 items-center justify-center")}>
+                <img src={iconUrl} alt="" className="size-full object-contain" />
+              </span>
             ) : (
               <span className="size-5 shrink-0" />
             )}
@@ -110,6 +118,8 @@ function EntryRowImpl(props: EntryRowProps) {
             className={cn(
               "group flex h-8 w-full min-w-0 cursor-pointer items-center gap-2 rounded-sm px-1.5 text-left text-[13px] text-foreground/85 transition-colors hover:bg-accent/70",
               isSelected && "bg-accent text-foreground",
+              // Dim git-ignored entries (text + icon). Hover restores legibility.
+              ignored && "opacity-45 hover:opacity-100",
             )}
             style={{ paddingLeft }}
           >
@@ -126,15 +136,11 @@ function EntryRowImpl(props: EntryRowProps) {
                 />
               ) : null}
             </span>
-            {iconUrl ? (
-              <img
-                src={iconUrl}
-                alt=""
-                className={cn(iconSize, "shrink-0")}
-              />
-            ) : (
-              <span className="size-5 shrink-0" />
-            )}
+            <span className={cn(iconSize, "flex shrink-0 items-center justify-center")}>
+              {iconUrl ? (
+                <img src={iconUrl} alt="" className="size-full object-contain" />
+              ) : null}
+            </span>
             <span className="min-w-0 flex-1 truncate">{name}</span>
           </button>
         )}
