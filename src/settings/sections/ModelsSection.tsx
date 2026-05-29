@@ -21,7 +21,19 @@ import {
   type ProviderId,
   type ProviderInfo,
 } from "@/modules/ai/config";
-import { clearKey, getAllKeys, setKey } from "@/modules/ai/lib/keyring";
+import {
+  accountsForProvider,
+  activeAccountId,
+  addAccount,
+  clearKey,
+  getAllKeys,
+  getRegistry,
+  removeAccount,
+  renameAccount,
+  setActiveAccount,
+  setKey,
+  type AccountRegistry,
+} from "@/modules/ai";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   emitKeysChanged,
@@ -51,8 +63,8 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useMemo, useState } from "react";
+import { ProviderAccountsCard } from "../components/ProviderAccountsCard";
 import { ProviderIcon } from "../components/ProviderIcon";
-import { ProviderKeyCard } from "../components/ProviderKeyCard";
 import { SectionHeader } from "../components/SectionHeader";
 
 type KeysMap = Record<ProviderId, string | null>;
@@ -115,6 +127,7 @@ const LOCAL_META: Partial<Record<ProviderId, LocalMeta>> = {
 
 export function ModelsSection() {
   const [keys, setKeys] = useState<KeysMap | null>(null);
+  const [registry, setRegistry] = useState<AccountRegistry | null>(null);
   const [adding, setAdding] = useState<Set<ProviderId>>(new Set());
 
   const defaultModel = usePreferencesStore((s) => s.defaultModelId);
@@ -131,19 +144,52 @@ export function ModelsSection() {
   );
   const openrouterModelId = usePreferencesStore((s) => s.openrouterModelId);
 
+  const reload = async () => {
+    const [k, r] = await Promise.all([getAllKeys(), getRegistry()]);
+    setKeys(k);
+    setRegistry(r);
+  };
+
   useEffect(() => {
-    void getAllKeys().then(setKeys);
+    void reload();
   }, []);
 
+  // Cloud (multi-account) providers — mutate via the account registry. Each
+  // helper persists + emits keysChanged itself; we just refetch local state.
+  const onAddAccount = async (
+    provider: ProviderId,
+    label: string,
+    value: string,
+  ) => {
+    await addAccount(provider, label, value);
+    await reload();
+  };
+  const onSetActiveAccount = async (
+    provider: ProviderId,
+    accountId: string,
+  ) => {
+    await setActiveAccount(provider, accountId);
+    await reload();
+  };
+  const onRenameAccount = async (accountId: string, label: string) => {
+    await renameAccount(accountId, label);
+    await reload();
+  };
+  const onRemoveAccount = async (provider: ProviderId, accountId: string) => {
+    await removeAccount(provider, accountId);
+    await reload();
+  };
+
+  // Single-key (key-optional local) providers — openai-compatible / openrouter.
   const onSaveKey = async (provider: ProviderId, value: string) => {
     await setKey(provider, value);
-    setKeys((prev) => (prev ? { ...prev, [provider]: value } : prev));
+    await reload();
     await emitKeysChanged();
   };
 
   const onClearKey = async (provider: ProviderId) => {
     await clearKey(provider);
-    setKeys((prev) => (prev ? { ...prev, [provider]: null } : prev));
+    await reload();
     await emitKeysChanged();
   };
 
@@ -195,7 +241,12 @@ export function ModelsSection() {
   const isConfigured = (id: ProviderId): boolean => {
     if (id === "openrouter")
       return !!keys?.[id] && !!openrouterModelId.trim();
-    if (!isLocalProvider(id)) return !!keys?.[id];
+    if (!isLocalProvider(id)) {
+      // Cloud provider is connected if it has ≥1 account (active key may be
+      // mid-read); fall back to the resolved key.
+      const accts = registry ? accountsForProvider(registry, id) : [];
+      return accts.length > 0 || !!keys?.[id];
+    }
     const cfg = localConfig(id);
     if (!cfg) return false;
     if (id === "openai-compatible")
@@ -203,7 +254,7 @@ export function ModelsSection() {
     return !!cfg.modelId.trim();
   };
 
-  if (!keys) {
+  if (!keys || !registry) {
     return <div className="text-[12px] text-muted-foreground">Loading…</div>;
   }
 
@@ -227,7 +278,12 @@ export function ModelsSection() {
       }
       if (id === "openai-compatible") void onClearKey(id);
     } else {
-      void onClearKey(id);
+      // Cloud provider — remove every account.
+      const accts = registry ? accountsForProvider(registry, id) : [];
+      void (async () => {
+        for (const a of accts) await removeAccount(id, a.id);
+        await reload();
+      })();
     }
     setAdding((prev) => {
       const next = new Set(prev);
@@ -291,13 +347,18 @@ export function ModelsSection() {
                   onRemove={() => removeProvider(p.id)}
                 />
               ) : (
-                <ProviderKeyCard
+                <ProviderAccountsCard
                   key={p.id}
                   provider={p}
-                  currentKey={keys[p.id]}
-                  onSave={(v) => onSaveKey(p.id, v)}
-                  onClear={() => onClearKey(p.id)}
-                  onRemove={() => removeProvider(p.id)}
+                  accounts={accountsForProvider(registry, p.id)}
+                  activeId={activeAccountId(registry, p.id)}
+                  onAdd={(label, key) => onAddAccount(p.id, label, key)}
+                  onSetActive={(accountId) =>
+                    onSetActiveAccount(p.id, accountId)
+                  }
+                  onRename={onRenameAccount}
+                  onRemove={(accountId) => onRemoveAccount(p.id, accountId)}
+                  onRemoveProvider={() => removeProvider(p.id)}
                 />
               ),
             )}

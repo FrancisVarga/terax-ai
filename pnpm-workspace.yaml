@@ -1,5 +1,8 @@
+nodeLinker: hoisted
+symlink: false
+
 allowBuilds:
-  bun: true
+  bun: false
   esbuild: true
   msgpackr-extract: true
   msw: true

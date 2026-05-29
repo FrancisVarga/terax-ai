@@ -24,6 +24,12 @@ use std::collections::HashMap;
 #[derive(Clone, Debug)]
 pub struct Msg {
     pub source: Source,
+    /// Workspace/account identity this message belongs to. Distinct accounts
+    /// or environments (a second `$CLAUDE_CONFIG_DIR`, a different project cwd,
+    /// a separate Gemini project hash) get distinct keys so the aggregator can
+    /// break usage out per workspace instead of merging unrelated accounts.
+    /// Format is parser-specific; see each `scan()`.
+    pub workspace: String,
     pub session_id: String,
     /// Unix epoch milliseconds. Parsers that lack per-message timestamps
     /// attribute the message to its session/file time.
@@ -178,6 +184,23 @@ pub struct SourceBreakdown {
     pub error: Option<String>,
 }
 
+/// One workspace's rolled-up usage. A "workspace" is a distinct account or
+/// environment (see [`Msg::workspace`]); the dashboard renders one card per
+/// entry so usage from different accounts is never summed together.
+#[derive(Serialize, Default)]
+pub struct WorkspaceUsage {
+    /// Owning source (`claude` / `gemini` / `cursor`).
+    pub source: String,
+    /// Human-readable workspace label (project path, hash, or config-root tag).
+    pub workspace: String,
+    pub sessions: u64,
+    pub messages: u64,
+    #[serde(rename = "estTokens")]
+    pub est_tokens: u64,
+    #[serde(rename = "estCostUsd")]
+    pub est_cost_usd: f64,
+}
+
 /// Matches the frontend `Analytics` type field-for-field (camelCase via serde
 /// rename) so the existing dashboard renders unchanged.
 #[derive(Serialize)]
@@ -212,6 +235,10 @@ pub struct Analytics {
     pub hourly: Vec<u64>,
     /// Per-source rollup so the UI can show what each agent contributed.
     pub sources: Vec<SourceBreakdown>,
+    /// Per-workspace rollup (one entry per distinct account/environment),
+    /// sorted by est. tokens desc. Lets the UI show separate cards instead of
+    /// merging usage across accounts.
+    pub workspaces: Vec<WorkspaceUsage>,
 }
 
 fn empty_analytics(now_ms: i64, tz_offset_ms: i64) -> Analytics {
@@ -232,6 +259,7 @@ fn empty_analytics(now_ms: i64, tz_offset_ms: i64) -> Analytics {
         peak_hour: None,
         hourly: vec![0; 24],
         sources: Vec::new(),
+        workspaces: Vec::new(),
     }
 }
 
@@ -335,6 +363,10 @@ pub(super) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 
 /// Result of parsing one source: its messages plus an optional non-fatal error
 /// to surface in the breakdown (e.g. "no Claude sessions found").
+///
+/// `Clone` so the scan output can be held in the module-level TTL cache and
+/// re-aggregated cheaply on each call (see [`agentscan_collect`]).
+#[derive(Clone)]
 pub struct SourceResult {
     pub source: Source,
     pub messages: Vec<Msg>,
@@ -351,6 +383,12 @@ fn aggregate(results: Vec<SourceResult>, now_ms: i64, tz_offset_ms: i64) -> Anal
     let mut session_days: HashMap<String, ()> = HashMap::new();
     let mut active_days: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut hourly = vec![0u64; 24];
+
+    // Per-workspace rollup keyed by (source, workspace). Sessions are counted
+    // via a separate (key, session_id) set so one session is never double-counted.
+    let mut ws_map: HashMap<(String, String), WorkspaceUsage> = HashMap::new();
+    let mut ws_sessions: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
 
     let mut total_sessions = 0u64;
 
@@ -384,7 +422,23 @@ fn aggregate(results: Vec<SourceResult>, now_ms: i64, tz_offset_ms: i64) -> Anal
             sb.est_tokens += tokens;
             out.est_input_tokens += in_tok;
             out.est_output_tokens += out_tok;
-            out.est_cost_usd += cost_for_msg(m.model.as_deref(), m);
+            let msg_cost = cost_for_msg(m.model.as_deref(), m);
+            out.est_cost_usd += msg_cost;
+
+            // Per-workspace rollup (separates distinct accounts/environments).
+            let src_key = res.source.key().to_string();
+            let ws_key = (src_key.clone(), m.workspace.clone());
+            let wu = ws_map.entry(ws_key.clone()).or_insert_with(|| WorkspaceUsage {
+                source: src_key,
+                workspace: m.workspace.clone(),
+                ..Default::default()
+            });
+            wu.messages += 1;
+            wu.est_tokens += tokens;
+            wu.est_cost_usd += msg_cost;
+            if ws_sessions.insert((ws_key.0, ws_key.1, m.session_id.clone())) {
+                wu.sessions += 1;
+            }
 
             let key = day_key(m.ts_ms, tz_offset_ms);
             active_days.insert(key.clone());
@@ -474,7 +528,51 @@ fn aggregate(results: Vec<SourceResult>, now_ms: i64, tz_offset_ms: i64) -> Anal
 
     out.daily = fill_daily(&day_map, now_ms, tz_offset_ms);
 
+    // Workspaces sorted by est. tokens desc so the busiest account leads.
+    let mut workspaces: Vec<WorkspaceUsage> = ws_map.into_values().collect();
+    workspaces.sort_by(|a, b| b.est_tokens.cmp(&a.est_tokens));
+    out.workspaces = workspaces;
+
     out
+}
+
+/// How long a disk scan stays fresh before the next call re-walks the session
+/// stores. Tuned for the dashboard's stale-while-revalidate UX: a re-mount or a
+/// background re-sync inside this window reuses the cached scan instead of
+/// re-reading `~/.claude/projects` et al.
+const SCAN_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Module-level cache of the most recent disk scan. We cache the *input*
+/// (`Vec<SourceResult>` from the parsers), not the `Analytics` output: `now_ms`
+/// changes on every call, so caching the output would never hit, whereas the
+/// disk walk is the expensive part and `aggregate` is cheap CPU over in-memory
+/// data. Wrapped in `Arc` so a cache hit clones a pointer, not the messages.
+static SCAN_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<Option<(std::time::Instant, std::sync::Arc<Vec<SourceResult>>)>>,
+> = std::sync::OnceLock::new();
+
+/// Walk every source's on-disk store. The blocking part of the pipeline.
+fn scan_all() -> Vec<SourceResult> {
+    vec![claude::scan(), gemini::scan(), cursor::scan()]
+}
+
+/// Return cached scan results when still fresh (and not forced), else `None`.
+fn cached_scan(force: bool) -> Option<std::sync::Arc<Vec<SourceResult>>> {
+    if force {
+        return None;
+    }
+    let guard = SCAN_CACHE.get()?.lock().ok()?;
+    guard
+        .as_ref()
+        .filter(|(at, _)| at.elapsed() < SCAN_TTL)
+        .map(|(_, results)| std::sync::Arc::clone(results))
+}
+
+fn store_scan(results: std::sync::Arc<Vec<SourceResult>>) {
+    let cell = SCAN_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = cell.lock() {
+        *guard = Some((std::time::Instant::now(), results));
+    }
 }
 
 /// Scan all supported agent session sources and return aggregated analytics.
@@ -482,14 +580,37 @@ fn aggregate(results: Vec<SourceResult>, now_ms: i64, tz_offset_ms: i64) -> Anal
 /// `now_ms` and `tz_offset_ms` are supplied by the frontend (the webview owns
 /// the user's clock and timezone) so day/hour bucketing matches the dashboard's
 /// calendar without a date crate or platform TZ probing in Rust.
+///
+/// Runs `async` and offloads the disk walk to [`spawn_blocking`] so a large
+/// session store never blocks the Tauri IPC worker (the source of UI hangs —
+/// the same pattern `fs::grep` uses). A module-level TTL cache (`SCAN_TTL`)
+/// lets a re-mount or background re-sync reuse the last scan; pass `force =
+/// true` (the frontend's explicit `refresh()`) to bypass it and re-read disk.
+///
+/// [`spawn_blocking`]: tauri::async_runtime::spawn_blocking
 #[tauri::command]
-pub fn agentscan_collect(now_ms: i64, tz_offset_ms: i64) -> Analytics {
-    let results = vec![
-        claude::scan(),
-        gemini::scan(),
-        cursor::scan(),
-    ];
-    aggregate(results, now_ms, tz_offset_ms)
+pub async fn agentscan_collect(
+    now_ms: i64,
+    tz_offset_ms: i64,
+    force: Option<bool>,
+) -> Result<Analytics, String> {
+    let force = force.unwrap_or(false);
+
+    let results = match cached_scan(force) {
+        Some(hit) => hit,
+        None => {
+            let fresh = tauri::async_runtime::spawn_blocking(scan_all)
+                .await
+                .map_err(|e| e.to_string())?;
+            let arc = std::sync::Arc::new(fresh);
+            store_scan(std::sync::Arc::clone(&arc));
+            arc
+        }
+    };
+
+    // `aggregate` consumes its `Vec<SourceResult>`; clone the cached scan (cheap
+    // relative to the disk walk) so the cache entry stays intact for reuse.
+    Ok(aggregate((*results).clone(), now_ms, tz_offset_ms))
 }
 
 #[cfg(test)]
@@ -499,6 +620,7 @@ mod tests {
     fn msg(source: Source, sid: &str, ts: i64, role: Role, model: &str, i: u64, o: u64) -> Msg {
         Msg {
             source,
+            workspace: format!("{}-ws", source.key()),
             session_id: sid.to_string(),
             ts_ms: ts,
             role,
@@ -520,7 +642,9 @@ mod tests {
     #[test]
     #[ignore]
     fn live_scan() {
-        let a = agentscan_collect(1_900_000_000_000, 0);
+        // The command is async; aggregate the raw scan directly so the test
+        // stays synchronous and exercises the same pipeline.
+        let a = aggregate(scan_all(), 1_900_000_000_000, 0);
         eprintln!(
             "sessions={} messages={} estTokens={} cost=${:.4} tools={}",
             a.total_sessions, a.total_messages, a.est_tokens, a.est_cost_usd, a.tool_calls

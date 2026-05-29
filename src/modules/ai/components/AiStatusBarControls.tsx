@@ -54,6 +54,7 @@ import {
   type ProviderId,
 } from "../config";
 import { ACCEPTED_FILES, useComposer } from "../lib/composer";
+import { AccountSwitcher } from "./AccountSwitcher";
 import { toggleFavoriteModel } from "../lib/modelPrefs";
 import { useChatStore } from "../store/chatStore";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -153,6 +154,7 @@ export function AiStatusBarControls() {
       )}
 
       <ModelDropdown />
+      <AccountSwitcher />
 
       <span className="mx-1 h-8 w-px bg-border" aria-hidden />
       <Button

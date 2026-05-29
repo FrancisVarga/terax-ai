@@ -1,4 +1,10 @@
 import { native } from "@/modules/ai/lib/native";
+import {
+  isRemote,
+  parseRemote,
+  readRemoteFile,
+  remoteGlob,
+} from "@/modules/explorer/lib/remote";
 import type {
   PackageManager,
   PackageManifest,
@@ -72,25 +78,33 @@ function parseScripts(raw: unknown): TaskScript[] {
   return entries;
 }
 
-/**
- * Walk the workspace from `root`, find every `package.json` (gitignore-aware,
- * node_modules pruned by the backend glob), parse scripts, and detect the
- * package manager. Manifests with zero scripts are dropped — nothing to run.
- */
-export async function scanManifests(root: string): Promise<PackageManifest[]> {
-  const [pkgs, lockfiles] = await Promise.all([
-    native.glob({ pattern: "**/package.json", root, maxResults: 500 }),
-    native.glob({
-      pattern: "**/{package-lock.json,pnpm-lock.yaml,yarn.lock,bun.lockb,bun.lock}",
-      root,
-      maxResults: 500,
-    }),
-  ]);
+const LOCKFILE_NAMES = [
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "bun.lockb",
+  "bun.lock",
+];
 
+/** A discovered manifest path before reading: absolute path + root-relative. */
+type Hit = { path: string; rel: string };
+
+/**
+ * Shared core: given discovered package.json `pkgHits` and `lockHits` plus a
+ * `readText` adapter, parse each manifest, drop the script-less ones, detect
+ * the package manager from its sibling lockfiles, and return the sorted list.
+ * Both the local (ripgrep) and remote (SSH `find`) backends feed this so the
+ * script ordering and PM logic can never drift between them.
+ */
+async function buildManifests(
+  pkgHits: Hit[],
+  lockHits: Hit[],
+  readText: (path: string) => Promise<string | null>,
+): Promise<PackageManifest[]> {
   // Index lockfile basenames by their containing directory so PM detection is
   // a cheap per-manifest set lookup instead of a re-walk.
   const locksByDir = new Map<string, Set<string>>();
-  for (const hit of lockfiles.hits) {
+  for (const hit of lockHits) {
     const dir = dirOf(hit.path);
     let set = locksByDir.get(dir);
     if (!set) locksByDir.set(dir, (set = new Set()));
@@ -99,12 +113,12 @@ export async function scanManifests(root: string): Promise<PackageManifest[]> {
 
   const out: PackageManifest[] = [];
   await Promise.all(
-    pkgs.hits.map(async (hit) => {
-      const res = await native.readFile(hit.path).catch(() => null);
-      if (!res || res.kind !== "text") return;
+    pkgHits.map(async (hit) => {
+      const content = await readText(hit.path).catch(() => null);
+      if (content == null) return;
       let json: Record<string, unknown>;
       try {
-        json = JSON.parse(res.content);
+        json = JSON.parse(content);
       } catch {
         return; // malformed manifest — skip rather than crash the scan
       }
@@ -137,6 +151,76 @@ export async function scanManifests(root: string): Promise<PackageManifest[]> {
     return a.rel.localeCompare(b.rel);
   });
   return out;
+}
+
+/** Strip the `root/` prefix from an absolute path → root-relative, `/`-style. */
+function relTo(root: string, path: string): string {
+  const r = root.replace(/\/+$/, "");
+  if (path === r) return baseName(path);
+  const prefix = `${r}/`;
+  return path.startsWith(prefix) ? path.slice(prefix.length) : path;
+}
+
+/**
+ * Discover manifests on a remote SSH host. The root is an `ssh://alias/abs/path`
+ * URI; we run a server-side `find` (one round-trip, see {@link remoteGlob})
+ * for package.json + lockfiles, then read each manifest over SFTP. `find`
+ * returns absolute remote paths, so `rel` is derived from the root here.
+ */
+async function scanRemoteManifests(uri: string): Promise<PackageManifest[]> {
+  const ref = parseRemote(uri);
+  if (!ref) return [];
+  const { alias, path: remoteRoot } = ref;
+
+  const [pkgPaths, lockPaths] = await Promise.all([
+    remoteGlob(alias, remoteRoot, ["package.json"]),
+    remoteGlob(alias, remoteRoot, LOCKFILE_NAMES),
+  ]);
+
+  const pkgHits: Hit[] = pkgPaths.map((p) => ({
+    path: p,
+    rel: relTo(remoteRoot, p),
+  }));
+  const lockHits: Hit[] = lockPaths.map((p) => ({
+    path: p,
+    rel: relTo(remoteRoot, p),
+  }));
+
+  const manifests = await buildManifests(pkgHits, lockHits, async (p) =>
+    readRemoteFile(alias, p).catch(() => null),
+  );
+  // Tag each with the alias so the runner dispatches it over SSH.
+  for (const m of manifests) m.remoteAlias = alias;
+  return manifests;
+}
+
+/**
+ * Walk the workspace from `root`, find every `package.json` (gitignore-aware,
+ * node_modules pruned), parse scripts, and detect the package manager.
+ * Manifests with zero scripts are dropped — nothing to run.
+ *
+ * For a local/WSL root, discovery is delegated to the bundled ripgrep sidecar
+ * via {@link native.globRg}, an async backend command that runs the walk in a
+ * child process off the IPC thread — so scanning a large workspace never
+ * freezes the UI. For a remote (`ssh://`) root the walk runs server-side over
+ * SSH; see {@link scanRemoteManifests}.
+ */
+export async function scanManifests(root: string): Promise<PackageManifest[]> {
+  if (isRemote(root)) return scanRemoteManifests(root);
+
+  const [pkgs, lockfiles] = await Promise.all([
+    native.globRg({ pattern: "**/package.json", root, maxResults: 500 }),
+    native.globRg({
+      pattern: `**/{${LOCKFILE_NAMES.join(",")}}`,
+      root,
+      maxResults: 500,
+    }),
+  ]);
+
+  return buildManifests(pkgs.hits, lockfiles.hits, async (p) => {
+    const res = await native.readFile(p);
+    return res.kind === "text" ? res.content : null;
+  });
 }
 
 /**

@@ -6,6 +6,7 @@ import {
   saveProjects,
   type Project,
 } from "../lib/projects";
+import { clearInsights } from "../lib/insightsCache";
 
 const CHANGED_EVENT = "terax://projects-changed";
 
@@ -44,9 +45,12 @@ export const useProjectsStore = create<State>((set, get) => ({
     void saveProjects(next).then(() => emit(CHANGED_EVENT));
   },
   remove: (id) => {
+    const removed = get().projects.find((p) => p.id === id);
     const next = get().projects.filter((p) => p.id !== id);
     set({ projects: next });
     void saveProjects(next).then(() => emit(CHANGED_EVENT));
+    // Drop the project's cached insights so a re-add starts clean.
+    if (removed) void clearInsights(removed.path);
   },
   hasPath: (path) => {
     const norm = path.replace(/\\/g, "/").replace(/\/+$/, "");

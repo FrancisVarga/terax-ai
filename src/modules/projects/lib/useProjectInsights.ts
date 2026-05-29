@@ -10,6 +10,7 @@ import {
   type ProjectInsights,
   type RepoSummary,
 } from "./projectInsights";
+import { readInsights, writeInsights } from "./insightsCache";
 
 const LOADING = { kind: "loading" } as const;
 
@@ -60,7 +61,32 @@ export function useProjectInsights(projectPath: string): {
       if (!cancelled) setInsights((curr) => ({ ...curr, ...p }));
     };
 
+    // `reload()` bumps `nonce`; any nonce > 0 is an explicit user refresh that
+    // must bypass cache freshness and re-spawn git/gh.
+    const forced = nonce > 0;
+
     void (async () => {
+      // Stale-while-revalidate: paint last-known values from disk first so a
+      // re-opened detail page shows instantly instead of blanking to spinners.
+      const cached = forced
+        ? null
+        : await readInsights(projectPath).catch(() => null);
+      if (cancelled) return;
+      if (cached) {
+        const d = cached.data;
+        if (d.summary) setIsRepo(true);
+        patch({
+          summary: d.summary ? { kind: "ready", data: d.summary } : LOADING,
+          commits: d.commits ? { kind: "ready", data: d.commits } : LOADING,
+          readme: d.readme ? { kind: "ready", data: d.readme } : LOADING,
+          repo: d.repo ? { kind: "ready", data: d.repo } : LOADING,
+          issues: d.issues ? { kind: "ready", data: d.issues } : LOADING,
+          runs: d.runs ? { kind: "ready", data: d.runs } : LOADING,
+        });
+        // Fresh cache with a resolved summary → trust it, skip the subprocesses.
+        if (!cached.stale && d.summary) return;
+      }
+
       let summary: RepoSummary | null;
       try {
         summary = await loadRepoSummary(projectPath);
@@ -95,14 +121,22 @@ export function useProjectInsights(projectPath: string): {
 
       setIsRepo(true);
       patch({ summary: { kind: "ready", data: summary } });
+      void writeInsights(projectPath, { summary });
 
-      // Local git + filesystem sources — always attempted.
+      // Local git + filesystem sources — always attempted. Each persists its
+      // own slice on success so a later source failing never drops it.
       void loadCommits(summary.repoRoot)
-        .then((data) => patch({ commits: { kind: "ready", data } }))
+        .then((data) => {
+          patch({ commits: { kind: "ready", data } });
+          void writeInsights(projectPath, { commits: data });
+        })
         .catch((e) => patch({ commits: unavailable(reasonOf(e)) }));
 
       void loadReadme(summary.repoRoot)
-        .then((content) => patch({ readme: { kind: "ready", data: { content } } }))
+        .then((content) => {
+          patch({ readme: { kind: "ready", data: { content } } });
+          void writeInsights(projectPath, { readme: { content } });
+        })
         .catch((e) => patch({ readme: unavailable(reasonOf(e)) }));
 
       // GitHub sources — only when the remote is a GitHub repo.
@@ -119,15 +153,24 @@ export function useProjectInsights(projectPath: string): {
       const ownerRepo = `${gh.owner}/${gh.repo}`;
 
       void loadRepo(summary.repoRoot, ownerRepo)
-        .then((data) => patch({ repo: { kind: "ready", data } }))
+        .then((data) => {
+          patch({ repo: { kind: "ready", data } });
+          void writeInsights(projectPath, { repo: data });
+        })
         .catch((e) => patch({ repo: unavailable(reasonOf(e)) }));
 
       void loadIssues(summary.repoRoot, ownerRepo)
-        .then((data) => patch({ issues: { kind: "ready", data } }))
+        .then((data) => {
+          patch({ issues: { kind: "ready", data } });
+          void writeInsights(projectPath, { issues: data });
+        })
         .catch((e) => patch({ issues: unavailable(reasonOf(e)) }));
 
       void loadRuns(summary.repoRoot, ownerRepo)
-        .then((data) => patch({ runs: { kind: "ready", data } }))
+        .then((data) => {
+          patch({ runs: { kind: "ready", data } });
+          void writeInsights(projectPath, { runs: data });
+        })
         .catch((e) => patch({ runs: unavailable(reasonOf(e)) }));
     })();
 

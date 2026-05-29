@@ -14,8 +14,21 @@ export {
   setKey,
   clearKey,
   hasAnyKey,
+  getRegistry,
+  accountsForProvider,
+  activeAccountId,
+  addAccount,
+  updateAccountKey,
+  renameAccount,
+  setActiveAccount,
+  removeAccount,
   type ProviderKeys,
 } from "./lib/keyring";
+export {
+  type AccountRegistry,
+  type ProviderAccount,
+  type AccountKind,
+} from "@/modules/settings/store";
 export {
   getActiveProviderKey,
   getOrCreateChat,

@@ -603,6 +603,75 @@ export async function onPreferencesChange(
 // so we broadcast via a Tauri event for cross-window listeners.
 const KEYS_CHANGED_EVENT = "terax://ai-keys-changed";
 
+// ── Provider account registry ──────────────────────────────────────────────
+// Multiple named accounts per provider (e.g. Anthropic "work" + "personal").
+// Stored as a single JSON blob in the same settings store — read-modify-write,
+// distinct from the scalar Preferences fields. The actual secrets live in the
+// OS keychain, slotted per account id; this registry only tracks identity and
+// which account is active per provider.
+
+/** Account kind. "api-key" today; "cli-session" reserved for future
+ *  OAuth/CLI-subscription accounts (Orca-style) without re-architecting. */
+export type AccountKind = "api-key" | "cli-session";
+
+export type ProviderAccount = {
+  /** Stable uuid — used verbatim as the keyring slot suffix. */
+  id: string;
+  /** Provider id (kept as string to avoid a config.ts import cycle here). */
+  provider: string;
+  /** User-facing label: "Work", "Personal", "Acme org". */
+  label: string;
+  kind: AccountKind;
+  createdAt: number;
+};
+
+export type AccountRegistry = {
+  accounts: ProviderAccount[];
+  /** provider id -> active account id. */
+  activeByProvider: Record<string, string>;
+};
+
+export const EMPTY_ACCOUNT_REGISTRY: AccountRegistry = {
+  accounts: [],
+  activeByProvider: {},
+};
+
+const KEY_ACCOUNT_REGISTRY = "accountRegistry";
+
+function normalizeRegistry(raw: unknown): AccountRegistry {
+  if (!raw || typeof raw !== "object") return { ...EMPTY_ACCOUNT_REGISTRY };
+  const r = raw as Partial<AccountRegistry>;
+  const accounts = Array.isArray(r.accounts)
+    ? r.accounts.filter(
+        (a): a is ProviderAccount =>
+          !!a &&
+          typeof a.id === "string" &&
+          typeof a.provider === "string" &&
+          typeof a.label === "string",
+      )
+    : [];
+  const activeByProvider =
+    r.activeByProvider && typeof r.activeByProvider === "object"
+      ? { ...(r.activeByProvider as Record<string, string>) }
+      : {};
+  return { accounts, activeByProvider };
+}
+
+export async function loadAccountRegistry(): Promise<AccountRegistry> {
+  const raw = await store.get(KEY_ACCOUNT_REGISTRY);
+  return normalizeRegistry(raw);
+}
+
+/** Persist the registry and notify every window (settings → main) via the
+ *  shared keys-changed event, so the active key reloads everywhere. */
+export async function saveAccountRegistry(
+  registry: AccountRegistry,
+): Promise<void> {
+  await store.set(KEY_ACCOUNT_REGISTRY, registry);
+  await store.save();
+  await emit(KEYS_CHANGED_EVENT);
+}
+
 export async function emitKeysChanged(): Promise<void> {
   await emit(KEYS_CHANGED_EVENT);
 }

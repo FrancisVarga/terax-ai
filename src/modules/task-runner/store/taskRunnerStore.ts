@@ -35,13 +35,16 @@ function appendOutput(prev: string, chunk: string): string {
 }
 
 export const useTaskRunnerStore = create<TaskRunnerState>((set, get) => {
-  /** Poll the backend ring buffer for one task and fold new bytes in. */
+  /** Poll the backend ring buffer for one task and fold new bytes in. Routes to
+   * the SSH backend when the task carries a remote alias, else the local one. */
   const tick = async (id: string) => {
     const task = get().tasks[id];
     if (!task) return;
     let res;
     try {
-      res = await native.shellBgLogs(task.handle, task.offset);
+      res = task.remoteAlias
+        ? await native.sshBgLogs(task.handle, task.offset)
+        : await native.shellBgLogs(task.handle, task.offset);
     } catch {
       return; // transient; next tick retries
     }
@@ -87,7 +90,11 @@ export const useTaskRunnerStore = create<TaskRunnerState>((set, get) => {
         return;
       }
       const command = runInvocation(manifest.packageManager, script.name);
-      const handle = await native.shellBgSpawn(command, manifest.dir);
+      // Remote manifests dispatch over SSH (cwd = remote abs path); local ones
+      // use the local background-process backend.
+      const handle = manifest.remoteAlias
+        ? await native.sshBgSpawn(manifest.remoteAlias, command, manifest.dir)
+        : await native.shellBgSpawn(command, manifest.dir);
       const id = `t${++taskSeq}`;
       const task: RunningTask = {
         id,
@@ -101,6 +108,7 @@ export const useTaskRunnerStore = create<TaskRunnerState>((set, get) => {
         exitCode: null,
         output: "",
         offset: 0,
+        remoteAlias: manifest.remoteAlias,
       };
       set((s) => ({ tasks: { ...s.tasks, [id]: task }, selectedId: id }));
       const timer = setInterval(() => void tick(id), POLL_INTERVAL_MS);
@@ -112,7 +120,9 @@ export const useTaskRunnerStore = create<TaskRunnerState>((set, get) => {
       const task = get().tasks[id];
       if (!task) return;
       try {
-        await native.shellBgKill(task.handle);
+        await (task.remoteAlias
+          ? native.sshBgKill(task.handle)
+          : native.shellBgKill(task.handle));
       } catch {
         /* already gone */
       }
@@ -127,7 +137,12 @@ export const useTaskRunnerStore = create<TaskRunnerState>((set, get) => {
         pollers.delete(id);
       }
       const task = get().tasks[id];
-      if (task?.status === "running") void native.shellBgKill(task.handle).catch(() => {});
+      if (task?.status === "running") {
+        void (task.remoteAlias
+          ? native.sshBgKill(task.handle)
+          : native.shellBgKill(task.handle)
+        ).catch(() => {});
+      }
       set((s) => {
         const { [id]: _drop, ...rest } = s.tasks;
         return {

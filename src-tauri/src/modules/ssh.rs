@@ -1,13 +1,17 @@
 use russh::client::{self, Handle, Handler};
 use russh::keys::key;
+use russh::{ChannelMsg, Sig};
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::FileType;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, SystemTime};
+use tokio::sync::{Mutex, Notify};
+
+use crate::modules::shell::ringbuffer::BoundedRingBuffer;
 
 /// One resolved SSH host alias from `~/.ssh/config`.
 ///
@@ -265,14 +269,197 @@ pub struct RemoteDirEntry {
 /// stays open) plus the SFTP subsystem session built on top of it.
 struct RemoteConn {
     sftp: Arc<SftpSession>,
-    // Held so the SSH transport isn't dropped while the SFTP session is in use.
-    _handle: Handle<ClientHandler>,
+    // Held so the SSH transport isn't dropped while the SFTP session is in use,
+    // and reused to open exec channels (e.g. the package.json `find` walk).
+    handle: Handle<ClientHandler>,
+}
+
+impl RemoteConn {
+    /// Run a single command over a fresh exec channel and return its stdout.
+    /// stderr is dropped (the caller only cares about the path list); a non-zero
+    /// exit is NOT fatal — `find` returns 1 when it hits an unreadable dir but
+    /// still prints everything it could walk, mirroring the local rg exit-2
+    /// behavior in `fs_glob_rg`.
+    async fn exec(&self, command: &str) -> Result<String, String> {
+        let mut channel = self
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|e| format!("open exec channel: {e}"))?;
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| format!("exec failed: {e}"))?;
+
+        let mut stdout: Vec<u8> = Vec::new();
+        // Drain the channel until EOF/close. `data` carries stdout; `extended_data`
+        // (stream 1) is stderr, which we ignore.
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Data { ref data }) => stdout.extend_from_slice(data),
+                Some(ChannelMsg::ExtendedData { .. }) => {}
+                Some(ChannelMsg::ExitStatus { .. }) => {}
+                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                _ => {}
+            }
+        }
+        Ok(String::from_utf8_lossy(&stdout).into_owned())
+    }
 }
 
 /// Pool of live SFTP sessions keyed by config alias. One session per host is
 /// reused across `read_dir` calls so we don't re-auth on every expand.
 #[derive(Clone, Default)]
 pub struct SshFsState(Arc<Mutex<HashMap<String, Arc<RemoteConn>>>>);
+
+// ───────────────────────── Remote background tasks ─────────────────────────
+//
+// A remote task (e.g. `pnpm run dev` on the SSH host) runs over a long-lived
+// exec channel. A tokio task drains stdout+stderr into a bounded ring buffer;
+// the frontend polls it with the SAME (handle, offset) shape as the local
+// `shell_bg_*` commands, so the task-runner store can treat local and remote
+// runs identically. Killing signals the remote process (SIGKILL) so a detached
+// `dev` server doesn't outlive the panel.
+
+const REMOTE_RING_CAP: usize = 4 * 1024 * 1024;
+
+/// A streaming remote process: its output ring buffer, exit state, and a kill
+/// signal the drain loop selects on.
+struct RemoteBgProc {
+    command: String,
+    cwd: Option<String>,
+    started_at_ms: u64,
+    buffer: StdMutex<BoundedRingBuffer>,
+    exited: AtomicBool,
+    exit_code: AtomicI32,
+    exit_unknown: AtomicBool,
+    /// Notified to request a kill; the drain loop signals the channel and stops.
+    kill: Arc<Notify>,
+}
+
+#[derive(Serialize)]
+pub struct RemoteBgLogResponse {
+    pub bytes: String,
+    pub next_offset: u64,
+    pub dropped: u64,
+    pub exited: bool,
+    pub exit_code: Option<i32>,
+}
+
+impl RemoteBgProc {
+    fn read_logs(&self, since: u64) -> RemoteBgLogResponse {
+        let (bytes, next_offset, dropped) = {
+            let buf = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            buf.read_from(since)
+        };
+        let exited = self.exited.load(Ordering::Acquire);
+        let exit_code = if exited && !self.exit_unknown.load(Ordering::Acquire) {
+            Some(self.exit_code.load(Ordering::Acquire))
+        } else {
+            None
+        };
+        RemoteBgLogResponse {
+            bytes: String::from_utf8_lossy(&bytes).into_owned(),
+            next_offset,
+            dropped,
+            exited,
+            exit_code,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct RemoteBgProcInfo {
+    pub handle: u32,
+    pub command: String,
+    pub cwd: Option<String>,
+    pub started_at_ms: u64,
+    pub exited: bool,
+    pub exit_code: Option<i32>,
+}
+
+/// Registry of live remote background tasks, keyed by an opaque handle the
+/// frontend polls. Separate from {@link SshFsState} so the SFTP pool and the
+/// task registry have independent lifetimes.
+#[derive(Clone, Default)]
+pub struct SshBgState {
+    procs: Arc<Mutex<HashMap<u32, Arc<RemoteBgProc>>>>,
+    next_id: Arc<AtomicU32>,
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+impl RemoteConn {
+    /// Spawn a long-running command over an exec channel and stream its output
+    /// into `proc`'s ring buffer. The returned future runs until the remote
+    /// process exits or `proc.kill` is notified. Spawned onto the tokio runtime
+    /// by the caller so the command keeps running across poll calls.
+    async fn run_streaming(self: Arc<Self>, command: String, proc: Arc<RemoteBgProc>) {
+        let mut channel = match self.handle.channel_open_session().await {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = format!("open channel: {e}\n");
+                proc.buffer
+                    .lock()
+                    .unwrap_or_else(|x| x.into_inner())
+                    .push(msg.as_bytes());
+                proc.exit_unknown.store(true, Ordering::Release);
+                proc.exited.store(true, Ordering::Release);
+                return;
+            }
+        };
+        if let Err(e) = channel.exec(true, command.as_bytes()).await {
+            let msg = format!("exec: {e}\n");
+            proc.buffer
+                .lock()
+                .unwrap_or_else(|x| x.into_inner())
+                .push(msg.as_bytes());
+            proc.exit_unknown.store(true, Ordering::Release);
+            proc.exited.store(true, Ordering::Release);
+            return;
+        }
+
+        let kill = proc.kill.clone();
+        let mut killed = false;
+        loop {
+            tokio::select! {
+                // Kill requested: SIGKILL the remote process, then close.
+                _ = kill.notified(), if !killed => {
+                    killed = true;
+                    let _ = channel.signal(Sig::KILL).await;
+                    let _ = channel.close().await;
+                }
+                msg = channel.wait() => {
+                    match msg {
+                        // stdout and stderr both fold into the one buffer so the
+                        // log view is interleaved like a real terminal.
+                        Some(ChannelMsg::Data { ref data }) => {
+                            proc.buffer.lock().unwrap_or_else(|e| e.into_inner()).push(data);
+                        }
+                        Some(ChannelMsg::ExtendedData { ref data, .. }) => {
+                            proc.buffer.lock().unwrap_or_else(|e| e.into_inner()).push(data);
+                        }
+                        Some(ChannelMsg::ExitStatus { exit_status }) => {
+                            proc.exit_code.store(exit_status as i32, Ordering::Release);
+                        }
+                        Some(ChannelMsg::ExitSignal { .. }) => {
+                            // Process killed by a signal — no numeric exit code.
+                            proc.exit_unknown.store(true, Ordering::Release);
+                        }
+                        Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        proc.exited.store(true, Ordering::Release);
+    }
+}
 
 /// russh client handler. Verifies the offered host key against the user's
 /// `~/.ssh/known_hosts` and **fails closed**:
@@ -491,7 +678,7 @@ async fn open_conn(alias: &str) -> Result<Arc<RemoteConn>, String> {
 
     Ok(Arc::new(RemoteConn {
         sftp: Arc::new(sftp),
-        _handle: handle,
+        handle,
     }))
 }
 
@@ -590,6 +777,157 @@ pub async fn ssh_fs_read_file(
         .await
         .map_err(|e| format!("read {path}: {e}"))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Single-quote a string for a POSIX shell: wrap in `'…'` and escape any
+/// embedded single quote as `'\''`. Used to splice the remote root path into
+/// the `find` command without letting it break out of the argument.
+fn sh_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Walk a remote tree over SSH and return every file whose basename matches one
+/// of `names` (e.g. `package.json`, lockfiles), pruning `node_modules` and
+/// `.git`. The walk runs server-side via a single `find` exec — one round-trip
+/// instead of hundreds of SFTP `read_dir` calls — so it stays responsive even
+/// on deep trees over a high-latency link.
+///
+/// Returns absolute remote paths (always `/`-separated). Requires a POSIX shell
+/// + `find` on the remote, which holds for the Linux hosts this targets.
+#[tauri::command]
+pub async fn ssh_fs_glob(
+    state: tauri::State<'_, SshFsState>,
+    alias: String,
+    root: String,
+    names: Vec<String>,
+) -> Result<Vec<String>, String> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let state = state.inner().clone();
+    let conn = get_conn(&state, &alias).await?;
+
+    // Build: find <root> \( -name 'a' -o -name 'b' \) -type f -not -path '*/node_modules/*' -not -path '*/.git/*'
+    let name_tests = names
+        .iter()
+        .map(|n| format!("-name {}", sh_single_quote(n)))
+        .collect::<Vec<_>>()
+        .join(" -o ");
+    let cmd = format!(
+        "find {root} \\( {names} \\) -type f \
+         -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null",
+        root = sh_single_quote(&root),
+        names = name_tests,
+    );
+
+    let stdout = conn.exec(&cmd).await?;
+    let hits = stdout
+        .lines()
+        .map(|l| l.trim_end_matches('\r').trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| l.replace('\\', "/"))
+        .collect();
+    Ok(hits)
+}
+
+/// Spawn a long-running command on the remote host and return a poll handle.
+/// `cwd` (an absolute remote path) is prefixed as `cd <cwd> && <command>` since
+/// an exec channel has no working-directory concept. Output streams into a ring
+/// buffer polled via {@link ssh_bg_logs}.
+#[tauri::command]
+pub async fn ssh_bg_spawn(
+    fs_state: tauri::State<'_, SshFsState>,
+    bg_state: tauri::State<'_, SshBgState>,
+    alias: String,
+    command: String,
+    cwd: Option<String>,
+) -> Result<u32, String> {
+    let trimmed = command.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("empty command".into());
+    }
+    let fs_state = fs_state.inner().clone();
+    let conn = get_conn(&fs_state, &alias).await?;
+
+    // Run under a login-ish shell so the remote PATH (nvm, pnpm shims, etc.) is
+    // populated the way an interactive `ssh` session would see it.
+    let full = match cwd.as_deref().filter(|s| !s.is_empty()) {
+        Some(dir) => format!("cd {} && {}", sh_single_quote(dir), trimmed),
+        None => trimmed.clone(),
+    };
+
+    let proc = Arc::new(RemoteBgProc {
+        command: trimmed,
+        cwd,
+        started_at_ms: now_ms(),
+        buffer: StdMutex::new(BoundedRingBuffer::new(REMOTE_RING_CAP)),
+        exited: AtomicBool::new(false),
+        exit_code: AtomicI32::new(0),
+        exit_unknown: AtomicBool::new(false),
+        kill: Arc::new(Notify::new()),
+    });
+
+    let id = bg_state.next_id.fetch_add(1, Ordering::Relaxed).max(1);
+    bg_state.procs.lock().await.insert(id, proc.clone());
+
+    // Detach: the streaming task outlives this command call.
+    tauri::async_runtime::spawn(conn.run_streaming(full, proc));
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn ssh_bg_logs(
+    bg_state: tauri::State<'_, SshBgState>,
+    handle: u32,
+    since_offset: Option<u64>,
+) -> Result<RemoteBgLogResponse, String> {
+    let proc = bg_state
+        .procs
+        .lock()
+        .await
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| "no remote background handle".to_string())?;
+    Ok(proc.read_logs(since_offset.unwrap_or(0)))
+}
+
+#[tauri::command]
+pub async fn ssh_bg_kill(
+    bg_state: tauri::State<'_, SshBgState>,
+    handle: u32,
+) -> Result<(), String> {
+    if let Some(proc) = bg_state.procs.lock().await.get(&handle).cloned() {
+        proc.kill.notify_one();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn ssh_bg_list(
+    bg_state: tauri::State<'_, SshBgState>,
+) -> Result<Vec<RemoteBgProcInfo>, String> {
+    let map = bg_state.procs.lock().await;
+    let mut out: Vec<RemoteBgProcInfo> = map
+        .iter()
+        .map(|(id, p)| {
+            let exited = p.exited.load(Ordering::Acquire);
+            let exit_code = if exited && !p.exit_unknown.load(Ordering::Acquire) {
+                Some(p.exit_code.load(Ordering::Acquire))
+            } else {
+                None
+            };
+            RemoteBgProcInfo {
+                handle: *id,
+                command: p.command.clone(),
+                cwd: p.cwd.clone(),
+                started_at_ms: p.started_at_ms,
+                exited,
+                exit_code,
+            }
+        })
+        .collect();
+    out.sort_by_key(|i| i.handle);
+    Ok(out)
 }
 
 #[tauri::command]

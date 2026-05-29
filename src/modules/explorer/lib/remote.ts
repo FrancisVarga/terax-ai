@@ -71,6 +71,28 @@ export async function readDir(
   });
 }
 
+/**
+ * Walk a remote tree (server-side `find` over SSH) for files whose basename is
+ * in `names`, pruning node_modules / .git. Returns absolute remote paths
+ * (`/`-separated). Used by the task-runner scan to discover manifests +
+ * lockfiles on the remote host. `path` is the absolute remote root.
+ */
+export async function remoteGlob(
+  alias: string,
+  path: string,
+  names: string[],
+): Promise<string[]> {
+  return invoke<string[]>("ssh_fs_glob", { alias, root: path, names });
+}
+
+/** Read a single remote file's text content over SFTP. */
+export async function readRemoteFile(
+  alias: string,
+  path: string,
+): Promise<string> {
+  return invoke<string>("ssh_fs_read_file", { alias, path });
+}
+
 /** Connect (or reuse) an SFTP session; resolves the remote home dir. */
 export async function connectRemote(alias: string): Promise<string> {
   return invoke<string>("ssh_fs_connect", { alias });
