@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "terax-ai-camelot",
+  "productName": "Terax-Camelot",
   "version": "0.9.0",
   "identifier": "app.crynta.terax",
   "build": {
