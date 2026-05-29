@@ -67,7 +67,10 @@ jobs:
 
       - uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Fork repos get a read-only GITHUB_TOKEN that cannot create releases
+          # ("Resource not accessible by integration"). Use a PAT with repo scope
+          # so tauri-action can create + publish the release on this fork.
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
 
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
