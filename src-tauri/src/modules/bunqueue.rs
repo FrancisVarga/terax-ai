@@ -90,7 +90,6 @@ impl Drop for ManagedProc {
 
 /// Process-wide handles to the bunqueue server and registered worker processes.
 /// `manage`d by Tauri so commands can read status/logs and restart.
-#[derive(Default)]
 pub struct BunqueueState {
     proc: Mutex<Option<Arc<ManagedProc>>>,
     /// Worker name → process. Workers are Bun scripts that connect to the
@@ -99,6 +98,24 @@ pub struct BunqueueState {
     /// Persistent SQLite path passed to the server via `--data-path`. Set once
     /// during setup from the app data dir. `None` → bunqueue runs in-memory.
     data_path: Mutex<Option<PathBuf>>,
+    /// Whether the user has opted the server in. Off by default. Read at boot
+    /// from the persisted `bunqueueEnabled` pref and flipped by
+    /// `bunqueue_set_enabled`. The watchdog reads this so it never resurrects a
+    /// server the user disabled.
+    enabled: AtomicBool,
+}
+
+impl Default for BunqueueState {
+    fn default() -> Self {
+        Self {
+            proc: Mutex::new(None),
+            workers: Mutex::new(Vec::new()),
+            data_path: Mutex::new(None),
+            // Opt-in: stays down until the pref is read at boot or the toggle
+            // flips it on.
+            enabled: AtomicBool::new(false),
+        }
+    }
 }
 
 impl BunqueueState {
@@ -463,7 +480,13 @@ fn server_running(state: &BunqueueState) -> bool {
 /// Idempotent supervise step: (re)start the server if down, otherwise ensure
 /// all workers are alive. Shared by the `bunqueue_ensure` command and the
 /// watchdog thread. Returns true if the server is running afterward.
+///
+/// No-op while disabled — this is the gate that stops the watchdog from
+/// resurrecting a server the user opted out of.
 fn ensure_running(state: &BunqueueState) -> bool {
+    if !state.enabled.load(Ordering::Acquire) {
+        return false;
+    }
     if !server_running(state) {
         start_on_boot(state);
     } else {
@@ -475,9 +498,55 @@ fn ensure_running(state: &BunqueueState) -> bool {
 
 /// Idempotent start: spawn the server + workers if not already running. Safe to
 /// call repeatedly (e.g. from the frontend on dashboard mount / after reload).
+/// No-op while the server is disabled — the frontend gates the dashboard's
+/// on-mount ensure on the same pref, but this is the authoritative backstop.
 #[tauri::command]
 pub fn bunqueue_ensure(state: tauri::State<'_, BunqueueState>) -> BunqueueStatus {
     ensure_running(&state);
+    bunqueue_status(state)
+}
+
+/// Read the persisted `bunqueueEnabled` pref from the shared settings store.
+/// Absent key (fresh install) or any read failure → `false` (opt-in default),
+/// matching the JS `DEFAULT_PREFERENCES.bunqueueEnabled`.
+fn read_enabled_pref<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    use tauri_plugin_store::StoreExt;
+    // Same store file the JS LazyStore writes (src: settings/store.ts STORE_PATH).
+    match app.store("terax-settings.json") {
+        Ok(store) => store
+            .get("bunqueueEnabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+/// Apply the persisted pref at boot, then start if enabled. Call once during
+/// setup before the watchdog spawns.
+pub fn init_from_pref<R: tauri::Runtime>(app: &tauri::AppHandle<R>, state: &BunqueueState) {
+    let enabled = read_enabled_pref(app);
+    state.enabled.store(enabled, Ordering::Release);
+    if enabled {
+        start_on_boot(state);
+    } else {
+        log::info!("bunqueue disabled (opt-in) — server not started on boot");
+    }
+}
+
+/// Enable or disable the server at runtime (driven by the Settings toggle).
+/// Enabling spawns the server + workers; disabling kills them. Persisting the
+/// pref is the frontend's job — this only flips the live process state.
+#[tauri::command]
+pub fn bunqueue_set_enabled(
+    state: tauri::State<'_, BunqueueState>,
+    enabled: bool,
+) -> BunqueueStatus {
+    state.enabled.store(enabled, Ordering::Release);
+    if enabled {
+        ensure_running(&state);
+    } else {
+        shutdown(&state);
+    }
     bunqueue_status(state)
 }
 

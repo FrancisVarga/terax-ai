@@ -16,6 +16,9 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
+import { usePreferencesStore } from "@/modules/settings/preferences";
+import { setBunqueueEnabled } from "@/modules/settings/store";
+
 import { useBunqueue } from "../hooks/useBunqueue";
 import { useBunqueueData } from "../hooks/useBunqueueData";
 import { bunqueueNative, type BunqueueStatus } from "../lib/native";
@@ -35,6 +38,8 @@ import { LogView } from "./LogView";
  * workers, queues + jobs, and the raw server log tail.
  */
 export function BunqueueDashboard({ className }: { className?: string }) {
+  const enabled = usePreferencesStore((s) => s.bunqueueEnabled);
+  const hydrated = usePreferencesStore((s) => s.hydrated);
   const { status, logs, dropped, restarting, error, restart, clearLogs } =
     useBunqueue();
   const data = useBunqueueData(status?.running ?? true);
@@ -47,10 +52,20 @@ export function BunqueueDashboard({ className }: { className?: string }) {
   }, []);
 
   // Ensure the server is up whenever the dashboard mounts — recovers from a
-  // webview reload after a failed boot, or a server that died.
+  // webview reload after a failed boot, or a server that died. Gated on the
+  // opt-in pref so opening the dashboard never resurrects a disabled server
+  // (the backend `bunqueue_ensure` is a no-op while disabled too, but skipping
+  // the call avoids a pointless round-trip).
   useEffect(() => {
+    if (!enabled) return;
     void bunqueueNative.ensure().catch(() => {});
-  }, []);
+  }, [enabled]);
+
+  // Disabled (opt-in): show an enable affordance instead of the live dashboard.
+  // Wait for hydration so we don't flash this state before the pref loads.
+  if (hydrated && !enabled) {
+    return <DisabledState className={className} />;
+  }
 
   const [fetchingIp, setFetchingIp] = useState(false);
   const fetchOwnIp = async () => {
@@ -180,6 +195,53 @@ export function BunqueueDashboard({ className }: { className?: string }) {
           />
         </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+/** Shown when the server is disabled (opt-in). One click enables it: persist
+ *  the pref and tell the backend to spawn the server. */
+function DisabledState({ className }: { className?: string }) {
+  const [enabling, setEnabling] = useState(false);
+  const enable = async () => {
+    setEnabling(true);
+    try {
+      await setBunqueueEnabled(true);
+      await bunqueueNative.setEnabled(true);
+    } catch (e) {
+      toast.error(`Enable failed: ${String(e)}`);
+    } finally {
+      setEnabling(false);
+    }
+  };
+
+  return (
+    <div
+      className={cn(
+        "flex h-full flex-col items-center justify-center gap-4 p-8 text-center",
+        className,
+      )}
+    >
+      <div className="flex size-12 items-center justify-center rounded-xl bg-muted/40">
+        <HugeiconsIcon
+          icon={Database02Icon}
+          size={24}
+          strokeWidth={1.5}
+          className="text-muted-foreground"
+        />
+      </div>
+      <div className="flex flex-col gap-1">
+        <h2 className="text-sm font-semibold">Bunqueue is disabled</h2>
+        <p className="max-w-sm text-[11.5px] leading-relaxed text-muted-foreground">
+          The embedded job-queue server is off by default. Enable it to schedule
+          and run background jobs. It binds to loopback only — see Settings →
+          Bunqueue for details.
+        </p>
+      </div>
+      <Button size="sm" onClick={() => void enable()} disabled={enabling}>
+        {enabling ? <Spinner className="size-3.5" /> : null}
+        Enable server
+      </Button>
     </div>
   );
 }
