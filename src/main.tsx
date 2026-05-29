@@ -9,8 +9,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import ReactDOM from "react-dom/client";
 import App from "./app/App";
+import { ErrorBoundary } from "./app/ErrorBoundary";
+import { installGlobalErrorHandler } from "./app/globalErrorHandler";
 import { initLaunchDir } from "./lib/launchDir";
 import { USE_CUSTOM_WINDOW_CONTROLS } from "./lib/platform";
+
+// Catch async errors and unhandled promise rejections (the render-tree
+// ErrorBoundary below only sees render/lifecycle crashes). Install before the
+// first render so even bootstrap-time rejections are surfaced.
+installGlobalErrorHandler();
 
 if (USE_CUSTOM_WINDOW_CONTROLS) {
   document.documentElement.dataset.chrome = "borderless";
@@ -29,7 +36,9 @@ if (getCurrentWindow().label === "main") {
 await initLaunchDir();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <App />,
+  <ErrorBoundary>
+    <App />
+  </ErrorBoundary>,
 );
 
 // Window starts hidden (per tauri.conf.json) so users never see a transparent

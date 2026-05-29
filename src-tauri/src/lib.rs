@@ -17,6 +17,14 @@ fn get_launch_dir(state: State<'_, LaunchDir>) -> Option<String> {
     state.0.lock().expect("LaunchDir mutex poisoned").take()
 }
 
+// Durable sink for uncaught renderer errors / unhandled promise rejections and
+// React error-boundary crashes. The frontend redacts secrets before sending,
+// so the message is safe to write to the plugin log.
+#[tauri::command]
+fn log_renderer_error(message: String) {
+    tauri_plugin_log::log::error!(target: "renderer", "{message}");
+}
+
 fn parse_launch_dir() -> Option<String> {
     for arg in std::env::args().skip(1) {
         if arg.starts_with('-') {
@@ -317,6 +325,7 @@ pub fn run() {
             workspace::workspace_authorize,
             workspace::workspace_current_dir,
             get_launch_dir,
+            log_renderer_error,
             open_settings_window,
             open_main_window,
             agent::agent_enable_claude_hooks,
