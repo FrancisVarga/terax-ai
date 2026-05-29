@@ -1,6 +1,6 @@
 import { readCache, writeCache } from "@/lib/localCache";
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { CcusageRequest, CcusageResponse } from "./ccusage.worker";
+import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useEffect, useState } from "react";
 
 /**
  * ccusage-faithful token/cost reports — the in-app analog of the `ccusage` CLI
@@ -11,10 +11,11 @@ import type { CcusageRequest, CcusageResponse } from "./ccusage.worker";
  * session tables, and Claude's rolling 5-hour billing blocks with a burn rate.
  * Everything stays on the machine.
  *
- * Loading runs in a Web Worker (`ccusage.worker.ts`) so the scan's IPC and
- * deserialization stay off the render thread, and the last report per cost mode
- * is cached in localStorage (stale-while-revalidate): switching modes paints
- * the cached snapshot instantly while the worker re-syncs in the background.
+ * The last report per cost mode is cached in localStorage
+ * (stale-while-revalidate): switching modes paints the cached snapshot
+ * instantly while a fresh report syncs in the background. The `invoke` runs on
+ * the main thread — Tauri's IPC lives on `window.__TAURI_INTERNALS__`, which
+ * Web Workers (no `window`) can't reach — and the heavy work is in Rust anyway.
  */
 
 /** localStorage cache identity. Bump VERSION when `CcusageReport` shape changes. */
@@ -131,14 +132,25 @@ export type UseCcusage = {
   refresh: () => void;
 };
 
+/** Aggregate on-disk agent sessions via the Rust `ccusage_collect` command. */
+async function computeReport(mode: CostMode): Promise<CcusageReport> {
+  const now = new Date();
+  return invoke<CcusageReport>("ccusage_collect", {
+    nowMs: now.getTime(),
+    // getTimezoneOffset() is minutes behind UTC (positive west of UTC); negate
+    // to get the offset to add to a UTC instant to reach local time.
+    tzOffsetMs: -now.getTimezoneOffset() * 60_000,
+    costMode: mode,
+  });
+}
+
 /**
  * Loads ccusage reports.
  *
- * Strategy: a single long-lived Web Worker computes the report off the render
- * thread; the last report per cost mode is cached in localStorage. On mount and
- * whenever the cost mode changes we seed state from that mode's cache (instant
- * paint when present) and kick off a background sync. `refresh` re-syncs on
- * demand; worker results are written back to the cache for the next launch.
+ * Strategy: the last report per cost mode is cached in localStorage. On mount
+ * and whenever the cost mode changes we seed state from that mode's cache
+ * (instant paint when present) and kick off a background sync. `refresh`
+ * re-syncs on demand; results are written back to the cache for the next launch.
  */
 export function useCcusage(): UseCcusage {
   const [costMode, setCostMode] = useState<CostMode>("auto");
@@ -147,25 +159,14 @@ export function useCcusage(): UseCcusage {
     () => seed?.value ?? emptyReport("auto"),
   );
   // Only block with a spinner when there's no cached report to paint.
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!seed);
   const [error, setError] = useState<string | null>(null);
   const [syncedAt, setSyncedAt] = useState<number | null>(
     seed?.savedAt ?? null,
   );
 
-  const workerRef = useRef<Worker | null>(null);
-
-  const getWorker = useCallback((): Worker => {
-    if (!workerRef.current) {
-      workerRef.current = new Worker(
-        new URL("./ccusage.worker.ts", import.meta.url),
-        { type: "module" },
-      );
-    }
-    return workerRef.current;
-  }, []);
-
   const refresh = useCallback(() => {
+    let cancelled = false;
     setError(null);
     // Seed instantly from this mode's cache so a mode switch isn't a blank wait.
     const cached = readCache<CcusageReport>(cacheKey(costMode), CACHE_VERSION);
@@ -177,43 +178,26 @@ export function useCcusage(): UseCcusage {
       setLoading(true);
     }
 
-    const worker = getWorker();
-    const now = new Date();
-    worker.onmessage = (e: MessageEvent<CcusageResponse>) => {
-      const res = e.data;
-      if (res.ok) {
-        setData(res.data);
+    computeReport(costMode)
+      .then((result) => {
+        if (cancelled) return;
+        setData(result);
         const at = Date.now();
         setSyncedAt(at);
-        writeCache(cacheKey(res.data.costMode), CACHE_VERSION, res.data, at);
-      } else {
-        setError(res.error);
-      }
-      setLoading(false);
-    };
-    worker.onerror = (e) => {
-      setError(e.message || "ccusage worker failed");
-      setLoading(false);
-      worker.terminate();
-      workerRef.current = null;
-    };
-    const req: CcusageRequest = {
-      nowMs: now.getTime(),
-      // getTimezoneOffset() is minutes behind UTC (positive west of UTC); negate
-      // to get the offset to add to a UTC instant to reach local time.
-      tzOffsetMs: -now.getTimezoneOffset() * 60_000,
-      costMode,
-    };
-    worker.postMessage(req);
-  }, [costMode, getWorker]);
-
-  useEffect(() => {
-    refresh();
+        writeCache(cacheKey(result.costMode), CACHE_VERSION, result, at);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
     return () => {
-      workerRef.current?.terminate();
-      workerRef.current = null;
+      cancelled = true;
     };
-  }, [refresh]);
+  }, [costMode]);
+
+  useEffect(() => refresh(), [refresh]);
 
   return { data, loading, error, costMode, syncedAt, setCostMode, refresh };
 }

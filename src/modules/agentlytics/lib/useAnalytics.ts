@@ -1,9 +1,6 @@
 import { readCache, writeCache } from "@/lib/localCache";
-import { useCallback, useEffect, useRef, useState } from "react";
-import type {
-  AnalyticsRequest,
-  AnalyticsResponse,
-} from "./analytics.worker";
+import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useEffect, useState } from "react";
 
 /**
  * Local-first AI usage analytics — the in-app analog of agentlytics
@@ -15,10 +12,11 @@ import type {
  * counts are real where the source persists them and estimated from text
  * length (≈4 chars/token) otherwise; everything stays on the machine.
  *
- * Loading runs in a Web Worker (`analytics.worker.ts`) so the scan's IPC and
- * deserialization stay off the render thread, and the last result is cached in
- * localStorage: on mount we paint the cached snapshot instantly (no spinner)
- * and the worker re-syncs in the background (stale-while-revalidate).
+ * The last result is cached in localStorage (stale-while-revalidate): on mount
+ * we paint the cached snapshot instantly (no spinner when present) and re-sync
+ * in the background. The `invoke` itself must run on the main thread — Tauri's
+ * IPC lives on `window.__TAURI_INTERNALS__`, which Web Workers (no `window`)
+ * can't reach — so the heavy lifting stays in Rust, off the JS thread anyway.
  */
 
 /** localStorage cache identity. Bump VERSION when `Analytics` shape changes. */
@@ -109,78 +107,59 @@ export type UseAnalytics = {
   refresh: () => void;
 };
 
+/** Aggregate on-disk agent sessions via the Rust `agentscan_collect` command. */
+async function computeAnalytics(): Promise<Analytics> {
+  const now = new Date();
+  return invoke<Analytics>("agentscan_collect", {
+    nowMs: now.getTime(),
+    // getTimezoneOffset() is minutes *behind* UTC (positive west of UTC), so
+    // negate to get the offset to add to a UTC instant to reach local time.
+    tzOffsetMs: -now.getTimezoneOffset() * 60_000,
+  });
+}
+
 /**
  * Loads and aggregates local AI session analytics.
  *
- * Strategy: a single long-lived Web Worker performs the scan off the render
- * thread; the last good result is cached in localStorage. On mount we seed
+ * Strategy: the last good result is cached in localStorage. On mount we seed
  * state from the cache (instant paint, no spinner when present) and kick off a
- * background sync. `refresh` re-syncs on demand. Worker results are written
- * back to the cache for the next launch.
+ * background sync; `refresh` re-syncs on demand. Results are written back to
+ * the cache for the next launch.
  */
 export function useAnalytics(): UseAnalytics {
   const seed = readCache<Analytics>(CACHE_KEY, CACHE_VERSION);
   const [data, setData] = useState<Analytics>(seed?.value ?? emptyAnalytics());
   // Only show the blocking spinner when we have nothing cached to paint.
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!seed);
   const [error, setError] = useState<string | null>(null);
   const [syncedAt, setSyncedAt] = useState<number | null>(
     seed?.savedAt ?? null,
   );
 
-  const workerRef = useRef<Worker | null>(null);
-
-  // One worker for the hook's lifetime; recreated only if it ever errors out.
-  const getWorker = useCallback((): Worker => {
-    if (!workerRef.current) {
-      workerRef.current = new Worker(
-        new URL("./analytics.worker.ts", import.meta.url),
-        { type: "module" },
-      );
-    }
-    return workerRef.current;
-  }, []);
-
   const refresh = useCallback(() => {
+    let cancelled = false;
     setLoading(true);
     setError(null);
-    const worker = getWorker();
-    const now = new Date();
-    worker.onmessage = (e: MessageEvent<AnalyticsResponse>) => {
-      const res = e.data;
-      if (res.ok) {
-        setData(res.data);
+    computeAnalytics()
+      .then((result) => {
+        if (cancelled) return;
+        setData(result);
         const at = Date.now();
         setSyncedAt(at);
-        writeCache(CACHE_KEY, CACHE_VERSION, res.data, at);
-      } else {
-        setError(res.error);
-      }
-      setLoading(false);
-    };
-    worker.onerror = (e) => {
-      setError(e.message || "analytics worker failed");
-      setLoading(false);
-      // Drop the failed worker so the next refresh spins up a fresh one.
-      worker.terminate();
-      workerRef.current = null;
-    };
-    const req: AnalyticsRequest = {
-      nowMs: now.getTime(),
-      // getTimezoneOffset() is minutes *behind* UTC (positive west of UTC), so
-      // negate to get the offset to add to a UTC instant to reach local time.
-      tzOffsetMs: -now.getTimezoneOffset() * 60_000,
-    };
-    worker.postMessage(req);
-  }, [getWorker]);
-
-  useEffect(() => {
-    refresh();
+        writeCache(CACHE_KEY, CACHE_VERSION, result, at);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
     return () => {
-      workerRef.current?.terminate();
-      workerRef.current = null;
+      cancelled = true;
     };
-  }, [refresh]);
+  }, []);
+
+  useEffect(() => refresh(), [refresh]);
 
   return { data, loading, error, syncedAt, refresh };
 }
