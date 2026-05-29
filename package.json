@@ -12,8 +12,10 @@
     "preview": "vite preview",
     "pretauri": "node scripts/build-sidecars.mjs && node scripts/fetch-sidecar-binaries.mjs",
     "tauri": "tauri",
+    "tauri:dev": "tauri dev",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "seed:otel": "node scripts/otel-seed.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.71",

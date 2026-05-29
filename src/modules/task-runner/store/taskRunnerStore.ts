@@ -19,6 +19,10 @@ type TaskRunnerState = {
   run: (manifest: PackageManifest, script: TaskScript) => Promise<void>;
   stop: (id: string) => Promise<void>;
   remove: (id: string) => void;
+  /** Empty a task's displayed output. The backend ring buffer + read cursor are
+   *  left intact, so live polling resumes from where it was — only the cache of
+   *  already-shown bytes is dropped. */
+  clearOutput: (id: string) => void;
   select: (id: string | null) => void;
   /** Re-key an existing run+script pair: returns its id if already running. */
   findRunning: (dir: string, script: string) => RunningTask | undefined;
@@ -151,6 +155,13 @@ export const useTaskRunnerStore = create<TaskRunnerState>((set, get) => {
         };
       });
     },
+
+    clearOutput: (id) =>
+      set((s) => {
+        const cur = s.tasks[id];
+        if (!cur) return s;
+        return { tasks: { ...s.tasks, [id]: { ...cur, output: "" } } };
+      }),
 
     select: (id) => set({ selectedId: id }),
   };

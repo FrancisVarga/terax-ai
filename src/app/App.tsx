@@ -92,6 +92,8 @@ import {
 } from "@/modules/shortcuts";
 import { DockerDetailStack, DockerPanel } from "@/modules/docker";
 import { AnalyticsStack } from "@/modules/agentlytics";
+import { OtelStack } from "@/modules/otel";
+import { DataGridMasterStack } from "@/modules/data-grid-master";
 import { CcusageStack } from "@/modules/ccusage";
 import {
   AddProjectDialog,
@@ -110,7 +112,7 @@ import {
   SessionHistoryPanel,
   type RightSidebarViewId,
 } from "@/modules/right-sidebar";
-import { TaskRunnerPanel } from "@/modules/task-runner";
+import { TaskRunnerPanel, useTaskRunnerStore } from "@/modules/task-runner";
 import {
   SourceControlPanel,
   useSourceControl,
@@ -302,6 +304,8 @@ export default function App() {
     openS3Tab,
     openBunqueueTab,
     openAnalyticsTab,
+    openOtelTab,
+    openDataGridMasterTab,
     openCcusageTab,
     openProjectDetailTab,
     openDockerDetailTab,
@@ -502,6 +506,20 @@ export default function App() {
         return;
       }
       persistRightSidebarView(view);
+    },
+    [persistRightSidebarView, rightSidebarView],
+  );
+  // From the global background-tasks indicator: always reveal the Tasks panel
+  // (expand the right sidebar if collapsed, switch its view) and select the
+  // task so its output is shown. Unlike `selectRightSidebarView` this never
+  // toggles closed — it's an explicit "show me this task" action.
+  const openTaskInSidebar = useCallback(
+    (id: string) => {
+      const panel = rightSidebarRef.current;
+      if (panel && panel.getSize().asPercentage <= 0)
+        panel.resize(`${rightSidebarWidthRef.current}px`);
+      if (rightSidebarView !== "tasks") persistRightSidebarView("tasks");
+      useTaskRunnerStore.getState().select(id);
     },
     [persistRightSidebarView, rightSidebarView],
   );
@@ -739,6 +757,8 @@ export default function App() {
   const isBunqueueTab = activeTab?.kind === "bunqueue";
   const isDockerTab = activeTab?.kind === "docker-detail";
   const isAnalyticsTab = activeTab?.kind === "agentlytics";
+  const isOtelTab = activeTab?.kind === "otel";
+  const isDataGridMasterTab = activeTab?.kind === "data-grid-master";
   const isCcusageTab = activeTab?.kind === "ccusage";
   const isProjectsTab = activeTab?.kind === "projects";
   const isProjectDetailTab = activeTab?.kind === "project-detail";
@@ -2086,6 +2106,24 @@ export default function App() {
       <div
         className={cn(
           "absolute inset-0",
+          !isOtelTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isOtelTab}
+      >
+        <OtelStack tabs={tabs} activeId={activeId} />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0",
+          !isDataGridMasterTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isDataGridMasterTab}
+      >
+        <DataGridMasterStack tabs={tabs} activeId={activeId} />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0",
           !isCcusageTab && "invisible pointer-events-none",
         )}
         aria-hidden={!isCcusageTab}
@@ -2135,6 +2173,8 @@ export default function App() {
             onNewGitGraph={openGitGraphFromContext}
             onOpenBunqueue={() => openBunqueueTab()}
             onOpenAnalytics={() => openAnalyticsTab()}
+            onOpenOtel={() => openOtelTab()}
+            onOpenDataGridMaster={() => openDataGridMasterTab()}
             onOpenCcusage={() => openCcusageTab()}
             onClose={handleClose}
             onPin={pinTab}
@@ -2308,6 +2348,7 @@ export default function App() {
             privateActive={
               activeTab?.kind === "terminal" && activeTab.private === true
             }
+            onOpenTask={openTaskInSidebar}
           />
 
           <AgentNotificationsBridge

@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/tooltip";
 import { IncognitoIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { BackgroundTasksIndicator } from "@/modules/task-runner";
 import { CwdBreadcrumb } from "./CwdBreadcrumb";
 import { WorkspaceEnvSelector } from "./WorkspaceEnvSelector";
 import type { WorkspaceEnv } from "@/modules/workspace";
@@ -25,6 +26,8 @@ type Props = {
   /** Only rendered when the AI panel is open and a key is loaded. */
   hasComposer: boolean;
   privateActive: boolean;
+  /** Focus the Tasks panel and select a task (from the bg-tasks indicator). */
+  onOpenTask: (id: string) => void;
 };
 
 export function StatusBar({
@@ -36,6 +39,7 @@ export function StatusBar({
   onOpenMini,
   hasComposer,
   privateActive,
+  onOpenTask,
 }: Props) {
   const panelOpen = useChatStore((s) => s.panelOpen);
   const openPanel = useChatStore((s) => s.openPanel);
@@ -61,6 +65,7 @@ export function StatusBar({
         ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
+        <BackgroundTasksIndicator onOpenTask={onOpenTask} />
         <AgentStatusPill onClick={onOpenMini} />
         {panelOpen && hasComposer ? (
           <AiStatusBarControls />

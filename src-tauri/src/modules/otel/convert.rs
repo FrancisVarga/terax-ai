@@ -37,6 +37,10 @@ fn any_value_to_json(v: &AnyValue) -> Value {
         }
         Some(AnyVal::KvlistValue(kv)) => kv_to_json(&kv.values),
         Some(AnyVal::BytesValue(b)) => Value::String(hex(b)),
+        // String-table interning (profiling signal): the actual string lives in
+        // a separate string table we don't resolve here. Surface the index so
+        // the value isn't silently dropped.
+        Some(AnyVal::StringValueStrindex(i)) => json!({ "stringIndex": i }),
         None => Value::Null,
     }
 }
@@ -397,15 +401,14 @@ mod tests {
     }
 
     #[test]
-    fn base64_trace_id_also_decodes() {
-        // Some SDKs historically sent ids as base64 instead of hex. The
-        // with-serde codec tolerates it; verify the bytes still re-hex cleanly.
-        // base64("[0x5b,0x8e,...]") for the same 16 bytes as above.
-        let b64_json = TRACE_JSON.replace(
+    fn uppercase_hex_trace_id_normalizes_to_lowercase() {
+        // The OTLP spec says trace/span ids are case-insensitive hex. We always
+        // store the canonical lowercase form, whatever case the SDK sent.
+        let upper_json = TRACE_JSON.replace(
             "\"5b8efff798038103d269b633813fc60c\"",
-            "\"W47/95gDgQPSabYzgT/GDA==\"",
+            "\"5B8EFFF798038103D269B633813FC60C\"",
         );
-        let req: ExportTraceServiceRequest = serde_json::from_str(&b64_json).unwrap();
+        let req: ExportTraceServiceRequest = serde_json::from_str(&upper_json).unwrap();
         let rows = spans_from_resource(&req.resource_spans, 0);
         assert_eq!(rows[0].trace_id, "5b8efff798038103d269b633813fc60c");
     }

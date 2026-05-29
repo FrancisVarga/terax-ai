@@ -19,11 +19,13 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 
 use crate::modules::sync::MutexExt;
 
 use super::model::{
-    LogQuery, LogRow, MetricRow, OtelCounts, SpanRow, TraceQuery, TraceSummary,
+    AttrGroup, DbStatement, LogQuery, LogRow, MetricRow, OtelCounts, ServiceEdge, ServiceMap,
+    ServiceNode, SpanRow, TraceQuery, TraceSort, TraceSummary,
 };
 
 /// Reclaim is triggered once the DB exceeds this size, then rows are dropped
@@ -215,8 +217,13 @@ impl OtelStore {
     pub fn traces(&self, q: &TraceQuery) -> Vec<TraceSummary> {
         let conn = self.conn.lock_safe();
         let limit = q.limit.unwrap_or(200).clamp(1, 2000);
-        // Aggregate per trace. The root span is the one with an empty parent; if
-        // none exists (partial trace), fall back to the earliest-starting span.
+        // Aggregate per trace, then pick exactly one representative root span.
+        // `root` uses ROW_NUMBER to choose a single span per trace, preferring a
+        // true root (empty parent) and breaking ties on earliest start. Without
+        // the rn=1 filter, spans that tie on MIN(start_nano) would each match and
+        // fan the aggregate row out into duplicates.
+        // `attr_hit` in agg marks a trace where ANY span's attributes match, so
+        // the attribute filter is a whole-trace EXISTS, not a root-row test.
         let mut sql = String::from(
             "WITH agg AS (\
                SELECT trace_id, \
@@ -224,15 +231,17 @@ impl OtelStore {
                       MAX(end_nano) - MIN(start_nano) AS duration_nano, \
                       COUNT(*) AS span_count, \
                       MAX(received_ms) AS received_ms, \
-                      MAX(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS has_error \
+                      MAX(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS has_error, \
+                      MAX(CASE WHEN attributes LIKE :attr THEN 1 ELSE 0 END) AS attr_hit \
                FROM spans GROUP BY trace_id), \
-             root AS (\
-               SELECT s.trace_id, s.name AS root_name, s.service AS root_service \
-               FROM spans s JOIN (\
-                 SELECT trace_id, MIN(start_nano) AS ms, \
-                        MIN(CASE WHEN parent_span_id = '' THEN 0 ELSE 1 END) AS has_root \
-                 FROM spans GROUP BY trace_id) pick \
-               ON s.trace_id = pick.trace_id AND s.start_nano = pick.ms) \
+             ranked AS (\
+               SELECT trace_id, name AS root_name, service AS root_service, \
+                      ROW_NUMBER() OVER (\
+                        PARTITION BY trace_id \
+                        ORDER BY CASE WHEN parent_span_id = '' THEN 0 ELSE 1 END, start_nano, id\
+                      ) AS rn \
+               FROM spans), \
+             root AS (SELECT trace_id, root_name, root_service FROM ranked WHERE rn = 1) \
              SELECT agg.trace_id, COALESCE(root.root_name, ''), COALESCE(root.root_service, ''), \
                     agg.start_nano, agg.duration_nano, agg.span_count, agg.has_error, agg.received_ms \
              FROM agg LEFT JOIN root ON agg.trace_id = root.trace_id",
@@ -247,19 +256,47 @@ impl OtelStore {
         if q.search.is_some() {
             clauses.push("root.root_name LIKE :search".into());
         }
+        if q.min_duration_nano.is_some() {
+            clauses.push("agg.duration_nano >= :mindur".into());
+        }
+        if q.since_ms.is_some() {
+            clauses.push("agg.received_ms >= :since".into());
+        }
+        if q.attr_search.is_some() {
+            clauses.push("agg.attr_hit = 1".into());
+        }
         if !clauses.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&clauses.join(" AND "));
         }
-        sql.push_str(" ORDER BY agg.start_nano DESC LIMIT :limit");
+        let order = match q.sort.unwrap_or_default() {
+            TraceSort::Recent => "agg.start_nano DESC",
+            TraceSort::Slowest => "agg.duration_nano DESC",
+        };
+        sql.push_str(&format!(" ORDER BY {order} LIMIT :limit"));
 
+        // Owned locals so the &dyn ToSql references in `named` outlive query_map.
         let like = q.search.as_ref().map(|s| format!("%{s}%"));
+        let attr_like = q.attr_search.as_ref().map(|s| format!("%{s}%"));
+        let min_dur = q.min_duration_nano.map(|d| d as i64);
+        // `:attr` is always bound (the agg CTE references it even when the filter
+        // is off); a no-op default of '%' matches everything.
+        let attr_bind = attr_like.clone().unwrap_or_else(|| "%".to_string());
+        let mut named: Vec<(&str, &dyn rusqlite::ToSql)> =
+            vec![(":limit", &limit), (":attr", &attr_bind)];
+        if let Some(svc) = &q.service {
+            named.push((":service", svc));
+        }
+        if let Some(s) = &like {
+            named.push((":search", s));
+        }
+        if let Some(d) = &min_dur {
+            named.push((":mindur", d));
+        }
+        if let Some(s) = &q.since_ms {
+            named.push((":since", s));
+        }
         let mut stmt = conn.prepare(&sql).expect("prepare traces");
-        let named: Vec<(&str, &dyn rusqlite::ToSql)> = build_named(&[
-            (":service", &q.service),
-            (":search", &like),
-            (":limit", &Some(limit)),
-        ]);
         let rows = stmt
             .query_map(named.as_slice(), |r| {
                 Ok(TraceSummary {
@@ -314,21 +351,41 @@ impl OtelStore {
         if q.trace_id.is_some() {
             clauses.push("trace_id = :trace".into());
         }
+        if q.since_ms.is_some() {
+            clauses.push("received_ms >= :since".into());
+        }
+        if q.attr_search.is_some() {
+            clauses.push("attributes LIKE :attr".into());
+        }
         if !clauses.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&clauses.join(" AND "));
         }
         sql.push_str(" ORDER BY time_nano DESC LIMIT :limit");
 
+        // Owned locals so the &dyn ToSql references in `named` outlive query_map.
         let like = q.search.as_ref().map(|s| format!("%{s}%"));
+        let attr_like = q.attr_search.as_ref().map(|s| format!("%{s}%"));
+        let mut named: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":limit", &limit)];
+        if let Some(svc) = &q.service {
+            named.push((":service", svc));
+        }
+        if let Some(sev) = &q.min_severity {
+            named.push((":minsev", sev));
+        }
+        if let Some(s) = &like {
+            named.push((":search", s));
+        }
+        if let Some(t) = &q.trace_id {
+            named.push((":trace", t));
+        }
+        if let Some(s) = &q.since_ms {
+            named.push((":since", s));
+        }
+        if let Some(a) = &attr_like {
+            named.push((":attr", a));
+        }
         let mut stmt = conn.prepare(&sql).expect("prepare logs");
-        let named: Vec<(&str, &dyn rusqlite::ToSql)> = build_named(&[
-            (":service", &q.service),
-            (":minsev", &q.min_severity),
-            (":search", &like),
-            (":trace", &q.trace_id),
-            (":limit", &Some(limit)),
-        ]);
         let rows = stmt
             .query_map(named.as_slice(), map_log_row)
             .expect("query logs");
@@ -377,6 +434,277 @@ impl OtelStore {
         rows
     }
 
+    /// Service dependency graph. Edges are cross-service parent/child span
+    /// links (a span whose service differs from its parent's); nodes carry each
+    /// service's own span + error totals. p50/p95 per edge are computed in Rust
+    /// since SQLite has no percentile aggregate.
+    pub fn service_map(&self, since_ms: Option<i64>) -> ServiceMap {
+        let conn = self.conn.lock_safe();
+        let since = since_ms.unwrap_or(0);
+
+        // Nodes: per-service span + error counts.
+        let nodes = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT service, COUNT(*), SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) \
+                     FROM spans WHERE received_ms >= ?1 GROUP BY service ORDER BY service",
+                )
+                .expect("prepare service nodes");
+            stmt.query_map(params![since], |r| {
+                Ok(ServiceNode {
+                    service: r.get(0)?,
+                    spans: r.get(1)?,
+                    errors: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                })
+            })
+            .expect("query service nodes")
+            .filter_map(Result::ok)
+            .collect()
+        };
+
+        // Edge rows: one per cross-service call, with the child duration + error
+        // flag. Aggregated into edges (with percentiles) below.
+        let mut stmt = conn
+            .prepare(
+                "SELECT p.service AS from_svc, c.service AS to_svc, c.duration_nano, c.status_code \
+                 FROM spans c JOIN spans p \
+                   ON c.parent_span_id = p.span_id AND c.trace_id = p.trace_id \
+                 WHERE c.service <> p.service AND c.received_ms >= ?1",
+            )
+            .expect("prepare service edges");
+        let raw = stmt
+            .query_map(params![since], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)? as u64,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .expect("query service edges")
+            .filter_map(Result::ok);
+
+        // Group by (from, to): collect durations + error count.
+        let mut groups: std::collections::HashMap<(String, String), (Vec<u64>, i64)> =
+            std::collections::HashMap::new();
+        for (from, to, dur, code) in raw {
+            let e = groups.entry((from, to)).or_default();
+            e.0.push(dur);
+            if code == 2 {
+                e.1 += 1;
+            }
+        }
+        let mut edges: Vec<ServiceEdge> = groups
+            .into_iter()
+            .map(|((from, to), (mut durs, errors))| {
+                durs.sort_unstable();
+                ServiceEdge {
+                    from,
+                    to,
+                    calls: durs.len() as i64,
+                    errors,
+                    p50_nano: percentile(&durs, 0.50),
+                    p95_nano: percentile(&durs, 0.95),
+                }
+            })
+            .collect();
+        edges.sort_by(|a, b| b.calls.cmp(&a.calls));
+
+        ServiceMap { nodes, edges }
+    }
+
+    /// Database statement analytics: aggregate `db.system` spans by statement.
+    /// Durations are pulled per group and reduced in Rust (avg/p95/max/total).
+    pub fn db_queries(&self, since_ms: Option<i64>) -> Vec<DbStatement> {
+        let conn = self.conn.lock_safe();
+        let since = since_ms.unwrap_or(0);
+        // A DB span is one whose attributes carry `db.system`. Group key is the
+        // `db.statement` value when present, else the span name. We extract both
+        // via json_extract (rusqlite bundles JSON1).
+        let mut stmt = conn
+            .prepare(
+                "SELECT \
+                   COALESCE(NULLIF(json_extract(attributes, '$.\"db.statement\"'), ''), name) AS stmt, \
+                   COALESCE(json_extract(attributes, '$.\"db.system\"'), '') AS system, \
+                   service, duration_nano, status_code \
+                 FROM spans \
+                 WHERE json_extract(attributes, '$.\"db.system\"') IS NOT NULL \
+                   AND received_ms >= ?1",
+            )
+            .expect("prepare db_queries");
+        let raw = stmt
+            .query_map(params![since], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)? as u64,
+                    r.get::<_, i64>(4)?,
+                ))
+            })
+            .expect("query db_queries")
+            .filter_map(Result::ok);
+
+        // Group by (statement, system, service).
+        #[derive(Default)]
+        struct Acc {
+            durs: Vec<u64>,
+            errors: i64,
+        }
+        let mut groups: std::collections::HashMap<(String, String, String), Acc> =
+            std::collections::HashMap::new();
+        for (stmt_text, system, service, dur, code) in raw {
+            let acc = groups.entry((stmt_text, system, service)).or_default();
+            acc.durs.push(dur);
+            if code == 2 {
+                acc.errors += 1;
+            }
+        }
+        let mut out: Vec<DbStatement> = groups
+            .into_iter()
+            .map(|((statement, system, service), mut acc)| {
+                acc.durs.sort_unstable();
+                let total: u64 = acc.durs.iter().sum();
+                let calls = acc.durs.len() as i64;
+                DbStatement {
+                    statement,
+                    system,
+                    service,
+                    calls,
+                    errors: acc.errors,
+                    avg_nano: if calls > 0 { total / calls as u64 } else { 0 },
+                    p95_nano: percentile(&acc.durs, 0.95),
+                    max_nano: acc.durs.last().copied().unwrap_or(0),
+                    total_nano: total,
+                }
+            })
+            .collect();
+        // Most total time first - the queries worth optimizing.
+        out.sort_by(|a, b| b.total_nano.cmp(&a.total_nano));
+        out
+    }
+
+    /// Distinct attribute keys seen across span attributes, for the breakdown
+    /// dimension picker. Uses JSON1 `json_each` over each span's attributes
+    /// object. Bounded to the most common keys.
+    pub fn attribute_keys(&self) -> Vec<String> {
+        let conn = self.conn.lock_safe();
+        let mut stmt = conn
+            .prepare(
+                "SELECT key, COUNT(*) AS n FROM spans, json_each(spans.attributes) \
+                 GROUP BY key ORDER BY n DESC LIMIT 50",
+            )
+            .expect("prepare attribute_keys");
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .expect("query attribute_keys")
+            .filter_map(Result::ok)
+            .collect()
+    }
+
+    /// Group spans by the value of attribute `key` (e.g. `tenant.id`, `user.id`)
+    /// into analytics rows: span/trace/error counts, latency percentiles, last
+    /// activity, and top operation names. Powers the user/tenant dashboard.
+    pub fn attr_breakdown(&self, key: &str, since_ms: Option<i64>, limit: i64) -> Vec<AttrGroup> {
+        let conn = self.conn.lock_safe();
+        let since = since_ms.unwrap_or(0);
+        let limit = limit.clamp(1, 500);
+        // Pull the per-span value for `key` plus the fields we aggregate. The
+        // JSON path is parameterized via printf since json_extract needs a
+        // literal-ish path; `key` is constrained by the picker, but we still
+        // guard it to attribute-name characters to avoid path injection.
+        let safe_key: String = key
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+            .collect();
+        if safe_key.is_empty() {
+            return Vec::new();
+        }
+        let path = format!("$.\"{safe_key}\"");
+        let mut stmt = conn
+            .prepare(
+                "SELECT json_extract(attributes, ?1) AS v, trace_id, name, duration_nano, \
+                 status_code, received_ms \
+                 FROM spans \
+                 WHERE json_extract(attributes, ?1) IS NOT NULL AND received_ms >= ?2",
+            )
+            .expect("prepare attr_breakdown");
+        let raw = stmt
+            .query_map(params![path, since], |r| {
+                Ok((
+                    // value may be string or number; normalize to string.
+                    match r.get_ref(0)? {
+                        rusqlite::types::ValueRef::Text(t) => {
+                            String::from_utf8_lossy(t).into_owned()
+                        }
+                        rusqlite::types::ValueRef::Integer(i) => i.to_string(),
+                        rusqlite::types::ValueRef::Real(f) => f.to_string(),
+                        _ => String::new(),
+                    },
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)? as u64,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })
+            .expect("query attr_breakdown")
+            .filter_map(Result::ok);
+
+        struct Acc {
+            durs: Vec<u64>,
+            traces: std::collections::HashSet<String>,
+            errors: i64,
+            last_ms: i64,
+            ops: std::collections::HashMap<String, i64>,
+        }
+        impl Default for Acc {
+            fn default() -> Self {
+                Acc {
+                    durs: Vec::new(),
+                    traces: std::collections::HashSet::new(),
+                    errors: 0,
+                    last_ms: 0,
+                    ops: std::collections::HashMap::new(),
+                }
+            }
+        }
+        let mut groups: std::collections::HashMap<String, Acc> = std::collections::HashMap::new();
+        for (value, trace_id, name, dur, code, recv) in raw {
+            let a = groups.entry(value).or_default();
+            a.durs.push(dur);
+            a.traces.insert(trace_id);
+            if code == 2 {
+                a.errors += 1;
+            }
+            a.last_ms = a.last_ms.max(recv);
+            *a.ops.entry(name).or_insert(0) += 1;
+        }
+        let mut out: Vec<AttrGroup> = groups
+            .into_iter()
+            .map(|(value, mut a)| {
+                a.durs.sort_unstable();
+                let spans = a.durs.len() as i64;
+                let total: u64 = a.durs.iter().sum();
+                let mut ops: Vec<(String, i64)> = a.ops.into_iter().collect();
+                ops.sort_by(|x, y| y.1.cmp(&x.1));
+                AttrGroup {
+                    value,
+                    spans,
+                    traces: a.traces.len() as i64,
+                    errors: a.errors,
+                    avg_nano: if spans > 0 { total / spans as u64 } else { 0 },
+                    p95_nano: percentile(&a.durs, 0.95),
+                    last_seen_ms: a.last_ms,
+                    top_ops: ops.into_iter().take(3).map(|(n, _)| n).collect(),
+                }
+            })
+            .collect();
+        // Busiest groups first.
+        out.sort_by(|a, b| b.spans.cmp(&a.spans));
+        out.truncate(limit as usize);
+        out
+    }
+
     /// Drop every row from every table (the dashboard "clear" action).
     pub fn clear(&self) {
         let conn = self.conn.lock_safe();
@@ -385,6 +713,171 @@ impl OtelStore {
              PRAGMA incremental_vacuum;",
         );
     }
+
+    /// Run a user-supplied read-only query against the telemetry store and
+    /// return its columns + rows. The Query page surfaces this; it is guarded to
+    /// SELECT-only (see `is_read_only_sql`) so the UI can never mutate or drop
+    /// the captured telemetry.
+    ///
+    /// `limit`/`offset` window the result for infinite-scroll paging: the user's
+    /// statement is wrapped as a subquery (`SELECT * FROM (<sql>) LIMIT ?cap
+    /// OFFSET ?off`) so the outer window applies regardless of the user's own
+    /// ORDER BY/LIMIT. One extra row beyond `cap` is fetched to detect whether
+    /// more rows exist (`truncated`), which the infinite datasource uses to set
+    /// the last-row boundary. Values are serialized to JSON so the frontend
+    /// renders any column type uniformly.
+    pub fn query(&self, sql: &str, limit: i64, offset: i64) -> Result<QueryResult, String> {
+        if !is_read_only_sql(sql) {
+            return Err(
+                "Only read-only SELECT queries are allowed. Statements that modify or \
+                 inspect the database (INSERT/UPDATE/DELETE/DROP/ALTER/PRAGMA/ATTACH/…) \
+                 are blocked."
+                    .to_string(),
+            );
+        }
+        let cap = limit.clamp(1, 10_000);
+        let off = offset.max(0);
+        // Strip a trailing `;` so the statement nests cleanly as a subquery.
+        let inner = strip_sql_comments(sql);
+        let inner = inner.trim().strip_suffix(';').unwrap_or(inner.trim());
+        // Fetch one extra row to learn whether more pages exist.
+        let paged = format!("SELECT * FROM ({inner}) LIMIT {} OFFSET {off}", cap + 1);
+
+        let conn = self.conn.lock_safe();
+        let mut stmt = conn.prepare(&paged).map_err(|e| e.to_string())?;
+        let col_count = stmt.column_count();
+        let columns: Vec<String> =
+            stmt.column_names().iter().map(|s| s.to_string()).collect();
+
+        let mut rows_out: Vec<Vec<serde_json::Value>> = Vec::new();
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        let mut truncated = false;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            if rows_out.len() as i64 >= cap {
+                // The (cap+1)-th row exists → there is at least one more page.
+                truncated = true;
+                break;
+            }
+            let mut out_row = Vec::with_capacity(col_count);
+            for i in 0..col_count {
+                out_row.push(sqlite_value_to_json(row, i));
+            }
+            rows_out.push(out_row);
+        }
+
+        Ok(QueryResult {
+            columns,
+            rows: rows_out,
+            truncated,
+        })
+    }
+}
+
+/// Result of a user query: column headers + JSON-typed cells, plus whether the
+/// row cap clipped the result.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<serde_json::Value>>,
+    pub truncated: bool,
+}
+
+/// Convert a SQLite cell to a JSON value for transport to the frontend.
+fn sqlite_value_to_json(row: &rusqlite::Row, idx: usize) -> serde_json::Value {
+    use rusqlite::types::ValueRef;
+    match row.get_ref(idx) {
+        Ok(ValueRef::Null) => serde_json::Value::Null,
+        Ok(ValueRef::Integer(i)) => serde_json::Value::from(i),
+        Ok(ValueRef::Real(f)) => serde_json::Value::from(f),
+        Ok(ValueRef::Text(t)) => {
+            serde_json::Value::from(String::from_utf8_lossy(t).into_owned())
+        }
+        Ok(ValueRef::Blob(b)) => serde_json::Value::from(format!("<{} bytes>", b.len())),
+        Err(_) => serde_json::Value::Null,
+    }
+}
+
+/// Whether `sql` is a single read-only SELECT/WITH statement. Conservative: it
+/// strips comments, requires the statement to begin with SELECT or WITH, rejects
+/// any statement-terminating `;` followed by more SQL (no statement batching),
+/// and bans write/DDL/side-effecting keywords as whole words anywhere.
+fn is_read_only_sql(sql: &str) -> bool {
+    let stripped = strip_sql_comments(sql);
+    let trimmed = stripped.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Disallow batching: a `;` may only appear as an optional trailing terminator.
+    let core = trimmed.strip_suffix(';').unwrap_or(trimmed);
+    if core.contains(';') {
+        return false;
+    }
+    let lower = core.to_ascii_lowercase();
+    let starts_ok = lower.starts_with("select") || lower.starts_with("with");
+    if !starts_ok {
+        return false;
+    }
+    // Ban write / DDL / side-effecting keywords as whole words. `pragma` is
+    // included because write-PRAGMAs can change durability/behavior.
+    const BANNED: &[&str] = &[
+        "insert", "update", "delete", "drop", "alter", "create", "replace",
+        "truncate", "attach", "detach", "pragma", "vacuum", "reindex", "commit",
+        "rollback", "begin", "savepoint",
+    ];
+    let bytes = lower.as_bytes();
+    for kw in BANNED {
+        let mut from = 0;
+        while let Some(pos) = lower[from..].find(kw) {
+            let start = from + pos;
+            let end = start + kw.len();
+            let prev_ok = start == 0 || !is_ident_byte(bytes[start - 1]);
+            let next_ok = end >= bytes.len() || !is_ident_byte(bytes[end]);
+            if prev_ok && next_ok {
+                return false;
+            }
+            from = end;
+        }
+    }
+    true
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Remove `--` line comments and `/* */` block comments so keyword scanning
+/// can't be fooled by a write keyword hidden in a comment (or vice-versa).
+fn strip_sql_comments(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'-' && i + 1 < bytes.len() && bytes[i + 1] == b'-' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+        } else if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i += 2;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Nearest-rank percentile over a pre-sorted ascending slice. Empty -> 0.
+fn percentile(sorted: &[u64], p: f64) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = (p * (sorted.len() as f64 - 1.0)).round() as usize;
+    sorted[rank.min(sorted.len() - 1)]
 }
 
 /// PRAGMAs that must run before any table is created (auto_vacuum) plus the
@@ -487,29 +980,6 @@ fn scalar<T: rusqlite::types::FromSql>(conn: &Connection, sql: &str) -> T {
             // query string, which is a programming error caught in tests.
             panic!("scalar query returned nothing: {sql}")
         })
-}
-
-/// Build a named-parameter slice, skipping params whose value is `None` so the
-/// SQL only binds the placeholders it actually contains.
-fn build_named<'a>(
-    pairs: &'a [(&'a str, &'a dyn MaybeBind)],
-) -> Vec<(&'a str, &'a dyn rusqlite::ToSql)> {
-    pairs
-        .iter()
-        .filter_map(|(name, v)| v.as_sql().map(|s| (*name, s)))
-        .collect()
-}
-
-/// Lets `Option<T>` expose its inner `ToSql` only when `Some`, so absent filter
-/// params are never bound (matching the conditionally-built WHERE clause).
-trait MaybeBind {
-    fn as_sql(&self) -> Option<&dyn rusqlite::ToSql>;
-}
-
-impl<T: rusqlite::ToSql> MaybeBind for Option<T> {
-    fn as_sql(&self) -> Option<&dyn rusqlite::ToSql> {
-        self.as_ref().map(|v| v as &dyn rusqlite::ToSql)
-    }
 }
 
 fn json_col(s: String) -> serde_json::Value {
@@ -615,6 +1085,191 @@ mod tests {
 
         let spans = s.trace_spans("t1");
         assert_eq!(spans.len(), 2);
+    }
+
+    /// Fully-specified span for the filter/mesh/db tests.
+    #[allow(clippy::too_many_arguments)]
+    fn span_full(
+        trace: &str,
+        span_id: &str,
+        parent: &str,
+        service: &str,
+        dur: u64,
+        status: i32,
+        attrs: serde_json::Value,
+        recv: i64,
+    ) -> SpanRow {
+        SpanRow {
+            trace_id: trace.into(),
+            span_id: span_id.into(),
+            parent_span_id: parent.into(),
+            name: "op".into(),
+            service: service.into(),
+            kind: 3,
+            start_nano: 1000,
+            end_nano: 1000 + dur,
+            duration_nano: dur,
+            status_code: status,
+            status_message: String::new(),
+            scope_name: "scope".into(),
+            attributes: attrs,
+            resource: json!({ "service.name": service }),
+            events: json!([]),
+            received_ms: recv,
+        }
+    }
+
+    #[test]
+    fn trace_min_duration_and_sort() {
+        let s = OtelStore::in_memory();
+        s.insert_spans(&[span_full("fast", "a", "", "api", 1000, 0, json!({}), 1)]);
+        s.insert_spans(&[span_full("slow", "b", "", "api", 9000, 0, json!({}), 2)]);
+        // min-duration drops the fast trace.
+        let q = TraceQuery {
+            min_duration_nano: Some(5000),
+            ..Default::default()
+        };
+        let r = s.traces(&q);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].trace_id, "slow");
+        // slowest-first sort puts slow ahead of fast.
+        let q2 = TraceQuery {
+            sort: Some(TraceSort::Slowest),
+            ..Default::default()
+        };
+        let r2 = s.traces(&q2);
+        assert_eq!(r2[0].trace_id, "slow");
+    }
+
+    #[test]
+    fn trace_attr_search_matches_any_span() {
+        let s = OtelStore::in_memory();
+        s.insert_spans(&[
+            span_full("t1", "a", "", "api", 100, 0, json!({}), 1),
+            span_full("t1", "b", "a", "api", 100, 0, json!({ "http.status": 500 }), 1),
+        ]);
+        s.insert_spans(&[span_full("t2", "c", "", "api", 100, 0, json!({ "http.status": 200 }), 1)]);
+        // Substring match against the attributes JSON of any span in the trace.
+        let q = TraceQuery {
+            attr_search: Some("\"http.status\":500".into()),
+            ..Default::default()
+        };
+        let r = s.traces(&q);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].trace_id, "t1");
+    }
+
+    #[test]
+    fn service_map_builds_cross_service_edges() {
+        let s = OtelStore::in_memory();
+        // web -> api (ok), api -> db (error). Same-service link is not an edge.
+        s.insert_spans(&[
+            span_full("t", "root", "", "web", 500, 0, json!({}), 1),
+            span_full("t", "apicall", "root", "api", 300, 0, json!({}), 1),
+            span_full("t", "apiinternal", "apicall", "api", 50, 0, json!({}), 1),
+            span_full("t", "dbcall", "apicall", "db", 100, 2, json!({}), 1),
+        ]);
+        let map = s.service_map(None);
+        // Three services as nodes.
+        assert_eq!(map.nodes.len(), 3);
+        // Two cross-service edges: web->api and api->db. api->api is excluded.
+        assert_eq!(map.edges.len(), 2);
+        let db_edge = map.edges.iter().find(|e| e.to == "db").unwrap();
+        assert_eq!(db_edge.from, "api");
+        assert_eq!(db_edge.calls, 1);
+        assert_eq!(db_edge.errors, 1, "db child errored");
+    }
+
+    #[test]
+    fn db_queries_aggregate_by_statement() {
+        let s = OtelStore::in_memory();
+        let dbattr = |stmt: &str| json!({ "db.system": "postgresql", "db.statement": stmt });
+        s.insert_spans(&[
+            span_full("t1", "a", "", "api", 100, 0, dbattr("SELECT users"), 1),
+            span_full("t2", "b", "", "api", 300, 0, dbattr("SELECT users"), 1),
+            span_full("t3", "c", "", "api", 50, 2, dbattr("INSERT order"), 1),
+        ]);
+        // A non-db span is ignored.
+        s.insert_spans(&[span_full("t4", "d", "", "api", 999, 0, json!({}), 1)]);
+        let rows = s.db_queries(None);
+        assert_eq!(rows.len(), 2, "two distinct statements");
+        let sel = rows.iter().find(|r| r.statement == "SELECT users").unwrap();
+        assert_eq!(sel.calls, 2);
+        assert_eq!(sel.system, "postgresql");
+        assert_eq!(sel.total_nano, 400);
+        assert_eq!(sel.avg_nano, 200);
+        assert_eq!(sel.max_nano, 300);
+        let ins = rows.iter().find(|r| r.statement == "INSERT order").unwrap();
+        assert_eq!(ins.errors, 1);
+    }
+
+    #[test]
+    fn attr_breakdown_groups_by_value() {
+        let s = OtelStore::in_memory();
+        let t = |id: &str| json!({ "tenant.id": id });
+        s.insert_spans(&[
+            span_full("t1", "a", "", "api", 100, 0, t("acme"), 10),
+            span_full("t1", "b", "a", "api", 200, 2, t("acme"), 10),
+            span_full("t2", "c", "", "api", 50, 0, t("globex"), 20),
+        ]);
+        let groups = s.attr_breakdown("tenant.id", None, 100);
+        assert_eq!(groups.len(), 2);
+        // Busiest first: acme has 2 spans.
+        assert_eq!(groups[0].value, "acme");
+        assert_eq!(groups[0].spans, 2);
+        assert_eq!(groups[0].traces, 1);
+        assert_eq!(groups[0].errors, 1);
+        assert_eq!(groups[0].avg_nano, 150);
+        assert!(groups[0].top_ops.contains(&"op".to_string()));
+        // Distinct keys include the tenant attribute.
+        assert!(s.attribute_keys().contains(&"tenant.id".to_string()));
+        // Unknown key -> empty.
+        assert!(s.attr_breakdown("nope.key", None, 100).is_empty());
+    }
+
+    #[test]
+    fn percentile_nearest_rank() {
+        let v = vec![10u64, 20, 30, 40, 50];
+        assert_eq!(percentile(&v, 0.0), 10);
+        assert_eq!(percentile(&v, 0.5), 30);
+        assert_eq!(percentile(&v, 0.95), 50);
+        assert_eq!(percentile(&[], 0.5), 0);
+    }
+
+    #[test]
+    fn logs_since_and_attr_filter() {
+        let s = OtelStore::in_memory();
+        let mk = |recv: i64, attrs: serde_json::Value| LogRow {
+            time_nano: recv as u64,
+            observed_time_nano: 1,
+            severity_number: 9,
+            severity_text: "INFO".into(),
+            body: "x".into(),
+            service: "api".into(),
+            scope_name: String::new(),
+            trace_id: String::new(),
+            span_id: String::new(),
+            attributes: attrs,
+            resource: json!({}),
+            received_ms: recv,
+        };
+        s.insert_logs(&[
+            mk(100, json!({ "tenant.id": "abc" })),
+            mk(200, json!({ "tenant.id": "xyz" })),
+        ]);
+        // since filter.
+        let q = LogQuery {
+            since_ms: Some(150),
+            ..Default::default()
+        };
+        assert_eq!(s.logs(&q).len(), 1);
+        // attr substring.
+        let q2 = LogQuery {
+            attr_search: Some("xyz".into()),
+            ..Default::default()
+        };
+        let r = s.logs(&q2);
+        assert_eq!(r.len(), 1);
     }
 
     #[test]

@@ -147,7 +147,13 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   }, []);
 
   const fetchChildren = useCallback(async (path: string) => {
-    setNodes((s) => ({ ...s, [path]: { status: "loading" } }));
+    // Only show the "loading" placeholder when there's nothing cached to show.
+    // Re-listing an already-loaded dir (root change into a visited path, manual
+    // refresh, showHidden toggle) keeps the stale entries on screen until the
+    // fresh listing lands, so the tree never flashes empty over an SFTP RTT.
+    setNodes((s) =>
+      s[path]?.status === "loaded" ? s : { ...s, [path]: { status: "loading" } },
+    );
     try {
       const entries = await readDir(path, showHiddenRef.current);
 
@@ -211,7 +217,22 @@ export function useFileTree(rootPath: string | null, options?: Options) {
 
     const restored = recallExpansion(rootPath);
     setExpanded(new Set(restored));
-    setNodes({});
+
+    // Don't blank the tree on a root change. Rows only ever walk *down* from
+    // rootPath, so any node not under the new root is invisible regardless —
+    // dropping it is pure memory hygiene, not a render concern. Keeping the
+    // nodes that ARE under the new root means a `cd` into an already-listed
+    // remote dir repaints instantly instead of flashing empty for a full SFTP
+    // round-trip. fetchChildren still re-lists the new root to pick up changes.
+    setNodes((s) => {
+      let changed = false;
+      const next: TreeState = {};
+      for (const [k, v] of Object.entries(s)) {
+        if (isUnder(k, rootPath)) next[k] = v;
+        else changed = true;
+      }
+      return changed ? next : s;
+    });
 
     // Remote (SFTP) roots have no filesystem watcher — skip watch registration
     // and rely on manual refresh. Local roots watch as before.
@@ -361,10 +382,14 @@ export function useFileTree(rootPath: string | null, options?: Options) {
           const cmd = kind === "dir" ? "fs_create_dir" : "fs_create_file";
           await invoke(cmd, { path, workspace: currentWorkspaceEnv() });
         }
-        await fetchChildren(pendingCreate.parentPath);
       } catch (e) {
         console.error(`create ${kind} failed:`, e);
       } finally {
+        // Always re-list the parent, even if the create threw. Remote roots
+        // have no fs watcher, so this fetch is the only thing that surfaces the
+        // new entry; running it unconditionally also recovers the "name already
+        // exists" case (the no-clobber guard rejects, but the tree was stale).
+        await fetchChildren(pendingCreate.parentPath);
         setPendingCreate(null);
       }
     },

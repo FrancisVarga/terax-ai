@@ -19,7 +19,9 @@ import { NotificationBell } from "@/modules/agents";
 import {
   ChartLineData01Icon,
   Coins01Icon,
+  SatelliteIcon,
   GridViewIcon,
+  Table01Icon,
   LayoutTwoColumnIcon,
   LayoutTwoRowIcon,
   Settings01Icon,
@@ -45,6 +47,8 @@ type Props = {
   onNewGitGraph: () => void;
   onOpenBunqueue: () => void;
   onOpenAnalytics: () => void;
+  onOpenOtel: () => void;
+  onOpenDataGridMaster: () => void;
   onOpenCcusage: () => void;
   onClose: (id: number) => void;
   /** Promote a preview (transient) tab to persistent. */
@@ -74,6 +78,8 @@ export function Header({
   onNewGitGraph,
   onOpenBunqueue,
   onOpenAnalytics,
+  onOpenOtel,
+  onOpenDataGridMaster,
   onOpenCcusage,
   onClose,
   onPin,
@@ -146,6 +152,30 @@ export function Header({
       title="Agentlytics — local AI analytics"
     >
       <HugeiconsIcon icon={ChartLineData01Icon} size={16} strokeWidth={1.75} />
+    </Button>
+  );
+
+  const otelButton = (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+      onClick={onOpenOtel}
+      title="Observability — local OpenTelemetry dashboard"
+    >
+      <HugeiconsIcon icon={SatelliteIcon} size={16} strokeWidth={1.75} />
+    </Button>
+  );
+
+  const dataGridButton = (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+      onClick={onOpenDataGridMaster}
+      title="Data Grid — AG Grid feature showcase"
+    >
+      <HugeiconsIcon icon={Table01Icon} size={16} strokeWidth={1.75} />
     </Button>
   );
 
@@ -247,6 +277,8 @@ export function Header({
           onNewGitGraph={onNewGitGraph}
           onOpenBunqueue={onOpenBunqueue}
           onOpenAnalytics={onOpenAnalytics}
+          onOpenOtel={onOpenOtel}
+          onOpenDataGridMaster={onOpenDataGridMaster}
           onOpenCcusage={onOpenCcusage}
           onClose={onClose}
           onPin={onPin}
@@ -264,6 +296,8 @@ export function Header({
             onActivateLocal={onActivateLocalAgent}
           />
           {analyticsButton}
+          {otelButton}
+          {dataGridButton}
           {ccusageButton}
           {rightSidebarButton}
           {settingsButton}
@@ -273,6 +307,8 @@ export function Header({
       {!IS_MAC && (
         <>
           {analyticsButton}
+          {otelButton}
+          {dataGridButton}
           {ccusageButton}
           {rightSidebarButton}
           {settingsButton}

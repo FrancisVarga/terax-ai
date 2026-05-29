@@ -2,7 +2,7 @@ pub mod modules;
 
 use modules::sync::MutexExt;
 use modules::{
-    agent, agentscan, bunqueue, ccusage, cleanup, crash, docker, fs, git, gpu, net, pty, s3,
+    agent, agentscan, bunqueue, ccusage, cleanup, crash, docker, fs, git, gpu, net, otel, pty, s3,
     secrets, shell, ssh, workspace,
 };
 use std::collections::HashMap;
@@ -298,6 +298,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(tauri_plugin_log::log::LevelFilter::Info)
@@ -337,6 +338,7 @@ pub fn run() {
         .manage(ssh::SshBgState::default())
         .manage(s3::S3State::default())
         .manage(ProjectWindows::default())
+        .manage(otel::OtelState::default())
         .setup(|app| {
             // Window titles (incl. the dev-distinguishing " Dev" suffix and the
             // active project name) are owned by the frontend — see the title
@@ -376,6 +378,15 @@ pub fn run() {
             // Supervise: a background watchdog restarts the server/workers if
             // they die.
             bunqueue::start_watchdog(app.handle().clone());
+
+            // Open the OTEL store under the app data dir, then start the local
+            // OTLP/HTTP ingest server (loopback) so apps can export
+            // traces/logs/metrics to the in-app observability dashboard.
+            // Non-fatal: store open falls back to memory; an ingest bind failure
+            // is logged and the dashboard still serves whatever is stored.
+            let otel_state = app.state::<otel::OtelState>();
+            otel_state.init(otel::db_path(app.handle()));
+            otel::start_ingest(app.handle(), &otel_state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -394,6 +405,8 @@ pub fn run() {
             fs::data::data_sqlite_rows,
             fs::data::data_csv_preview,
             fs::data::data_parquet_preview,
+            fs::data::data_query,
+            fs::data::data_export,
             fs::mutate::fs_create_file,
             fs::mutate::fs_create_dir,
             fs::mutate::fs_rename,
@@ -498,6 +511,20 @@ pub fn run() {
             bunqueue::bunqueue_restart,
             bunqueue::bunqueue_ensure,
             bunqueue::bunqueue_workers,
+            otel::otel_ingest_port,
+            otel::otel_counts,
+            otel::otel_services,
+            otel::otel_traces,
+            otel::otel_trace_spans,
+            otel::otel_logs,
+            otel::otel_metric_names,
+            otel::otel_metric_series,
+            otel::otel_service_map,
+            otel::otel_db_queries,
+            otel::otel_attribute_keys,
+            otel::otel_attr_breakdown,
+            otel::otel_query,
+            otel::otel_clear,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

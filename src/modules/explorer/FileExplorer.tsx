@@ -182,7 +182,11 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
     const { rows, entryIndexByPath } = useMemo(() => {
       if (!rootPath) return { rows: [] as Row[], entryIndexByPath: new Map<string, number>() };
       return buildRows(rootPath, tree);
-    }, [rootPath, tree.nodes, tree.expanded, tree.renaming, tree.pendingCreate, tree]);
+      // `tree` itself is intentionally NOT a dep: useFileTree returns a fresh
+      // object every render, which would defeat this memo. buildRows only reads
+      // these fields (plus the stable `joinPath`), so they are the real deps.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [rootPath, tree.nodes, tree.expanded, tree.renaming, tree.pendingCreate]);
 
     const entryPaths = useMemo<string[]>(() => {
       const out: string[] = [];

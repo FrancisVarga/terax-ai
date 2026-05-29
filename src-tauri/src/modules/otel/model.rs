@@ -134,7 +134,23 @@ pub struct LogQuery {
     /// Case-insensitive substring match against the body.
     pub search: Option<String>,
     pub trace_id: Option<String>,
+    /// Only records received at or after this epoch-ms (time window).
+    pub since_ms: Option<i64>,
+    /// Case-insensitive substring match against the attributes JSON
+    /// (e.g. `tenant.id` or a value).
+    pub attr_search: Option<String>,
     pub limit: Option<i64>,
+}
+
+/// Sort order for the traces list.
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TraceSort {
+    /// Newest first (by start time). Default.
+    #[default]
+    Recent,
+    /// Slowest first (by total trace duration).
+    Slowest,
 }
 
 /// Filter args for the traces query.
@@ -144,6 +160,84 @@ pub struct TraceQuery {
     pub service: Option<String>,
     /// Only traces containing an error span.
     pub errors_only: Option<bool>,
+    /// Substring match against the root span name.
     pub search: Option<String>,
+    /// Only traces whose total duration is at least this many nanoseconds.
+    pub min_duration_nano: Option<u64>,
+    /// Only traces received at or after this epoch-ms (time window).
+    pub since_ms: Option<i64>,
+    /// Match traces that contain a span whose attributes JSON contains this
+    /// substring (e.g. `http.response.status_code":500` or a tenant id).
+    pub attr_search: Option<String>,
+    pub sort: Option<TraceSort>,
     pub limit: Option<i64>,
+}
+
+/// One directed edge of the service dependency graph: calls from one service to
+/// another, derived from cross-service parent/child span links.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceEdge {
+    pub from: String,
+    pub to: String,
+    /// Number of cross-service calls observed on this edge.
+    pub calls: i64,
+    /// Calls whose child span errored.
+    pub errors: i64,
+    /// p50 / p95 child-span duration in nanoseconds.
+    pub p50_nano: u64,
+    pub p95_nano: u64,
+}
+
+/// One node of the service graph: a service plus its own call/error totals.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceNode {
+    pub service: String,
+    pub spans: i64,
+    pub errors: i64,
+}
+
+/// The service dependency graph for the mesh view.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceMap {
+    pub nodes: Vec<ServiceNode>,
+    pub edges: Vec<ServiceEdge>,
+}
+
+/// One aggregated group for the attribute-breakdown ("user / tenant") dashboard.
+/// Spans are grouped by the value of a chosen attribute key (e.g. `tenant.id`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttrGroup {
+    /// The attribute value this group represents (e.g. a tenant id).
+    pub value: String,
+    pub spans: i64,
+    pub traces: i64,
+    pub errors: i64,
+    pub avg_nano: u64,
+    pub p95_nano: u64,
+    /// Most-recent activity for this group (epoch ms).
+    pub last_seen_ms: i64,
+    /// Top operation names for this group, busiest first (up to a few).
+    pub top_ops: Vec<String>,
+}
+
+/// One aggregated database statement for the DB dashboard. Rows are grouped by
+/// the normalized `db.statement` (or span name when absent) of `db.system` spans.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbStatement {
+    pub statement: String,
+    /// db.system value (e.g. "postgresql"), best-effort.
+    pub system: String,
+    pub service: String,
+    pub calls: i64,
+    pub errors: i64,
+    pub avg_nano: u64,
+    pub p95_nano: u64,
+    pub max_nano: u64,
+    /// Sum of all call durations (nanoseconds) - the total time in this query.
+    pub total_nano: u64,
 }

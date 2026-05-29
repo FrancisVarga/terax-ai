@@ -27,9 +27,15 @@ export function parseRemote(uri: string): RemoteRef | null {
   return { alias, path };
 }
 
-/** Build a remote URI from an alias + absolute remote path. */
+/** Build a remote URI from an alias + absolute remote path. Strips a trailing
+ * slash (except root) so the URI is byte-stable regardless of whether it came
+ * from `canonicalize` (no slash) or a shell hook (`$PWD` may carry one). A
+ * stable URI is essential: it is the `nodes`-map key the tree reads back, so a
+ * trailing-slash variant would write entries under a key `buildRows` never
+ * walks — the new file would only surface after a remount. */
 export function remoteUri(alias: string, path: string): string {
-  const abs = path.startsWith("/") ? path : `/${path}`;
+  let abs = path.startsWith("/") ? path : `/${path}`;
+  if (abs.length > 1 && abs.endsWith("/")) abs = abs.replace(/\/+$/, "");
   return `${SSH_PREFIX}${alias}${abs}`;
 }
 
