@@ -76,6 +76,8 @@ import {
 import { BunqueueStack } from "@/modules/bunqueue";
 import { CommandPopup } from "@/modules/command-popup";
 import { MarkdownStack } from "@/modules/markdown";
+import { ImageStack } from "@/modules/image";
+import { LogStack } from "@/modules/log";
 import { DataStack, dataFormatForPath } from "@/modules/data";
 import { S3Stack, S3Panel } from "@/modules/s3";
 import { PreviewStack, type PreviewPaneHandle } from "@/modules/preview";
@@ -186,7 +188,12 @@ function dirname(path: string | null): string | null {
   return normalized.slice(0, idx);
 }
 
-const SIDEBAR_DEFAULT_WIDTH = 260;
+// File-extension routing for the smart open handler. Raster + vector images go
+// to the image viewer; `.log` files go to the colorized log viewer.
+const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|ico|avif|svg)$/i;
+const LOG_RE = /\.log$/i;
+const MARKDOWN_RE = /\.(md|markdown|mdx)$/i;
+
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 480;
 const SIDEBAR_WIDTH_STORAGE_KEY = "terax.sidebar.width";
@@ -198,23 +205,11 @@ const RIGHT_SIDEBAR_MAX_WIDTH = 560;
 const RIGHT_SIDEBAR_WIDTH_STORAGE_KEY = "terax.right-sidebar.width";
 const RIGHT_SIDEBAR_VIEW_STORAGE_KEY = "terax.right-sidebar.view";
 
-function clampSidebarWidth(width: number): number {
-  return Math.min(
-    SIDEBAR_MAX_WIDTH,
-    Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)),
-  );
-}
-
 function readSidebarWidth(): number {
-  try {
-    const stored = window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
-    const parsed = stored ? Number.parseInt(stored, 10) : NaN;
-    return Number.isFinite(parsed)
-      ? clampSidebarWidth(parsed)
-      : SIDEBAR_DEFAULT_WIDTH;
-  } catch {
-    return SIDEBAR_DEFAULT_WIDTH;
-  }
+  // The left sidebar always starts at its minimum width on launch; the user can
+  // drag it wider during the session (and that live value still persists), but
+  // each new window begins compact rather than restoring the stored width.
+  return SIDEBAR_MIN_WIDTH;
 }
 
 function readSidebarView(): SidebarViewId {
@@ -294,6 +289,8 @@ export default function App() {
     pinTab,
     newPreviewTab,
     newMarkdownTab,
+    newImageTab,
+    newLogTab,
     newDataTab,
     openS3Tab,
     openBunqueueTab,
@@ -698,6 +695,8 @@ export default function App() {
   const isEditorTab = activeTab?.kind === "editor";
   const isPreviewTab = activeTab?.kind === "preview";
   const isMarkdownTab = activeTab?.kind === "markdown";
+  const isImageTab = activeTab?.kind === "image";
+  const isLogTab = activeTab?.kind === "log";
   const isDataTab = activeTab?.kind === "data";
   const isS3Tab = activeTab?.kind === "s3";
   const isAiDiffTab = activeTab?.kind === "ai-diff";
@@ -1305,11 +1304,26 @@ export default function App() {
         newDataTab(path, dataFormat);
         return;
       }
+      // Images open in the image viewer rather than the (text) editor.
+      if (IMAGE_RE.test(path)) {
+        newImageTab(path);
+        return;
+      }
+      // `.log` files open in the colorized log viewer.
+      if (LOG_RE.test(path)) {
+        newLogTab(path);
+        return;
+      }
+      // Markdown opens split: editable source on the left, live preview right.
+      if (MARKDOWN_RE.test(path)) {
+        newMarkdownTab(path);
+        return;
+      }
       // Explorer defaults to preview (pin=false); explicit actions like
       // context-menu "Open" pass pin=true for a persistent tab.
       openFileTab(path, pin ?? false);
     },
-    [openFileTab, newDataTab],
+    [openFileTab, newDataTab, newImageTab, newLogTab, newMarkdownTab],
   );
 
   // "Open with Terax Camelot" on a file: the backend cd'd the workspace into
@@ -1899,6 +1913,24 @@ export default function App() {
         aria-hidden={!isMarkdownTab}
       >
         <MarkdownStack tabs={tabs} activeId={activeId} />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0 px-3 pt-2 pb-2",
+          !isImageTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isImageTab}
+      >
+        <ImageStack tabs={tabs} activeId={activeId} />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0 px-3 pt-2 pb-2",
+          !isLogTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isLogTab}
+      >
+        <LogStack tabs={tabs} activeId={activeId} />
       </div>
       <div
         className={cn(
