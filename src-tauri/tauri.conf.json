@@ -29,7 +29,20 @@
         "enable": true,
         "scope": {
           "allow": ["**"],
-          "requireLiteralLeadingDot": false
+          "deny": [
+            "**/.ssh/**",
+            "**/.aws/**",
+            "**/.gnupg/**",
+            "**/.config/**",
+            "**/.env",
+            "**/.env.*",
+            "**/.netrc",
+            "**/.npmrc",
+            "**/.pypirc",
+            "**/.docker/config.json",
+            "**/.kube/**"
+          ],
+          "requireLiteralLeadingDot": true
         }
       }
     }
