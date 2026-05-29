@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { native } from "@/modules/ai/lib/native";
+import { useChatStore } from "@/modules/ai/store/chatStore";
 import { useWorkspaceEnvStore } from "@/modules/workspace";
 import {
   ArrowRight01Icon,
@@ -32,6 +32,11 @@ export function TaskRunnerPanel() {
   const [scan, setScan] = useState<ScanState>({ status: "loading" });
   // Re-scan whenever the active workspace env changes (e.g. switching to WSL).
   const workspaceEnv = useWorkspaceEnvStore((s) => s.env);
+  // The project root the rest of the app uses (active terminal cwd → explorer
+  // root → launch dir → home), NOT the app launch dir. Subscribing to `live`
+  // re-runs the scan when the user changes folders / terminal cwd. See
+  // chatStore.live.getWorkspaceRoot in App.tsx.
+  const live = useChatStore((s) => s.live);
 
   const tasks = useTaskRunnerStore((s) => s.tasks);
   const selectedId = useTaskRunnerStore((s) => s.selectedId);
@@ -44,7 +49,11 @@ export function TaskRunnerPanel() {
   const rescan = useCallback(async () => {
     setScan({ status: "loading" });
     try {
-      const root = await native.workspaceCurrentDir();
+      const root = live.getWorkspaceRoot();
+      if (!root) {
+        setScan({ status: "empty" });
+        return;
+      }
       const manifests = await scanManifests(root);
       if (manifests.length === 0) {
         setScan({ status: "empty" });
@@ -58,7 +67,7 @@ export function TaskRunnerPanel() {
     } catch (e) {
       setScan({ status: "error", message: String(e) });
     }
-  }, []);
+  }, [live]);
 
   useEffect(() => {
     void rescan();
@@ -227,7 +236,7 @@ function TreeNodeRow({
   onRun: (m: PackageManifest, s: TaskScript) => void;
   findRunning: (dir: string, script: string) => { id: string } | undefined;
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const pad = { paddingLeft: 8 + depth * 12 };
 
   if (node.kind === "dir") {
@@ -277,7 +286,7 @@ function PackageRow({
   onRun: (m: PackageManifest, s: TaskScript) => void;
   findRunning: (dir: string, script: string) => { id: string } | undefined;
 }) {
-  const [open, setOpen] = useState(depth === 0);
+  const [open, setOpen] = useState(false);
   const pad = { paddingLeft: 8 + depth * 12 };
 
   return (
