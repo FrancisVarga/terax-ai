@@ -74,28 +74,122 @@ const ROW_HEIGHTS = {
   banner: 32,
   header: 30,
   entry: 30,
+  folder: 26,
 } as const;
+
+const TREE_INDENT_PX = 12;
+const TREE_BASE_PAD_PX = 8;
 
 type RowDescriptor =
   | { kind: "banner-diverged"; key: string }
   | { kind: "list-header"; key: string; count: number }
-  | { kind: "entry"; key: string; entry: SourceControlFileEntry };
+  | {
+      kind: "folder";
+      key: string;
+      /** Full path of this dir relative to repo root (collapse key). */
+      dirPath: string;
+      /** Display segment(s); compressed chains show "a/b/c". */
+      label: string;
+      depth: number;
+      collapsed: boolean;
+      checkState: CheckState;
+      /** All changed file paths under this dir (for folder staging). */
+      filePaths: string[];
+    }
+  | {
+      kind: "entry";
+      key: string;
+      entry: SourceControlFileEntry;
+      depth: number;
+    };
 
 function basename(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts.length > 0 ? parts[parts.length - 1] : path;
 }
 
-function dirname(path: string): string {
-  const normalized = path.replace(/\\/g, "/");
-  const index = normalized.lastIndexOf("/");
-  if (index <= 0) return "";
-  return normalized.slice(0, index);
+function entryPathLabel(entry: SourceControlFileEntry): string {
+  // Renames still show the old → new path; the dir context now comes from the
+  // tree position, so plain files no longer repeat their folder here.
+  if (entry.originalPath) return `${entry.originalPath} → ${entry.path}`;
+  return "";
 }
 
-function entryPathLabel(entry: SourceControlFileEntry): string {
-  if (entry.originalPath) return `${entry.originalPath} → ${entry.path}`;
-  return dirname(entry.path);
+// --- File tree model ---------------------------------------------------------
+
+type TreeNode = {
+  /** Path segment name. */
+  name: string;
+  /** Full path from repo root to this node. */
+  path: string;
+  children: Map<string, TreeNode>;
+  /** Set when this node is a leaf (an actual changed file). */
+  entry: SourceControlFileEntry | null;
+};
+
+function newNode(name: string, path: string): TreeNode {
+  return { name, path, children: new Map(), entry: null };
+}
+
+/** Builds a nested dir/file tree from the flat changed-file list. */
+function buildTree(entries: SourceControlFileEntry[]): TreeNode {
+  const root = newNode("", "");
+  for (const entry of entries) {
+    const parts = entry.path.split("/").filter(Boolean);
+    let node = root;
+    let acc = "";
+    for (let i = 0; i < parts.length; i++) {
+      const seg = parts[i];
+      acc = acc ? `${acc}/${seg}` : seg;
+      let child = node.children.get(seg);
+      if (!child) {
+        child = newNode(seg, acc);
+        node.children.set(seg, child);
+      }
+      node = child;
+      if (i === parts.length - 1) node.entry = entry;
+    }
+  }
+  return root;
+}
+
+/** Collapses single-child directory chains into one row (`a/b/c`), matching
+ *  the VSCode "compact folders" default. A dir that also holds a file at its
+ *  own level is not compressed. */
+function compressChain(node: TreeNode): { label: string; tail: TreeNode } {
+  let label = node.name;
+  let tail = node;
+  while (
+    tail.entry === null &&
+    tail.children.size === 1 &&
+    // only compress dir→dir, never absorb a leaf file
+    [...tail.children.values()][0].children.size > 0
+  ) {
+    const only = [...tail.children.values()][0];
+    if (only.entry !== null) break;
+    label = `${label}/${only.name}`;
+    tail = only;
+  }
+  return { label, tail };
+}
+
+/** Aggregates a folder's check state from its descendant files. */
+function folderCheckState(paths: string[], byPath: Map<string, CheckState>): CheckState {
+  let checked = 0;
+  let any = 0;
+  for (const p of paths) {
+    const s = byPath.get(p);
+    if (s === "checked") checked++;
+    if (s === "checked" || s === "indeterminate") any++;
+  }
+  if (checked === paths.length && paths.length > 0) return "checked";
+  if (any > 0) return "indeterminate";
+  return "unchecked";
+}
+
+function collectFilePaths(node: TreeNode, out: string[]): void {
+  if (node.entry) out.push(node.entry.path);
+  for (const child of node.children.values()) collectFilePaths(child, out);
 }
 
 function upstreamBadgeLabel(upstream: string | null | undefined): string {
@@ -138,6 +232,18 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   const scrollRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [focusedRowKey, setFocusedRowKey] = useState<string | null>(null);
+  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(
+    () => new Set(),
+  );
+
+  const toggleDir = useCallback((dirPath: string) => {
+    setCollapsedDirs((prev) => {
+      const next = new Set(prev);
+      if (next.has(dirPath)) next.delete(dirPath);
+      else next.add(dirPath);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -240,6 +346,12 @@ export const SourceControlPanel = memo(function SourceControlPanel({
     void sourceControl.runRemoteAction("pull");
   }, [sourceControl]);
 
+  const checkStateByPath = useMemo(() => {
+    const map = new Map<string, CheckState>();
+    for (const entry of scm.fileEntries) map.set(entry.path, entry.checkState);
+    return map;
+  }, [scm.fileEntries]);
+
   const rows = useMemo<RowDescriptor[]>(() => {
     const result: RowDescriptor[] = [];
     if (isDiverged) {
@@ -251,12 +363,53 @@ export const SourceControlPanel = memo(function SourceControlPanel({
         key: "list-header",
         count: changedCount,
       });
-      for (const entry of scm.fileEntries) {
-        result.push({ kind: "entry", key: entry.key, entry });
-      }
+
+      const root = buildTree(scm.fileEntries);
+
+      // Depth-first emit: folders (with compressed chains) then their files.
+      // Folders sort before files; both alphabetical — matches the explorer.
+      const emit = (node: TreeNode, depth: number) => {
+        const dirs: TreeNode[] = [];
+        const files: TreeNode[] = [];
+        for (const child of node.children.values()) {
+          if (child.entry && child.children.size === 0) files.push(child);
+          else dirs.push(child);
+        }
+        dirs.sort((a, b) => a.name.localeCompare(b.name));
+        files.sort((a, b) => a.name.localeCompare(b.name));
+
+        for (const dir of dirs) {
+          const { label, tail } = compressChain(dir);
+          const filePaths: string[] = [];
+          collectFilePaths(tail, filePaths);
+          const collapsed = collapsedDirs.has(tail.path);
+          result.push({
+            kind: "folder",
+            key: `dir:${tail.path}`,
+            dirPath: tail.path,
+            label,
+            depth,
+            collapsed,
+            checkState: folderCheckState(filePaths, checkStateByPath),
+            filePaths,
+          });
+          if (!collapsed) emit(tail, depth + 1);
+        }
+        for (const file of files) {
+          if (!file.entry) continue;
+          result.push({
+            kind: "entry",
+            key: file.entry.key,
+            entry: file.entry,
+            depth,
+          });
+        }
+      };
+
+      emit(root, 0);
     }
     return result;
-  }, [changedCount, isDiverged, scm.fileEntries]);
+  }, [changedCount, isDiverged, scm.fileEntries, collapsedDirs, checkStateByPath]);
 
   const rowKeyToIndex = useMemo(() => {
     const map = new Map<string, number>();
@@ -274,7 +427,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   const focusableIndices = useMemo(() => {
     const out: number[] = [];
     rows.forEach((row, index) => {
-      if (row.kind === "entry") out.push(index);
+      if (row.kind === "entry" || row.kind === "folder") out.push(index);
     });
     return out;
   }, [rows]);
@@ -288,6 +441,8 @@ export const SourceControlPanel = memo(function SourceControlPanel({
           return ROW_HEIGHTS.banner;
         case "list-header":
           return ROW_HEIGHTS.header;
+        case "folder":
+          return ROW_HEIGHTS.folder;
         case "entry":
           return ROW_HEIGHTS.entry;
       }
@@ -323,13 +478,25 @@ export const SourceControlPanel = memo(function SourceControlPanel({
     [focusableIndices, focusedRowKey, rowKeyToIndex, rows, virtualizer],
   );
 
-  const focusedEntry = useCallback((): SourceControlFileEntry | null => {
+  const focusedRow = useCallback((): RowDescriptor | null => {
     if (!focusedRowKey) return null;
     const index = rowKeyToIndex.get(focusedRowKey);
     if (index === undefined) return null;
-    const row = rows[index];
-    return row && row.kind === "entry" ? row.entry : null;
+    return rows[index] ?? null;
   }, [focusedRowKey, rowKeyToIndex, rows]);
+
+  const focusedEntry = useCallback((): SourceControlFileEntry | null => {
+    const row = focusedRow();
+    return row && row.kind === "entry" ? row.entry : null;
+  }, [focusedRow]);
+
+  const toggleFolderStage = useCallback(
+    (row: Extract<RowDescriptor, { kind: "folder" }>) => {
+      if (row.checkState === "checked") void scm.unstagePaths(row.filePaths);
+      else void scm.stagePaths(row.filePaths);
+    },
+    [scm],
+  );
 
   const handlePanelKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
@@ -358,10 +525,13 @@ export const SourceControlPanel = memo(function SourceControlPanel({
           moveFocus(-1);
           break;
         case "Enter": {
-          const entry = focusedEntry();
-          if (entry) {
+          const row = focusedRow();
+          if (row?.kind === "folder") {
             event.preventDefault();
-            void scm.selectFile(entry);
+            toggleDir(row.dirPath);
+          } else if (row?.kind === "entry") {
+            event.preventDefault();
+            void scm.selectFile(row.entry);
           }
           break;
         }
@@ -369,10 +539,13 @@ export const SourceControlPanel = memo(function SourceControlPanel({
         case "s":
         case "S": {
           if (meta) break;
-          const entry = focusedEntry();
-          if (entry) {
+          const row = focusedRow();
+          if (row?.kind === "folder") {
             event.preventDefault();
-            void scm.toggleStageFile(entry);
+            toggleFolderStage(row);
+          } else if (row?.kind === "entry") {
+            event.preventDefault();
+            void scm.toggleStageFile(row.entry);
           }
           break;
         }
@@ -738,6 +911,8 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                             onSelectFile={scm.selectFile}
                             onToggleStageFile={scm.toggleStageFile}
                             onDiscardFile={scm.requestDiscardFile}
+                            onToggleDir={toggleDir}
+                            onToggleFolderStage={toggleFolderStage}
                           />
                         </div>
                       );
@@ -834,6 +1009,10 @@ type RowRendererProps = {
   onSelectFile: (entry: SourceControlFileEntry) => Promise<void>;
   onToggleStageFile: (entry: SourceControlFileEntry) => Promise<void>;
   onDiscardFile: (entry: SourceControlFileEntry) => void;
+  onToggleDir: (dirPath: string) => void;
+  onToggleFolderStage: (
+    row: Extract<RowDescriptor, { kind: "folder" }>,
+  ) => void;
 };
 
 const RowRenderer = memo(function RowRenderer(props: RowRendererProps) {
@@ -843,9 +1022,69 @@ const RowRenderer = memo(function RowRenderer(props: RowRendererProps) {
       return <DivergedBanner />;
     case "list-header":
       return <ListHeader {...props} row={row} />;
+    case "folder":
+      return <FolderRow {...props} row={row} />;
     case "entry":
       return <EntryRow {...props} row={row} />;
   }
+});
+
+const FolderRow = memo(function FolderRow({
+  row,
+  focused,
+  actionBusy,
+  onFocusRow,
+  onToggleDir,
+  onToggleFolderStage,
+}: RowRendererProps & {
+  row: Extract<RowDescriptor, { kind: "folder" }>;
+}) {
+  const disabled = actionBusy !== null;
+  return (
+    <div
+      id={`scm-row-${row.key}`}
+      data-focused={focused || undefined}
+      role="option"
+      aria-selected={false}
+      onMouseDown={() => onFocusRow(row.key)}
+      className={cn(
+        "group relative flex h-[26px] items-center gap-1 rounded-md pr-2 transition-colors duration-100",
+        focused ? "bg-accent/50" : "hover:bg-accent/25",
+      )}
+      style={{ paddingLeft: TREE_BASE_PAD_PX + row.depth * TREE_INDENT_PX }}
+    >
+      <button
+        type="button"
+        onClick={() => {
+          onFocusRow(row.key);
+          onToggleDir(row.dirPath);
+        }}
+        className="flex min-w-0 flex-1 cursor-pointer items-center gap-1 text-left"
+      >
+        <HugeiconsIcon
+          icon={ArrowRight01Icon}
+          size={13}
+          strokeWidth={2.25}
+          className={cn(
+            "shrink-0 text-muted-foreground transition-transform",
+            !row.collapsed && "rotate-90",
+          )}
+        />
+        <span className="truncate text-[12px] font-medium text-foreground/85">
+          {row.label}
+        </span>
+      </button>
+      <span className="flex size-5 shrink-0 items-center justify-center opacity-0 transition-opacity group-hover:opacity-100 data-[focused=true]:opacity-100">
+        <Checkbox
+          aria-label={`Stage folder ${row.dirPath}`}
+          checked={checkboxValue(row.checkState)}
+          disabled={disabled}
+          onCheckedChange={() => onToggleFolderStage(row)}
+          className="size-3.5"
+        />
+      </span>
+    </div>
+  );
 });
 
 function DivergedBanner() {
@@ -930,13 +1169,18 @@ const EntryRow = memo(function EntryRow({
       aria-selected={isSelected}
       onMouseDown={() => onFocusRow(row.key)}
       className={cn(
-        "group relative flex h-[30px] items-center gap-2 rounded-md pl-2 pr-2 transition-all duration-100",
+        "group relative flex h-[30px] items-center gap-2 rounded-md pr-2 transition-all duration-100",
         focused
           ? "bg-accent/60"
           : isSelected
             ? "bg-accent/55 text-foreground"
             : "hover:bg-accent/30",
       )}
+      style={{
+        // Align file icon just past where the parent folder's chevron sits
+        // (chevron 13px + 4px gap ≈ 17), indented by the file's tree depth.
+        paddingLeft: TREE_BASE_PAD_PX + row.depth * TREE_INDENT_PX + 17,
+      }}
     >
       <span
         className={cn(

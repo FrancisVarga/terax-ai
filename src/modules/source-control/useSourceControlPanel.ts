@@ -97,6 +97,9 @@ type SourceControlPanelState = {
   stageEntry: (entry: SourceControlEntry) => Promise<void>;
   unstageEntry: (entry: SourceControlEntry) => Promise<void>;
   toggleStageFile: (entry: SourceControlFileEntry) => Promise<void>;
+  /** Stage or unstage an explicit set of paths (used by folder rows). */
+  stagePaths: (paths: string[]) => Promise<void>;
+  unstagePaths: (paths: string[]) => Promise<void>;
   toggleAll: () => Promise<void>;
   requestDiscardEntry: (entry: SourceControlEntry) => void;
   requestDiscardFile: (entry: SourceControlFileEntry) => void;
@@ -821,6 +824,34 @@ export function useSourceControlPanel(
     [repo, runMutation],
   );
 
+  const stagePaths = useCallback(
+    async (paths: string[]) => {
+      if (!repo || paths.length === 0) return;
+      const set = new Set(paths);
+      await runMutation(
+        `stage:${paths[0]}`,
+        (s) => optimisticStage(s, set),
+        () => native.gitStage(repo.repoRoot, [...set]),
+        [...set],
+      );
+    },
+    [repo, runMutation],
+  );
+
+  const unstagePaths = useCallback(
+    async (paths: string[]) => {
+      if (!repo || paths.length === 0) return;
+      const set = new Set(paths);
+      await runMutation(
+        `unstage:${paths[0]}`,
+        (s) => optimisticUnstage(s, set),
+        () => native.gitUnstage(repo.repoRoot, [...set]),
+        [...set],
+      );
+    },
+    [repo, runMutation],
+  );
+
   const toggleAll = useCallback(async () => {
     if (headerCheckState === "checked") await unstageAllEntries();
     else await stageAllEntries();
@@ -1014,6 +1045,8 @@ export function useSourceControlPanel(
     stageEntry,
     unstageEntry,
     toggleStageFile,
+    stagePaths,
+    unstagePaths,
     toggleAll,
     requestDiscardEntry,
     requestDiscardFile,
