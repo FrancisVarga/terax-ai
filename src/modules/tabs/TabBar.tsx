@@ -379,6 +379,7 @@ function labelFor(t: Tab): string {
   if (t.kind === "ccusage") return t.title;
   if (t.kind === "projects") return t.title;
   if (t.kind === "project-detail") return t.title;
+  if (t.kind === "data") return t.title;
   if (!t.cwd) return t.title;
   const parts = t.cwd.split(/[\\/]/).filter(Boolean);
   return parts.length ? parts[parts.length - 1] : "/";
