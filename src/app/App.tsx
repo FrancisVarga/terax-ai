@@ -273,6 +273,7 @@ export default function App() {
     setActiveId,
     newTab,
     newAgentTab,
+    newGridTab,
     newPrivateTab,
     openFileTab,
     pinTab,
@@ -297,9 +298,18 @@ export default function App() {
     closeActivePane,
     closePaneByLeaf,
     resetWorkspace,
-  } = useTabs(getLaunchDir() ? { cwd: getLaunchDir() } : undefined, {
-    focusTerminalOnLaunch: hasExplicitLaunchDir(),
-  });
+  } = useTabs(
+    // A remote (`ssh://…`) launch dir is not a valid LOCAL pty cwd — seeding it
+    // would make `pty_open`'s cwd authorization reject and the shell never
+    // spawn (every inherited tab then breaks too). Only seed a local cwd; the
+    // pty falls back to home for remote/empty.
+    getLaunchDir() && !isRemote(getLaunchDir() as string)
+      ? { cwd: getLaunchDir() }
+      : undefined,
+    {
+      focusTerminalOnLaunch: hasExplicitLaunchDir(),
+    },
+  );
 
   // Mirror `tabs` into a ref so callbacks scheduled with `setTimeout`
   // (e.g. cdInNewTab) read the latest pane state instead of a stale closure.
@@ -586,6 +596,7 @@ export default function App() {
       .catch(() => setLaunchCwd(null))
       .finally(() => setLaunchCwdResolved(true));
   }, []);
+
 
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [commandPopupOpen, setCommandPopupOpen] = useState(false);
@@ -1013,10 +1024,6 @@ export default function App() {
     setAskPopup(null);
   }, [askFromSelection]);
 
-  const openNewTab = useCallback(() => {
-    newTab(inheritedCwdForNewTab());
-  }, [newTab, inheritedCwdForNewTab]);
-
   // Wait for a PTY leaf to be ready, then run `claude`. Shared by the
   // new-tab and split-pane launchers. Enabling hooks mirrors the managed-agent
   // spawn path so notifications work for an interactively-started session too.
@@ -1057,6 +1064,13 @@ export default function App() {
     }
     launchClaudeInLeaf(leafId);
   }, [activeId, splitActivePane, projectCwd, launchClaudeInLeaf, openClaudeNewTab]);
+
+  // Create a "Claude team": one tab split into a 2x2 grid, each pane running
+  // claude at the project root.
+  const openClaudeTeam = useCallback(() => {
+    const { leafIds: gridLeaves } = newGridTab(projectCwd(), "claude team");
+    for (const leafId of gridLeaves) launchClaudeInLeaf(leafId);
+  }, [newGridTab, projectCwd, launchClaudeInLeaf]);
 
   const openNewPrivateTab = useCallback(() => {
     newPrivateTab(inheritedCwdForNewTab());
@@ -1125,7 +1139,7 @@ export default function App() {
   // writing the command, otherwise the bytes race the shell's first prompt and
   // get swallowed.
   const connectSsh = useCallback(
-    (host: SshHost) => {
+    (host: SshHost, targetPath?: string) => {
       // 1. Open an interactive ssh terminal tab.
       const { leafId } = newAgentTab(undefined, `ssh · ${host.alias}`);
 
@@ -1143,6 +1157,19 @@ export default function App() {
 
       void (async () => {
         await whenSessionReady(leafId);
+        // Settle the prompt before typing the ssh command. On a cold local
+        // shell (notably Windows PowerShell + PSReadLine) the FIRST keystroke
+        // after the prompt renders is sometimes swallowed, turning `ssh` into
+        // `sh` — the connection then never opens and the follow-up hook/cd run
+        // locally. A throwaway Enter + a short pause lets PSReadLine finish its
+        // async init so the real command's first byte isn't lost.
+        writeToSession(leafId, "\r");
+        await new Promise((r) => setTimeout(r, 250));
+        // Open the interactive remote shell. We type `cd` as a follow-up command
+        // (rather than `ssh -t … 'cd … && exec $SHELL'`) because the remote may
+        // be PowerShell, fish, etc. — a bare `cd <path>` is understood by every
+        // common shell, whereas a POSIX `exec "$SHELL" -l` wrapper breaks on
+        // PowerShell. `cd` runs inside whatever login shell ssh launched.
         writeToSession(leafId, `${sshCommandFor(host)}\r`);
         // Install the remote precmd hook after the ssh session is up. We can't
         // detect the remote prompt precisely (no remote integration), so wait a
@@ -1153,16 +1180,21 @@ export default function App() {
         setTimeout(() => {
           if (remoteCwdLeafRef.current === leafId) {
             writeToSession(leafId, `${hook}\r`);
+            if (targetPath && targetPath !== "/") {
+              writeToSession(leafId, `cd ${quoteShellArg(targetPath)}\r`);
+            }
           }
         }, 1200);
       })();
 
       // 2. In parallel, bring up an SFTP session and point the explorer at the
-      //    remote home dir so the tree reflects the connected server.
+      //    project path (when opening a project) or the remote home dir.
       void (async () => {
         try {
           const home = await connectRemote(host.alias);
-          setRemoteRoot(remoteUri(host.alias, home));
+          setRemoteRoot(
+            remoteUri(host.alias, targetPath && targetPath !== "/" ? targetPath : home),
+          );
           persistSidebarView("explorer");
         } catch (e) {
           console.error("[terax] SFTP connect failed:", e);
@@ -1174,6 +1206,50 @@ export default function App() {
     },
     [newAgentTab, persistSidebarView],
   );
+
+  // Auto-connect SSH when the window was launched for a remote project
+  // (`?dir=ssh://alias/path`). The local terminal can't be a remote cwd, so we
+  // open an interactive `ssh <alias>` tab and cd into the project path instead.
+  // Fires once on mount.
+  const remoteAutoConnectedRef = useRef(false);
+  useEffect(() => {
+    if (remoteAutoConnectedRef.current) return;
+    const launch = getLaunchDir();
+    if (!launch || !isRemote(launch)) return;
+    const ref = parseRemote(launch);
+    if (!ref) return;
+    remoteAutoConnectedRef.current = true;
+    connectSsh(
+      {
+        alias: ref.alias,
+        hostname: null,
+        user: null,
+        port: null,
+        source: "launch",
+      },
+      ref.path,
+    );
+  }, [connectSsh]);
+
+  const openNewTab = useCallback(() => {
+    // While browsing a remote workspace, a new tab should be an ssh session on
+    // that host (cd'd into the current remote dir), not a local shell.
+    const ref = remoteRoot ? parseRemote(remoteRoot) : null;
+    if (ref) {
+      connectSsh(
+        {
+          alias: ref.alias,
+          hostname: null,
+          user: null,
+          port: null,
+          source: "launch",
+        },
+        ref.path,
+      );
+      return;
+    }
+    newTab(inheritedCwdForNewTab());
+  }, [newTab, inheritedCwdForNewTab, remoteRoot, connectSsh]);
 
   // Leave the remote view: drop the SFTP session, unbind remote cwd tracking,
   // and restore the local root.
@@ -1408,6 +1484,7 @@ export default function App() {
       "ai.askSelection": askFromSelection,
       "claude.newTab": openClaudeNewTab,
       "claude.splitRight": openClaudeSplitRight,
+      "claude.team": openClaudeTeam,
       "window.new": () => void invoke("open_main_window"),
       "commandPopup.open": () => setCommandPopupOpen((v) => !v),
       "shortcuts.open": () => setShortcutsOpen((v) => !v),
@@ -1440,6 +1517,7 @@ export default function App() {
       askFromSelection,
       openClaudeNewTab,
       openClaudeSplitRight,
+      openClaudeTeam,
       cycleSidebarView,
       addCurrentFolderToProjects,
       toggleSidebar,
@@ -1723,6 +1801,7 @@ export default function App() {
           onCwd={handleTerminalCwd}
           onExit={handleLeafExit}
           onFocusLeaf={handleFocusLeaf}
+          onClosePane={closePaneByLeaf}
         />
       </div>
       <div
@@ -1981,11 +2060,11 @@ export default function App() {
               <ResizablePanel
                 id="right-sidebar"
                 panelRef={rightSidebarRef}
-                defaultSize={
-                  startSidebarsCollapsedRef.current
-                    ? "0px"
-                    : `${rightSidebarWidthRef.current}px`
-                }
+                // Right sidebar always starts collapsed (regardless of launch
+                // mode). The user opens it on demand via the rail/shortcut; it
+                // reopens to the stored width. Left sidebar still follows the
+                // launch heuristic.
+                defaultSize="0px"
                 minSize={`${RIGHT_SIDEBAR_MIN_WIDTH}px`}
                 maxSize={`${RIGHT_SIDEBAR_MAX_WIDTH}px`}
                 collapsible

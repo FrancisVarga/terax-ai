@@ -15,7 +15,14 @@ import {
   useAnalytics,
   type Analytics,
   type DayActivity,
+  type SourceBreakdown,
 } from "./lib/useAnalytics";
+
+const SOURCE_LABELS: Record<SourceBreakdown["source"], string> = {
+  claude: "Claude Code",
+  gemini: "Gemini CLI",
+  cursor: "Cursor",
+};
 
 /** Compact number, e.g. 12_500 → "12.5k", 3_200_000 → "3.2M". */
 function fmtNum(n: number): string {
@@ -79,10 +86,12 @@ export function AnalyticsDashboardPane() {
           className="opacity-60"
         />
         <p className="text-[13px] font-medium text-foreground">
-          No AI sessions yet
+          No agent sessions found
         </p>
         <p className="max-w-sm text-[11.5px]">
-          Start chatting with the AI assistant and your local usage analytics —
+          Scanned Claude Code (<code>~/.claude/projects</code>), Gemini CLI
+          (<code>~/.gemini</code>), and Cursor on this machine but found no
+          sessions yet. Use any of those coding agents and your local usage —
           sessions, tokens, models, and tools — will show up here.
         </p>
       </div>
@@ -94,6 +103,7 @@ export function AnalyticsDashboardPane() {
       <div className="mx-auto flex max-w-5xl flex-col gap-5 p-5">
         <Header onRefresh={refresh} loading={loading} />
         <KpiRow data={data} />
+        <SourcesRow sources={data.sources} />
         <ActivityChart daily={data.daily} />
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <ModelsCard data={data} />
@@ -101,10 +111,11 @@ export function AnalyticsDashboardPane() {
         </div>
         <PeakHours data={data} />
         <p className="pt-1 text-[10.5px] leading-relaxed text-muted-foreground/70">
-          100% local — derived from this app's own AI session store, inspired by{" "}
-          <span className="font-medium">agentlytics</span>. Token and cost
-          figures are estimates (≈4 chars/token, blended rate); the SDK does not
-          persist exact token counts.
+          100% local — scanned from on-disk coding-agent sessions (Claude Code,
+          Gemini CLI, Cursor) on this machine, inspired by{" "}
+          <span className="font-medium">agentlytics</span>. Token counts are real
+          where the agent records them and estimated from text (≈4 chars/token)
+          otherwise; cost uses per-model pricing where the model is known.
         </p>
       </div>
     </div>
@@ -200,6 +211,51 @@ function KpiRow({ data }: { data: Analytics }) {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+function SourcesRow({ sources }: { sources: SourceBreakdown[] }) {
+  // Always render the three known sources in a stable order, even when a
+  // source contributed nothing, so the user can see what was scanned.
+  const order: SourceBreakdown["source"][] = ["claude", "gemini", "cursor"];
+  const byKey = new Map(sources.map((s) => [s.source, s]));
+  return (
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      {order.map((key) => {
+        const s = byKey.get(key);
+        const messages = s?.messages ?? 0;
+        const sessions = s?.sessions ?? 0;
+        const note = s?.error;
+        const active = messages > 0;
+        return (
+          <div
+            key={key}
+            className={cn(
+              "flex flex-col gap-1 rounded-lg border p-3",
+              active
+                ? "border-border/50 bg-background/40"
+                : "border-border/30 bg-background/20",
+            )}
+          >
+            <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-muted-foreground/80">
+              <HugeiconsIcon icon={RoboticIcon} size={12} strokeWidth={1.75} />
+              {SOURCE_LABELS[key]}
+            </div>
+            <div className="font-mono text-[16px] font-semibold leading-none text-foreground">
+              {fmtNum(messages)}{" "}
+              <span className="text-[11px] font-normal text-muted-foreground">
+                msg
+              </span>
+            </div>
+            <div className="truncate font-mono text-[10.5px] text-muted-foreground">
+              {active
+                ? `${fmtNum(sessions)} sessions · ${fmtNum(s?.estTokens ?? 0)} tok`
+                : (note ?? "no data")}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -24,6 +24,7 @@ export {
   hasLeaf,
   isLeaf,
   leafIds,
+  paneTitle,
   type PaneId,
   type PaneNode,
   type SplitDir,

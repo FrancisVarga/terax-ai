@@ -158,3 +158,31 @@ export function siblingLeafOf(
 export function hasLeaf(tree: PaneNode, id: PaneId): boolean {
   return leafIds(tree).includes(id);
 }
+
+/**
+ * Short human label for a pane's title bar. Derived from the leaf cwd:
+ * - `ssh://alias/some/dir` -> `alias:dir`
+ * - local path             -> trailing directory name (`dir`)
+ * - root / drive root       -> the path itself
+ * - no cwd yet              -> `Pane N`
+ */
+export function paneTitle(id: PaneId, cwd?: string): string {
+  if (!cwd) return `Pane ${id}`;
+  if (cwd.startsWith("ssh://")) {
+    const rest = cwd.slice("ssh://".length);
+    const slash = rest.indexOf("/");
+    if (slash < 0) return rest || `Pane ${id}`;
+    const alias = rest.slice(0, slash);
+    const path = rest.slice(slash);
+    const base = basename(path);
+    return base ? `${alias}:${base}` : alias;
+  }
+  return basename(cwd) || cwd;
+}
+
+function basename(path: string): string {
+  // Trim trailing separators, then take the segment after the last one.
+  const trimmed = path.replace(/[/\\]+$/, "");
+  const idx = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
+}

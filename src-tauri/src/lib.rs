@@ -1,6 +1,8 @@
 pub mod modules;
 
-use modules::{agent, bunqueue, docker, fs, git, gpu, net, pty, secrets, shell, ssh, workspace};
+use modules::{
+    agent, agentscan, bunqueue, docker, fs, git, gpu, net, pty, secrets, shell, ssh, workspace,
+};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
@@ -13,6 +15,14 @@ struct LaunchDir(Mutex<Option<String>>);
 #[tauri::command]
 fn get_launch_dir(state: State<'_, LaunchDir>) -> Option<String> {
     state.0.lock().expect("LaunchDir mutex poisoned").take()
+}
+
+// Durable sink for uncaught renderer errors / unhandled promise rejections and
+// React error-boundary crashes. The frontend redacts secrets before sending,
+// so the message is safe to write to the plugin log.
+#[tauri::command]
+fn log_renderer_error(message: String) {
+    tauri_plugin_log::log::error!(target: "renderer", "{message}");
 }
 
 fn parse_launch_dir() -> Option<String> {
@@ -315,10 +325,12 @@ pub fn run() {
             workspace::workspace_authorize,
             workspace::workspace_current_dir,
             get_launch_dir,
+            log_renderer_error,
             open_settings_window,
             open_main_window,
             agent::agent_enable_claude_hooks,
             agent::agent_claude_hooks_status,
+            agentscan::agentscan_collect,
             secrets::secrets_get,
             secrets::secrets_set,
             secrets::secrets_delete,

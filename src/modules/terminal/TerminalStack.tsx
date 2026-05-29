@@ -14,6 +14,8 @@ type Props = {
   onCwd: (leafId: number, cwd: string) => void;
   onExit: (leafId: number, code: number) => void;
   onFocusLeaf: (tabId: number, leafId: number) => void;
+  /** Close a single split pane by its leaf id. */
+  onClosePane: (leafId: number) => void;
 };
 
 type Bundle = {
@@ -31,6 +33,7 @@ export function TerminalStack({
   onCwd,
   onExit,
   onFocusLeaf,
+  onClosePane,
 }: Props) {
   const terminals = useMemo(
     () => tabs.filter((t) => t.kind === "terminal"),
@@ -96,6 +99,7 @@ export function TerminalStack({
               tabVisible={tabVisible}
               activeLeafId={t.activeLeafId}
               onFocusLeaf={(leafId) => onFocusLeaf(t.id, leafId)}
+              onClosePane={onClosePane}
               getBundle={getBundle}
             />
           </div>

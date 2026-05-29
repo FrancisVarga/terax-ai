@@ -32,6 +32,7 @@ grep-searcher = "0.1"
 grep-matcher = "0.1"
 globset = "0.4"
 shared_child = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
 tauri-plugin-log = "2"
 tauri-plugin-os = "2"
 tauri-plugin-store = "2"
