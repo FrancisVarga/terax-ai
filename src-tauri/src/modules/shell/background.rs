@@ -9,6 +9,7 @@ use serde::Serialize;
 use shared_child::SharedChild;
 
 use super::ringbuffer::BoundedRingBuffer;
+use crate::modules::sync::MutexExt;
 use crate::modules::workspace::{resolve_path, WorkspaceEnv};
 
 const RING_CAP: usize = 4 * 1024 * 1024;
@@ -45,7 +46,7 @@ pub struct BackgroundProcInfo {
 
 impl BackgroundProc {
     pub fn read_logs(&self, since: u64) -> BackgroundLogResponse {
-        let (bytes, next_offset, dropped) = self.buffer.lock().unwrap().read_from(since);
+        let (bytes, next_offset, dropped) = self.buffer.lock_safe().read_from(since);
         let exited = self.exited.load(Ordering::Acquire);
         let exit_code = if exited && !self.exit_unknown.load(Ordering::Acquire) {
             Some(self.exit_code.load(Ordering::Acquire))
@@ -151,7 +152,7 @@ pub fn spawn(
             loop {
                 match pipe.read(&mut buf) {
                     Ok(0) => break,
-                    Ok(n) => proc_ref.buffer.lock().unwrap().push(&buf[..n]),
+                    Ok(n) => proc_ref.buffer.lock_safe().push(&buf[..n]),
                     Err(_) => break,
                 }
             }
@@ -165,7 +166,7 @@ pub fn spawn(
             loop {
                 match pipe.read(&mut buf) {
                     Ok(0) => break,
-                    Ok(n) => proc_ref.buffer.lock().unwrap().push(&buf[..n]),
+                    Ok(n) => proc_ref.buffer.lock_safe().push(&buf[..n]),
                     Err(_) => break,
                 }
             }

@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::modules::sync::MutexExt;
+
 // Short TTL keeps the auth-check TOCTOU window tight while still coalescing the
 // burst of canonicalize calls within a single panel refresh (~100ms).
 const CANONICAL_TTL: Duration = Duration::from_secs(1);
@@ -24,23 +26,20 @@ pub struct WorkspaceRegistry {
 impl WorkspaceRegistry {
     pub fn authorize<P: AsRef<Path>>(&self, path: P) -> std::io::Result<PathBuf> {
         let canonical = std::fs::canonicalize(path.as_ref())?;
-        let mut set = self.roots.lock().expect("workspace registry poisoned");
+        let mut set = self.roots.lock_safe();
         set.insert(canonical.clone());
         Ok(canonical)
     }
 
     pub fn is_authorized(&self, target: &Path) -> bool {
-        let set = self.roots.lock().expect("workspace registry poisoned");
+        let set = self.roots.lock_safe();
         set.iter().any(|root| target.starts_with(root))
     }
 
     pub fn canonicalize_cached<P: AsRef<Path>>(&self, path: P) -> std::io::Result<PathBuf> {
         let key = path.as_ref().to_path_buf();
         {
-            let cache = self
-                .canonical_cache
-                .lock()
-                .expect("canonical cache poisoned");
+            let cache = self.canonical_cache.lock_safe();
             if let Some(entry) = cache.get(&key) {
                 if entry.inserted_at.elapsed() < CANONICAL_TTL {
                     return Ok(entry.canonical.clone());
@@ -48,10 +47,7 @@ impl WorkspaceRegistry {
             }
         }
         let canonical = std::fs::canonicalize(&key)?;
-        let mut cache = self
-            .canonical_cache
-            .lock()
-            .expect("canonical cache poisoned");
+        let mut cache = self.canonical_cache.lock_safe();
         if cache.len() >= CANONICAL_CACHE_CAP {
             cache.retain(|_, entry| entry.inserted_at.elapsed() < CANONICAL_TTL);
             if cache.len() >= CANONICAL_CACHE_CAP {

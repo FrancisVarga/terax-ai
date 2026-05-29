@@ -1,8 +1,9 @@
 pub mod modules;
 
+use modules::sync::MutexExt;
 use modules::{
-    agent, agentscan, bunqueue, ccusage, docker, fs, git, gpu, net, pty, secrets, shell, ssh,
-    workspace,
+    agent, agentscan, bunqueue, ccusage, cleanup, crash, docker, fs, git, gpu, net, pty, s3,
+    secrets, shell, ssh, workspace,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -16,7 +17,7 @@ struct LaunchDir(Mutex<Option<String>>);
 
 #[tauri::command]
 fn get_launch_dir(state: State<'_, LaunchDir>) -> Option<String> {
-    state.0.lock().expect("LaunchDir mutex poisoned").take()
+    state.0.lock_safe().take()
 }
 
 // Durable sink for uncaught renderer errors / unhandled promise rejections and
@@ -155,12 +156,7 @@ async fn open_main_window(app: tauri::AppHandle, dir: Option<String>) -> Result<
         .map(normalize_dir_key);
     if let Some(key) = dir_key.as_deref() {
         let registry = app.state::<ProjectWindows>();
-        let existing = registry
-            .0
-            .lock()
-            .expect("ProjectWindows mutex poisoned")
-            .get(key)
-            .cloned();
+        let existing = registry.0.lock_safe().get(key).cloned();
         if let Some(label) = existing {
             if let Some(window) = app.get_webview_window(&label) {
                 let _ = window.unminimize();
@@ -169,11 +165,7 @@ async fn open_main_window(app: tauri::AppHandle, dir: Option<String>) -> Result<
                 return Ok(());
             }
             // Stale entry (window gone) — drop it and fall through to spawn.
-            registry
-                .0
-                .lock()
-                .expect("ProjectWindows mutex poisoned")
-                .remove(key);
+            registry.0.lock_safe().remove(key);
         }
     }
 
@@ -232,15 +224,14 @@ async fn open_main_window(app: tauri::AppHandle, dir: Option<String>) -> Result<
     if let Some(key) = dir_key {
         app.state::<ProjectWindows>()
             .0
-            .lock()
-            .expect("ProjectWindows mutex poisoned")
+            .lock_safe()
             .insert(key.clone(), label.clone());
 
         let app_handle = app.clone();
         window.on_window_event(move |event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 if let Some(reg) = app_handle.try_state::<ProjectWindows>() {
-                    let mut map = reg.0.lock().expect("ProjectWindows mutex poisoned");
+                    let mut map = reg.0.lock_safe();
                     if map.get(&key).map(|l| l == &label).unwrap_or(false) {
                         map.remove(&key);
                     }
@@ -254,6 +245,11 @@ async fn open_main_window(app: tauri::AppHandle, dir: Option<String>) -> Result<
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Capture Rust panics before anything else can panic. The release profile
+    // aborts on panic (no unwind, no message), so this hook is the only chance
+    // to write a crash report to the log dir. Must precede every other init.
+    crash::install_hook();
+
     // Force the webview onto the GPU compositing path before the runtime boots.
     // Chromium/WebKitGTK read these knobs once at startup, so this must precede
     // tauri::Builder. Without it WebView2 silently falls back to software
@@ -282,6 +278,20 @@ pub fn run() {
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(tauri_plugin_log::log::LevelFilter::Info)
+                // Durable, rotating file in the OS log dir (where crash.rs also
+                // writes crash.log) plus stdout for dev and the webview so the
+                // frontend's attachConsole() sees backend logs. KeepAll keeps
+                // the prior file on rotation so a crash log isn't overwritten by
+                // the next launch.
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("terax".into()),
+                    }),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
+                ])
+                .max_file_size(5_000_000 /* 5 MB */)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
@@ -300,6 +310,7 @@ pub fn run() {
         .manage(LaunchDir(Mutex::new(cli_dir)))
         .manage(bunqueue::BunqueueState::default())
         .manage(ssh::SshFsState::default())
+        .manage(s3::S3State::default())
         .manage(ProjectWindows::default())
         .setup(|app| {
             // In dev builds, suffix window titles with " Dev" so a running dev
@@ -321,13 +332,26 @@ pub fn run() {
             // coalesce sleep is honored instead of rounding to ~15ms (Windows).
             pty::raise_timer_resolution();
 
+            // Self-heal: remove any stale parallel install of an older/renamed
+            // product identity (Windows). Runs detached so it never blocks
+            // startup. See modules/cleanup.rs for the why.
+            cleanup::sweep_stale_installs();
+
             // Resolve a persistent SQLite path under the app data dir so the
-            // queue survives restarts (bunqueue defaults to in-memory).
+            // queue survives restarts (bunqueue defaults to in-memory). Dev
+            // builds use a separate DB file so a `tauri dev` instance and an
+            // installed release (which run on different ports — see bunqueue.rs)
+            // never share one SQLite file and corrupt each other's queue.
+            let db_file = if cfg!(debug_assertions) {
+                "queue-dev.db"
+            } else {
+                "queue.db"
+            };
             let data_path = app
                 .path()
                 .app_data_dir()
                 .ok()
-                .map(|dir| dir.join("bunqueue").join("queue.db"));
+                .map(|dir| dir.join("bunqueue").join(db_file));
 
             // Start the bunqueue job-queue server on boot (HTTP API + no auth,
             // persistent SQLite). Non-fatal if Bun is unavailable.
@@ -416,6 +440,13 @@ pub fn run() {
             secrets::secrets_set,
             secrets::secrets_delete,
             secrets::secrets_get_all,
+            s3::s3_list_connections,
+            s3::s3_save_connection,
+            s3::s3_delete_connection,
+            s3::s3_list,
+            s3::s3_get_object_bytes,
+            s3::s3_download_to_cache,
+            s3::s3_parquet_preview,
             net::lm_ping,
             net::ai_http_request,
             net::ai_http_stream,

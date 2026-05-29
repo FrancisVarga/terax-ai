@@ -11,6 +11,7 @@ use tauri::{AppHandle, Emitter};
 use super::agent_detect::AgentDetector;
 use super::da_filter::DaFilter;
 use super::shell_init;
+use crate::modules::sync::MutexExt;
 use crate::modules::workspace::WorkspaceEnv;
 
 const AGENT_EVENT: &str = "terax:agent-signal";
@@ -73,7 +74,7 @@ static CONPTY_LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
 
 pub(super) fn drop_session(session: Arc<Session>) {
     #[cfg(windows)]
-    let _guard = CONPTY_LIFECYCLE_LOCK.lock().unwrap();
+    let _guard = CONPTY_LIFECYCLE_LOCK.lock_safe();
     drop(session);
 }
 
@@ -111,7 +112,7 @@ pub fn spawn(
     on_exit: Channel<i32>,
 ) -> Result<(Arc<Session>, PtySize), String> {
     #[cfg(windows)]
-    let _spawn_guard = CONPTY_LIFECYCLE_LOCK.lock().unwrap();
+    let _spawn_guard = CONPTY_LIFECYCLE_LOCK.lock_safe();
 
     let pty_system = native_pty_system();
     let size = PtySize {
@@ -196,7 +197,7 @@ pub fn spawn(
                             continue;
                         }
                         let (lock, cv) = &*pending_r;
-                        let mut g = lock.lock().unwrap();
+                        let mut g = lock.lock_safe();
                         if g.len() + filtered.len() > MAX_PENDING {
                             dropped_bytes += g.len() as u64;
                             g.clear();
@@ -219,7 +220,10 @@ pub fn spawn(
                 log::warn!("pty backpressure: dropped {dropped_bytes} bytes (cap {MAX_PENDING})");
             }
         })
-        .expect("spawn pty reader thread");
+        .map_err(|e| {
+            // Session's Drop kills the child, so returning here can't leak it.
+            format!("spawn pty reader thread: {e}")
+        })?;
 
     let on_data_flush = on_data.clone();
     let pending_f = pending.clone();
@@ -231,12 +235,14 @@ pub fn spawn(
             loop {
                 let pending_len;
                 {
-                    let mut g = lock.lock().unwrap();
+                    let mut g = lock.lock_safe();
                     while g.is_empty() {
                         if done_f.load(Ordering::Acquire) {
                             return;
                         }
-                        let (next, _) = cv.wait_timeout(g, FLUSH_MAX_IDLE).unwrap();
+                        let (next, _) = cv
+                            .wait_timeout(g, FLUSH_MAX_IDLE)
+                            .unwrap_or_else(|p| p.into_inner());
                         g = next;
                     }
                     pending_len = g.len();
@@ -247,7 +253,7 @@ pub fn spawn(
                 if pending_len > FLUSH_ECHO_THRESHOLD {
                     thread::sleep(FLUSH_COALESCE);
                 }
-                let chunk = std::mem::take(&mut *lock.lock().unwrap());
+                let chunk = std::mem::take(&mut *lock.lock_safe());
                 if chunk.is_empty() {
                     continue;
                 }
@@ -257,7 +263,7 @@ pub fn spawn(
                 }
             }
         })
-        .expect("spawn pty flusher thread");
+        .map_err(|e| format!("spawn pty flusher thread: {e}"))?;
 
     let on_data_exit = on_data;
     let pending_e = pending;
@@ -286,7 +292,7 @@ pub fn spawn(
                 log::error!("pty reader thread panicked: {e:?}");
             }
             let (lock, cv) = &*pending_e;
-            let tail = std::mem::take(&mut *lock.lock().unwrap());
+            let tail = std::mem::take(&mut *lock.lock_safe());
             if !tail.is_empty() {
                 if let Err(e) = on_data_exit.send(Response::new(tail)) {
                     log::debug!("pty final-data send failed (channel closed): {e}");
@@ -298,7 +304,7 @@ pub fn spawn(
                 log::debug!("pty exit send failed (channel closed): {e}");
             }
         })
-        .expect("spawn pty waiter thread");
+        .map_err(|e| format!("spawn pty waiter thread: {e}"))?;
 
     Ok((session, size))
 }

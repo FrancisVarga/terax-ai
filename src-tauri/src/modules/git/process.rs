@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use shared_child::SharedChild;
 
 use crate::modules::git::errors::{GitError, Result};
+use crate::modules::sync::MutexExt;
 use crate::modules::git::types::{
     GitOutput, TextSource, DEFAULT_TIMEOUT_SECS, MAX_FILE_BYTES, MAX_OUTPUT_BYTES,
     MAX_TIMEOUT_SECS, MIN_GIT_VERSION,
@@ -53,9 +54,7 @@ fn workspace_cache_key(workspace: &WorkspaceEnv) -> String {
 pub fn ensure_git_available(workspace: &WorkspaceEnv) -> Result<()> {
     let cache_key = workspace_cache_key(workspace);
     let cached = {
-        let mut guard = availability_cell()
-            .lock()
-            .expect("git availability poisoned");
+        let mut guard = availability_cell().lock_safe();
         prune_expired_availability_entries(&mut guard);
         guard
             .get(&cache_key)

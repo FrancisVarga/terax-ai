@@ -43,12 +43,19 @@ use shared_child::SharedChild;
 use tauri::Manager;
 
 use crate::modules::shell::ringbuffer::BoundedRingBuffer;
+use crate::modules::sync::MutexExt;
 
 /// Ports Terax runs bunqueue on. Deliberately NOT bunqueue's defaults
 /// (6789/6790) so the embedded server can't collide with a standalone bunqueue
 /// the user may run separately. Passed explicitly via CLI flags on spawn.
-const TCP_PORT: u16 = 7889;
-const HTTP_PORT: u16 = 7890;
+///
+/// Dev builds use a +100 offset so a `tauri dev` instance and an installed
+/// release can run side-by-side without fighting over the same loopback ports
+/// (both would otherwise bind 7889/7890 and one's server spawn would fail).
+/// `debug_assertions` is the same dev/release discriminator the window title
+/// uses in `lib.rs`.
+const TCP_PORT: u16 = if cfg!(debug_assertions) { 7989 } else { 7889 };
+const HTTP_PORT: u16 = if cfg!(debug_assertions) { 7990 } else { 7890 };
 
 /// Output ring-buffer cap. Server is chatty on boot but steady-state quiet;
 /// 1 MiB keeps recent logs without unbounded growth.
@@ -320,7 +327,7 @@ fn spawn_pipe_reader<R: Read + Send + 'static>(proc: Arc<ManagedProc>, mut pipe:
         loop {
             match pipe.read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => proc.buffer.lock().unwrap().push(&buf[..n]),
+                Ok(n) => proc.buffer.lock_safe().push(&buf[..n]),
                 Err(_) => break,
             }
         }
@@ -404,7 +411,7 @@ fn spawn_worker(script_rel: &str, sidecar_base: &str) -> Result<Arc<ManagedProc>
 
 /// Start all registered workers. Best-effort; failures are logged.
 fn start_workers(state: &BunqueueState) {
-    let mut guard = state.workers.lock().expect("bunqueue workers mutex poisoned");
+    let mut guard = state.workers.lock_safe();
     for (name, queue, script_rel, sidecar_base) in WORKERS {
         let already = guard
             .iter()
@@ -447,8 +454,7 @@ pub fn set_data_path(state: &BunqueueState, path: Option<PathBuf>) {
 fn server_running(state: &BunqueueState) -> bool {
     state
         .proc
-        .lock()
-        .expect("bunqueue mutex poisoned")
+        .lock_safe()
         .as_ref()
         .map(|p| !p.exited.load(Ordering::Acquire))
         .unwrap_or(false)
@@ -504,7 +510,7 @@ pub fn start_watchdog(app: tauri::AppHandle) {
 /// Start the server once, on app boot. Logs failure but never panics — a
 /// missing Bun runtime should degrade gracefully, not crash Terax.
 pub fn start_on_boot(state: &BunqueueState) {
-    let mut guard = state.proc.lock().expect("bunqueue mutex poisoned");
+    let mut guard = state.proc.lock_safe();
     if guard.as_ref().map(|p| !p.exited.load(Ordering::Acquire)).unwrap_or(false) {
         return; // already running
     }
@@ -551,7 +557,7 @@ fn status_of(proc: &ManagedProc) -> BunqueueStatus {
 
 #[tauri::command]
 pub fn bunqueue_status(state: tauri::State<'_, BunqueueState>) -> BunqueueStatus {
-    let guard = state.proc.lock().expect("bunqueue mutex poisoned");
+    let guard = state.proc.lock_safe();
     match guard.as_ref() {
         Some(proc) => status_of(proc),
         None => BunqueueStatus {
@@ -573,11 +579,11 @@ pub fn bunqueue_logs(
     state: tauri::State<'_, BunqueueState>,
     since_offset: Option<u64>,
 ) -> BunqueueLogResponse {
-    let guard = state.proc.lock().expect("bunqueue mutex poisoned");
+    let guard = state.proc.lock_safe();
     match guard.as_ref() {
         Some(proc) => {
             let (bytes, next_offset, dropped) =
-                proc.buffer.lock().unwrap().read_from(since_offset.unwrap_or(0));
+                proc.buffer.lock_safe().read_from(since_offset.unwrap_or(0));
             BunqueueLogResponse {
                 bytes: String::from_utf8_lossy(&bytes).into_owned(),
                 next_offset,
@@ -601,13 +607,13 @@ pub fn bunqueue_logs(
 pub fn bunqueue_restart(state: tauri::State<'_, BunqueueState>) -> Result<BunqueueStatus, String> {
     // Stop workers first — they reconnect to the new server after it restarts.
     {
-        let mut workers = state.workers.lock().expect("bunqueue workers mutex poisoned");
+        let mut workers = state.workers.lock_safe();
         for w in workers.drain(..) {
             w.proc.kill();
         }
     }
     {
-        let mut guard = state.proc.lock().expect("bunqueue mutex poisoned");
+        let mut guard = state.proc.lock_safe();
         if let Some(old) = guard.take() {
             old.kill();
             // Drop the Arc; the wait thread observes the kill and exits.
@@ -615,7 +621,7 @@ pub fn bunqueue_restart(state: tauri::State<'_, BunqueueState>) -> Result<Bunque
     }
     let proc = spawn_server(state.data_path())?;
     let status = status_of(&proc);
-    *state.proc.lock().expect("bunqueue mutex poisoned") = Some(proc);
+    *state.proc.lock_safe() = Some(proc);
     start_workers(&state);
     Ok(status)
 }
@@ -637,7 +643,7 @@ pub struct WorkerInfo {
 /// HTTP).
 #[tauri::command]
 pub fn bunqueue_workers(state: tauri::State<'_, BunqueueState>) -> Vec<WorkerInfo> {
-    let workers = state.workers.lock().expect("bunqueue workers mutex poisoned");
+    let workers = state.workers.lock_safe();
     workers
         .iter()
         .map(|w| {
