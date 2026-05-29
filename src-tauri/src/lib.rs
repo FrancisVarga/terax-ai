@@ -1,6 +1,8 @@
 pub mod modules;
 
-use modules::{agent, bunqueue, docker, fs, git, gpu, net, pty, secrets, shell, ssh, workspace};
+use modules::{
+    agent, agentscan, bunqueue, docker, fs, git, gpu, net, pty, secrets, shell, ssh, workspace,
+};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
@@ -319,6 +321,7 @@ pub fn run() {
             open_main_window,
             agent::agent_enable_claude_hooks,
             agent::agent_claude_hooks_status,
+            agentscan::agentscan_collect,
             secrets::secrets_get,
             secrets::secrets_set,
             secrets::secrets_delete,

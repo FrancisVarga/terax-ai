@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod agentscan;
 pub mod bunqueue;
 pub mod docker;
 pub mod fs;
