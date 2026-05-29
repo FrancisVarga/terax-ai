@@ -20,14 +20,22 @@ type Status =
 type Props = {
   path: string;
   visible: boolean;
+  /**
+   * When provided, the preview renders this live content instead of reading the
+   * file from disk — used by the split editor+preview view so the right pane
+   * tracks the left pane's buffer as the user types.
+   */
+  content?: string;
 };
 
 const components = { code: MarkdownCode };
 
-export function MarkdownPreviewPane({ path, visible }: Props) {
+export function MarkdownPreviewPane({ path, visible, content }: Props) {
   const [status, setStatus] = useState<Status>({ kind: "loading" });
+  const live = content !== undefined;
 
   useEffect(() => {
+    if (live) return; // live mode renders `content` directly; no disk read
     let cancelled = false;
     setStatus({ kind: "loading" });
     invoke<ReadResult>("fs_read_file", {
@@ -54,7 +62,10 @@ export function MarkdownPreviewPane({ path, visible }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [path]);
+  }, [path, live]);
+
+  // In live mode the rendered content is whatever the editor buffer holds.
+  const renderContent = live ? (content as string) : null;
 
   return (
     <div
@@ -64,31 +75,42 @@ export function MarkdownPreviewPane({ path, visible }: Props) {
       )}
     >
       <div className="flex-1 overflow-auto px-6 py-4">
-        {status.kind === "loading" && (
-          <p className="text-[12px] text-muted-foreground">Loading…</p>
-        )}
-        {status.kind === "error" && (
-          <p className="text-[12px] text-destructive">
-            Failed to read file: {status.message}
-          </p>
-        )}
-        {status.kind === "binary" && (
-          <p className="text-[12px] text-muted-foreground">
-            Binary file — cannot render as markdown.
-          </p>
-        )}
-        {status.kind === "toolarge" && (
-          <p className="text-[12px] text-muted-foreground">
-            File is {status.size} bytes; limit {status.limit}.
-          </p>
-        )}
-        {status.kind === "ready" && (
+        {renderContent !== null ? (
           <Streamdown
             className="select-text prose-sm [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
             components={components}
           >
-            {status.content}
+            {renderContent}
           </Streamdown>
+        ) : (
+          <>
+            {status.kind === "loading" && (
+              <p className="text-[12px] text-muted-foreground">Loading…</p>
+            )}
+            {status.kind === "error" && (
+              <p className="text-[12px] text-destructive">
+                Failed to read file: {status.message}
+              </p>
+            )}
+            {status.kind === "binary" && (
+              <p className="text-[12px] text-muted-foreground">
+                Binary file — cannot render as markdown.
+              </p>
+            )}
+            {status.kind === "toolarge" && (
+              <p className="text-[12px] text-muted-foreground">
+                File is {status.size} bytes; limit {status.limit}.
+              </p>
+            )}
+            {status.kind === "ready" && (
+              <Streamdown
+                className="select-text prose-sm [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+                components={components}
+              >
+                {status.content}
+              </Streamdown>
+            )}
+          </>
         )}
       </div>
     </div>

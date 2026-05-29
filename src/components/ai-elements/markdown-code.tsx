@@ -2,6 +2,7 @@
 
 import type { ReactNode } from "react";
 
+import { MermaidDiagram } from "@/modules/markdown/MermaidDiagram";
 import { ChatCodeBlock } from "./chat-code";
 
 /**
@@ -30,5 +31,9 @@ export function MarkdownCode({
   }
 
   const code = String(children ?? "").replace(/\n$/, "");
+  // ```mermaid blocks render as diagrams instead of highlighted source.
+  if (match[1] === "mermaid") {
+    return <MermaidDiagram code={code} />;
+  }
   return <ChatCodeBlock code={code} lang={match[1] ?? null} />;
 }

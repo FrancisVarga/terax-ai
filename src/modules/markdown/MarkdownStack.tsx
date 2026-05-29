@@ -1,13 +1,14 @@
 import { cn } from "@/lib/utils";
 import type { MarkdownTab, Tab } from "@/modules/tabs";
-import { MarkdownPreviewPane } from "./MarkdownPreviewPane";
+import { MarkdownSplitPane } from "./MarkdownSplitPane";
 
 type Props = {
   tabs: Tab[];
   activeId: number;
+  onDirtyChange?: (id: number, dirty: boolean) => void;
 };
 
-export function MarkdownStack({ tabs, activeId }: Props) {
+export function MarkdownStack({ tabs, activeId, onDirtyChange }: Props) {
   const markdowns = tabs.filter((t): t is MarkdownTab => t.kind === "markdown");
   if (markdowns.length === 0) return null;
   return (
@@ -23,7 +24,11 @@ export function MarkdownStack({ tabs, activeId }: Props) {
             )}
             aria-hidden={!visible}
           >
-            <MarkdownPreviewPane path={t.path} visible={visible} />
+            <MarkdownSplitPane
+              path={t.path}
+              visible={visible}
+              onDirtyChange={(dirty) => onDirtyChange?.(t.id, dirty)}
+            />
           </div>
         );
       })}
