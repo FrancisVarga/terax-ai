@@ -136,13 +136,17 @@ export function ThemeProvider({ children, defaultMode = "system" }: ThemeProvide
 
   const lastEditorPairRef = useRef<string | null>(null);
   useEffect(() => {
+    const root = document.documentElement;
     if (themeId === DEFAULT_THEME_ID) {
       clearTheme();
+      root.removeAttribute("data-glass");
       lastEditorPairRef.current = null;
       return;
     }
     const theme = resolveTheme(themeId, customThemes);
     applyTheme(theme, resolvedMode);
+    if (theme.glass) root.setAttribute("data-glass", "");
+    else root.removeAttribute("data-glass");
     const editorPair = theme.editorTheme?.[resolvedMode];
     if (
       editorPair &&

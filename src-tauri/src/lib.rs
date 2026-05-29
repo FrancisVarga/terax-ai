@@ -15,8 +15,19 @@ use tauri_plugin_window_state::StateFlags;
 #[derive(Default)]
 struct LaunchDir(Mutex<Option<String>>);
 
+/// Set when the app is launched with a *file* argument ("Open with Terax
+/// Camelot"). Holds the canonical file path; the workspace cwd is its parent
+/// dir (stored in `LaunchDir`). Drained on first read like `LaunchDir`.
+#[derive(Default)]
+struct LaunchFile(Mutex<Option<String>>);
+
 #[tauri::command]
 fn get_launch_dir(state: State<'_, LaunchDir>) -> Option<String> {
+    state.0.lock_safe().take()
+}
+
+#[tauri::command]
+fn get_launch_file(state: State<'_, LaunchFile>) -> Option<String> {
     state.0.lock_safe().take()
 }
 
@@ -28,18 +39,30 @@ fn log_renderer_error(message: String) {
     tauri_plugin_log::log::error!(target: "renderer", "{message}");
 }
 
-fn parse_launch_dir() -> Option<String> {
+/// Parse the first positional path argument into a launch target. A directory
+/// becomes the workspace cwd. A file ("Open with Terax Camelot") resolves to
+/// its parent dir as the cwd plus the file path to open in the editor.
+fn parse_launch_target() -> (Option<String>, Option<String>) {
     for arg in std::env::args().skip(1) {
         if arg.starts_with('-') {
             continue;
         }
-        let Ok(canon) = std::fs::canonicalize(&arg) else { continue };
-        if !canon.is_dir() {
+        let Ok(canon) = std::fs::canonicalize(&arg) else {
             continue;
+        };
+        if canon.is_dir() {
+            return (Some(crate::modules::fs::to_canon(&canon)), None);
         }
-        return Some(crate::modules::fs::to_canon(&canon));
+        if canon.is_file() {
+            let file = crate::modules::fs::to_canon(&canon);
+            let dir = canon
+                .parent()
+                .map(crate::modules::fs::to_canon)
+                .filter(|d| !d.is_empty());
+            return (dir, Some(file));
+        }
     }
-    None
+    (None, None)
 }
 
 #[tauri::command]
@@ -257,7 +280,7 @@ pub fn run() {
     // the WebGL-rendered terminal janky despite WebGL "working". See gpu.rs.
     gpu::configure();
 
-    let cli_dir = parse_launch_dir();
+    let (cli_dir, cli_file) = parse_launch_target();
     workspace::init_launch_cwd(cli_dir.as_deref());
 
     tauri::Builder::default()
@@ -308,6 +331,7 @@ pub fn run() {
             registry
         })
         .manage(LaunchDir(Mutex::new(cli_dir)))
+        .manage(LaunchFile(Mutex::new(cli_file)))
         .manage(bunqueue::BunqueueState::default())
         .manage(ssh::SshFsState::default())
         .manage(s3::S3State::default())
@@ -429,6 +453,7 @@ pub fn run() {
             workspace::workspace_authorize,
             workspace::workspace_current_dir,
             get_launch_dir,
+            get_launch_file,
             log_renderer_error,
             open_settings_window,
             open_main_window,

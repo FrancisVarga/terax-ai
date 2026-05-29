@@ -3,6 +3,7 @@ import { caffeine } from "./caffeine";
 import { catppuccin } from "./catppuccin";
 import { claude } from "./claude";
 import { gruvbox } from "./gruvbox";
+import { metal } from "./metal";
 import { nord } from "./nord";
 import { rosePine } from "./rose-pine";
 import { sage } from "./sage";
@@ -12,6 +13,7 @@ import { tokyoNight } from "./tokyo-night";
 
 const BUILTIN: Theme[] = [
   teraxDefault,
+  metal,
   claude,
   tokyoNight,
   nord,

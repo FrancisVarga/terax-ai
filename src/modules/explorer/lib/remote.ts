@@ -61,6 +61,7 @@ export async function readDir(
       kind: e.kind as DirEntry["kind"],
       size: e.size,
       mtime: e.mtime,
+      ignored: false, // remote roots have no gitignore evaluation
     }));
   }
   return invoke<DirEntry[]>("fs_read_dir", {

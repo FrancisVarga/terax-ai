@@ -30,6 +30,7 @@ import {
   setTerminalLetterSpacing,
   setTerminalFontSize,
   setTerminalScrollback,
+  setTerminalCopyOnSelect,
   setTerminalWebglEnabled,
   setVimMode,
   setZoomLevel,
@@ -90,6 +91,9 @@ export function GeneralSection() {
   );
   const terminalFontSize = usePreferencesStore((s) => s.terminalFontSize);
   const terminalScrollback = usePreferencesStore((s) => s.terminalScrollback);
+  const terminalCopyOnSelect = usePreferencesStore(
+    (s) => s.terminalCopyOnSelect,
+  );
   const zoomLevel = usePreferencesStore((s) => s.zoomLevel);
   const agentNotifications = usePreferencesStore((s) => s.agentNotifications);
 
@@ -352,6 +356,15 @@ export function GeneralSection() {
               ))}
             </SelectContent>
           </Select>
+        </SettingRow>
+        <SettingRow
+          title="Copy on select"
+          description="Automatically copy selected terminal text to the clipboard."
+        >
+          <Switch
+            checked={terminalCopyOnSelect}
+            onCheckedChange={(v) => void setTerminalCopyOnSelect(v)}
+          />
         </SettingRow>
       </div>
 

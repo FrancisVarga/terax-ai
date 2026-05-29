@@ -260,6 +260,18 @@ function createSlot(): Slot {
     adapter?.resolveLeaf(leafId)?.writeToPty(data);
   });
 
+  // Auto-copy on select: mirror the live selection to the system clipboard the
+  // moment it changes (xterm fires this on every delta, including clear-to-
+  // empty). Guard on hasSelection() so deselecting via a click never blanks the
+  // clipboard. Pref is read live from the store, not closure-captured, so the
+  // toggle takes effect without recreating the slot.
+  term.onSelectionChange(() => {
+    if (!usePreferencesStore.getState().terminalCopyOnSelect) return;
+    if (!slot.term.hasSelection()) return;
+    const sel = slot.term.getSelection();
+    if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
+  });
+
   slots.push(slot);
   ensureDormantSweep();
   return slot;

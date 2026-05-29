@@ -370,3 +370,56 @@ html *::-webkit-scrollbar {
 .terax-collapsible-content[data-state="closed"] {
   animation: terax-collapsible-up 160ms cubic-bezier(0.4, 0, 0.2, 1);
 }
+
+/*
+ * Glass theme surfacing (Titanium). Opt-in via html[data-glass], set by
+ * ThemeProvider when the active theme has `glass: true`. Translucent surface
+ * colors come from the theme; here we add the frost (backdrop-filter blur) and
+ * a metallic sheen so panels refract whatever is behind them — the brushed
+ * steel gradient below, or a user background image. Scoped to data-glass so no
+ * other theme pays the blur cost.
+ */
+html[data-glass] body {
+  /* Brushed-steel base: faint diagonal highlight + cool radial glow so glass
+   * surfaces have texture to refract even without a background image. */
+  background-image:
+    radial-gradient(
+      120% 120% at 15% 0%,
+      rgba(158, 197, 232, 0.08) 0%,
+      transparent 45%
+    ),
+    linear-gradient(
+      135deg,
+      rgba(184, 204, 224, 0.05) 0%,
+      transparent 30%,
+      transparent 70%,
+      rgba(120, 140, 165, 0.06) 100%
+    );
+  background-attachment: fixed;
+}
+
+/* Frost the translucent surfaces. Surfaces use Tailwind opacity utilities
+ * (bg-card/60, bg-card/85, bg-popover, …) which compile to distinct class
+ * names, so we match by substring rather than exact class. The opacity in the
+ * utility provides the translucency; the blur here reveals the glass behind. */
+html[data-glass] [class*="bg-card"],
+html[data-glass] [class*="bg-popover"],
+html[data-glass] [class*="bg-sidebar"],
+html[data-glass] [data-slot="dialog-content"],
+html[data-glass] [data-slot="popover-content"],
+html[data-glass] [data-slot="dropdown-menu-content"],
+html[data-glass] [data-slot="sheet-content"] {
+  -webkit-backdrop-filter: blur(16px) saturate(150%);
+  backdrop-filter: blur(16px) saturate(150%);
+}
+
+/* Top-edge sheen — the bright rim of polished metal. A 1px inset highlight
+ * along the top edge plus a soft drop shadow to lift the glass off the base. */
+html[data-glass] [data-slot="card"],
+html[data-glass] [data-slot="dialog-content"],
+html[data-glass] [data-slot="popover-content"],
+html[data-glass] [data-slot="dropdown-menu-content"] {
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.09),
+    0 8px 32px -8px rgba(0, 0, 0, 0.5);
+}

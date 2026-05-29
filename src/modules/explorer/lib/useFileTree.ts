@@ -10,6 +10,8 @@ export type DirEntry = {
   kind: "file" | "dir" | "symlink";
   size: number;
   mtime: number;
+  /** True when git would ignore this entry; the tree dims it. */
+  ignored: boolean;
 };
 
 type ChildrenState =

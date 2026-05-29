@@ -52,6 +52,13 @@ export type Theme = {
   name: string;
   author?: string;
   description?: string;
+  /**
+   * When true, the app paints frosted-glass surfaces for this theme: a
+   * `data-glass` attribute is set on `<html>` and CSS adds `backdrop-filter`
+   * blur + a metallic sheen to cards, popovers, dialogs, and the sidebar.
+   * Pair with translucent rgba surface colors so the blur shows through.
+   */
+  glass?: boolean;
   variants: {
     light?: ThemeVariant;
     dark?: ThemeVariant;

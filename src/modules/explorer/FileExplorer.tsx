@@ -65,6 +65,7 @@ type Row =
       isDir: boolean;
       isExpanded: boolean;
       depth: number;
+      ignored: boolean;
     }
   | { kind: "rename"; key: string; path: string; name: string; isDir: boolean; depth: number }
   | { kind: "pending"; key: string; depth: number; pendingKind: "file" | "dir" }
@@ -85,12 +86,14 @@ function buildRows(
   const rows: Row[] = [];
   const entryIndexByPath = new Map<string, number>();
 
-  const walk = (parent: string, depth: number) => {
+  const walk = (parent: string, depth: number, parentIgnored: boolean) => {
     const node = tree.nodes[parent];
     if (!node || node.status !== "loaded") return;
     for (const entry of node.entries) {
       const path = tree.joinPath(parent, entry.name);
       const isDir = entry.kind === "dir";
+      // Anything under an ignored dir is itself ignored (git semantics).
+      const ignored = parentIgnored || entry.ignored;
       const expanded = isDir && tree.expanded.has(path);
       const isRenaming = tree.renaming === path;
       if (isRenaming) {
@@ -112,6 +115,7 @@ function buildRows(
           isDir,
           isExpanded: expanded,
           depth,
+          ignored,
         });
       }
       if (isDir && expanded) {
@@ -141,13 +145,13 @@ function buildRows(
             message: child.message,
           });
         } else if (child?.status === "loaded") {
-          walk(path, depth + 1);
+          walk(path, depth + 1, ignored);
         }
       }
     }
   };
 
-  walk(rootPath, 0);
+  walk(rootPath, 0, false);
   return { rows, entryIndexByPath };
 }
 
@@ -349,6 +353,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
               tree={tree}
               isSelected={selectedPath === row.path}
               isRenaming={row.kind === "rename"}
+              ignored={row.kind === "entry" ? row.ignored : false}
               onOpenFile={onOpenFile}
               onSelectPath={setSelectedPath}
               onRevealInTerminal={onRevealInTerminal}
@@ -390,8 +395,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
             <img
               src={folderIconUrl(basename(rootPath), false)}
               alt=""
-              height={15}
-              width={15}
+              height={22}
+              width={22}
               className="mx-1.5"
             />
             {basename(rootPath)}
@@ -473,10 +478,10 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
               >
                 {pendingAtRoot ? (
                   <div
-                    className="flex h-6 w-full min-w-0 items-center gap-2 px-1.5 text-[13px]"
+                    className="flex h-8 w-full min-w-0 items-center gap-2 px-1.5 text-[13px]"
                     style={{ paddingLeft: 6 }}
                   >
-                    <span className="size-3.5 shrink-0" />
+                    <span className="size-5 shrink-0" />
                     <img
                       src={
                         pendingAtRoot.kind === "dir"
@@ -484,7 +489,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
                           : fileIconUrl("untitled")
                       }
                       alt=""
-                      className="size-4 shrink-0 opacity-70"
+                      className="size-5 shrink-0 opacity-70"
                     />
                     <InlineInput
                       initial=""

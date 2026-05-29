@@ -55,6 +55,22 @@ export type MarkdownTab = {
   path: string;
 };
 
+/** Image preview (png/jpg/gif/webp/svg/…) rendered via the asset protocol. */
+export type ImageTab = {
+  id: number;
+  kind: "image";
+  title: string;
+  path: string;
+};
+
+/** Log file viewer with per-line level colorization. */
+export type LogTab = {
+  id: number;
+  kind: "log";
+  title: string;
+  path: string;
+};
+
 /** Tabular data preview (SQLite / CSV / Parquet) rendered in an AG Grid. */
 export type DataTab = {
   id: number;
@@ -165,6 +181,8 @@ export type Tab =
   | EditorTab
   | PreviewTab
   | MarkdownTab
+  | ImageTab
+  | LogTab
   | DataTab
   | S3Tab
   | AiDiffTab
@@ -718,6 +736,38 @@ export function useTabs(
     return targetId;
   }, []);
 
+  const newImageTab = useCallback((path: string) => {
+    let targetId: number | null = null;
+    setTabs((curr) => {
+      const existing = curr.find((t) => t.kind === "image" && t.path === path);
+      if (existing) {
+        targetId = existing.id;
+        return curr;
+      }
+      const id = nextIdRef.current++;
+      targetId = id;
+      return [...curr, { id, kind: "image", title: basename(path), path }];
+    });
+    if (targetId !== null) setActiveId(targetId);
+    return targetId;
+  }, []);
+
+  const newLogTab = useCallback((path: string) => {
+    let targetId: number | null = null;
+    setTabs((curr) => {
+      const existing = curr.find((t) => t.kind === "log" && t.path === path);
+      if (existing) {
+        targetId = existing.id;
+        return curr;
+      }
+      const id = nextIdRef.current++;
+      targetId = id;
+      return [...curr, { id, kind: "log", title: basename(path), path }];
+    });
+    if (targetId !== null) setActiveId(targetId);
+    return targetId;
+  }, []);
+
   const newDataTab = useCallback(
     (path: string, format: DataTab["format"]) => {
       let targetId: number | null = null;
@@ -933,6 +983,14 @@ export function useTabs(
             ...(patch.title !== undefined && { title: patch.title }),
           };
         }
+        if (x.kind === "image" || x.kind === "log") {
+          // Path-keyed: follow renames of the underlying file.
+          return {
+            ...x,
+            ...(patch.title !== undefined && { title: patch.title }),
+            ...(patch.path !== undefined && { path: patch.path }),
+          };
+        }
         if (x.kind === "data") {
           // Path-keyed tab: follow renames of the underlying file.
           return {
@@ -1146,6 +1204,8 @@ export function useTabs(
     pinTab,
     newPreviewTab,
     newMarkdownTab,
+    newImageTab,
+    newLogTab,
     newDataTab,
     openS3Tab,
     openBunqueueTab,

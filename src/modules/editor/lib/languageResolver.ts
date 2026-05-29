@@ -9,6 +9,11 @@ const rubyLoader: LanguageLoader = () =>
 const jsonLoader: LanguageLoader = () =>
   import("@codemirror/lang-json").then((m) => m.json());
 
+// `.env` files are KEY=value with `#` comments — the INI/properties stream
+// mode highlights keys, separators, values, and comments cleanly.
+const envLoader: LanguageLoader = () =>
+  import("@codemirror/legacy-modes/mode/properties").then((m) => m.properties);
+
 const sqlLoader: LanguageLoader = () =>
   import("@codemirror/legacy-modes/mode/sql").then((m) => m.standardSQL);
 const pgsqlLoader: LanguageLoader = () =>
@@ -56,6 +61,7 @@ const loaders: Record<string, LanguageLoader> = {
   json: jsonLoader,
   jsonc: jsonLoader,
   json5: jsonLoader,
+  env: envLoader,
 
   sql: sqlLoader,
   psql: pgsqlLoader,
@@ -147,9 +153,16 @@ function isStreamParser(v: unknown): boolean {
 
 const cache = new Map<string, Extension | null>();
 
+// `.env`, `.env.local`, `.env.production`, … all map to one loader regardless
+// of the suffix after `.env`.
+function isEnvFile(base: string): boolean {
+  return base === ".env" || base.startsWith(".env.");
+}
+
 function cacheKey(filename: string): string | null {
   const lower = filename.toLowerCase();
   const base = lower.split("/").pop() ?? lower;
+  if (isEnvFile(base)) return "name:.env";
   if (filenameOverrides[base]) return `name:${base}`;
   const ext = extOf(base);
   return ext ? `ext:${ext}` : null;
@@ -170,7 +183,9 @@ export async function resolveLanguage(
 
   const lower = filename.toLowerCase();
   const base = lower.split("/").pop() ?? lower;
-  const loader = filenameOverrides[base] ?? loaders[extOf(base) ?? ""];
+  const loader = isEnvFile(base)
+    ? envLoader
+    : (filenameOverrides[base] ?? loaders[extOf(base) ?? ""]);
   if (!loader) {
     cache.set(key, null);
     return null;
