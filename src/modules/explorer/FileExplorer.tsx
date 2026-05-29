@@ -10,6 +10,7 @@ import {
   FileAddIcon,
   Folder01Icon,
   FolderAddIcon,
+  Logout01Icon,
   Refresh01Icon,
   Search01Icon,
 } from "@hugeicons/core-free-icons";
@@ -46,6 +47,11 @@ type Props = {
   onRevealInTerminal?: (path: string) => void;
   onAttachToAgent?: (path: string) => void;
   onOpenMarkdownPreview?: (path: string) => void;
+  /** Folder-only: add the right-clicked directory to the Projects list. */
+  onAddToProjects?: (path: string) => void;
+  /** When set, the explorer is browsing a remote SFTP root; calling it
+   * disconnects and returns to the local workspace. */
+  onExitRemote?: () => void;
 };
 
 type Row =
@@ -153,6 +159,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
       onRevealInTerminal,
       onAttachToAgent,
       onOpenMarkdownPreview,
+      onAddToProjects,
+      onExitRemote,
     },
     ref,
   ) {
@@ -343,6 +351,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
               onRevealInTerminal={onRevealInTerminal}
               onAttachToAgent={onAttachToAgent}
               onOpenMarkdownPreview={onOpenMarkdownPreview}
+              onAddToProjects={onAddToProjects}
             />
           );
         }
@@ -395,24 +404,28 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
             <HugeiconsIcon icon={Search01Icon} size={13} strokeWidth={2} />
           </Button>
 
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-6 text-muted-foreground hover:text-foreground"
-            onClick={() => tree.beginCreate(rootPath, "file")}
-            title="New file"
-          >
-            <HugeiconsIcon icon={FileAddIcon} size={13} strokeWidth={2} />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-6 text-muted-foreground hover:text-foreground"
-            onClick={() => tree.beginCreate(rootPath, "dir")}
-            title="New folder"
-          >
-            <HugeiconsIcon icon={FolderAddIcon} size={13} strokeWidth={2} />
-          </Button>
+          {tree.readOnly ? null : (
+            <>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-6 text-muted-foreground hover:text-foreground"
+                onClick={() => tree.beginCreate(rootPath, "file")}
+                title="New file"
+              >
+                <HugeiconsIcon icon={FileAddIcon} size={13} strokeWidth={2} />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-6 text-muted-foreground hover:text-foreground"
+                onClick={() => tree.beginCreate(rootPath, "dir")}
+                title="New folder"
+              >
+                <HugeiconsIcon icon={FolderAddIcon} size={13} strokeWidth={2} />
+              </Button>
+            </>
+          )}
           <Button
             variant="ghost"
             size="icon"
@@ -422,6 +435,18 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
           >
             <HugeiconsIcon icon={Refresh01Icon} size={12} strokeWidth={2} />
           </Button>
+          {onExitRemote ? (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-6 text-muted-foreground hover:text-foreground"
+              onClick={onExitRemote}
+              title="Disconnect remote"
+              aria-label="Disconnect remote"
+            >
+              <HugeiconsIcon icon={Logout01Icon} size={13} strokeWidth={2} />
+            </Button>
+          ) : null}
         </div>
 
         <ExplorerSearch

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { currentWorkspaceEnv } from "@/modules/workspace";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { listenFsChanged, watchAdd, watchRemove } from "./watch";
+import { isRemote, readDir } from "./remote";
 
 export type DirEntry = {
   name: string;
@@ -92,6 +93,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   }, [nodes]);
 
   const addWatch = useCallback((path: string) => {
+    if (isRemote(path)) return; // remote roots have no fs watcher
     if (watchedRef.current.has(path)) return;
     watchedRef.current.add(path);
     watchAdd([path]);
@@ -105,11 +107,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   const fetchChildren = useCallback(async (path: string) => {
     setNodes((s) => ({ ...s, [path]: { status: "loading" } }));
     try {
-      const entries = await invoke<DirEntry[]>("fs_read_dir", {
-        path,
-        showHidden: showHiddenRef.current,
-        workspace: currentWorkspaceEnv(),
-      });
+      const entries = await readDir(path, showHiddenRef.current);
 
       const liveDirs = new Set(
         entries.filter((e) => e.kind === "dir").map((e) => joinPath(path, e.name)),
@@ -173,11 +171,14 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     setExpanded(new Set(restored));
     setNodes({});
 
-    const toWatch = [rootPath, ...restored];
+    // Remote (SFTP) roots have no filesystem watcher — skip watch registration
+    // and rely on manual refresh. Local roots watch as before.
+    const remote = isRemote(rootPath);
+    const toWatch = remote ? [] : [rootPath, ...restored];
     void fetchChildren(rootPath);
     for (const d of restored) void fetchChildren(d);
     for (const p of toWatch) watchedRef.current.add(p);
-    watchAdd(toWatch);
+    if (toWatch.length > 0) watchAdd(toWatch);
 
     return () => {
       rememberExpansion(rootPath, expandedRef.current);
@@ -267,8 +268,14 @@ export function useFileTree(rootPath: string | null, options?: Options) {
 
   // --- mutations ---
 
+  // Remote roots are read-only in this pass — SFTP mutation isn't wired yet, so
+  // creating/renaming/deleting is suppressed rather than silently hitting the
+  // local filesystem with a remote-looking path.
+  const readOnly = !!rootPath && isRemote(rootPath);
+
   const beginCreate = useCallback(
     (parentPath: string, kind: "file" | "dir") => {
+      if (readOnly) return;
       setRenaming(null);
       setPendingCreate({ parentPath, kind });
       // Ensure the parent is expanded so the input row is visible.
@@ -286,7 +293,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         return curr;
       });
     },
-    [rootPath, fetchChildren, addWatch],
+    [rootPath, fetchChildren, addWatch, readOnly],
   );
 
   const cancelCreate = useCallback(() => setPendingCreate(null), []);
@@ -314,10 +321,14 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     [pendingCreate, fetchChildren],
   );
 
-  const beginRename = useCallback((path: string) => {
-    setPendingCreate(null);
-    setRenaming(path);
-  }, []);
+  const beginRename = useCallback(
+    (path: string) => {
+      if (readOnly) return;
+      setPendingCreate(null);
+      setRenaming(path);
+    },
+    [readOnly],
+  );
 
   const cancelRename = useCallback(() => setRenaming(null), []);
 
@@ -351,6 +362,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
 
   const deletePath = useCallback(
     async (path: string) => {
+      if (readOnly) return;
       try {
         await invoke("fs_delete", { path, workspace: currentWorkspaceEnv() });
         options?.onPathDeleted?.(path);
@@ -359,12 +371,13 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         console.error("fs_delete failed:", e);
       }
     },
-    [fetchChildren, options],
+    [fetchChildren, options, readOnly],
   );
 
   return {
     nodes,
     expanded,
+    readOnly,
     pendingCreate,
     renaming,
     toggle,
