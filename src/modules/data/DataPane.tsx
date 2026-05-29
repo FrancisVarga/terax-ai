@@ -2,9 +2,15 @@ import { cn } from "@/lib/utils";
 import { useTheme } from "@/modules/theme";
 import { currentWorkspaceEnv } from "@/modules/workspace";
 import { AgGridReact } from "ag-grid-react";
-import type { ColDef } from "ag-grid-community";
+import type {
+  ColDef,
+  GridApi,
+  GridReadyEvent,
+  IDatasource,
+  IGetRowsParams,
+} from "ag-grid-community";
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { buildDataGridTheme } from "./lib/agGridTheme";
 
 /** Wire format returned by the `data_*` Rust commands. */
@@ -14,6 +20,9 @@ type DataPreview = {
   total: number | null;
 };
 
+/** Sort spec forwarded to Rust — column *index* + direction. */
+type SortSpec = { col: number; desc: boolean };
+
 type Format = "sqlite" | "csv" | "parquet";
 
 type Props = {
@@ -22,10 +31,10 @@ type Props = {
   visible: boolean;
 };
 
-/** Rows fetched per page. The grid virtualizes the DOM, so a few thousand rows
- * stay smooth; paging keeps the IPC payload (and SQLite/Parquet scan) bounded
- * for files with millions of rows. */
-const PAGE_SIZE = 1000;
+/** Rows fetched per infinite-scroll block. The grid requests the next block as
+ * the user nears the bottom; Rust pages the underlying file by LIMIT/OFFSET so
+ * the IPC payload (and SQLite/Parquet scan) stays bounded for million-row files. */
+const BLOCK_SIZE = 200;
 
 type Status =
   | { kind: "loading" }
@@ -33,10 +42,12 @@ type Status =
   | { kind: "error"; message: string };
 
 /**
- * Renders one tabular data file in an AG Grid. SQLite files get a table picker;
- * CSV/Parquet show their single sheet. Paging is offset-based, driven by the
- * footer controls. Each cell is a string (Rust stringifies every value), and a
- * `null` cell is shown as a muted "NULL" so it's distinguishable from "".
+ * Renders one tabular data file in an AG Grid using the **Infinite Row Model**:
+ * the grid pulls blocks on demand as the user scrolls, and forwards the active
+ * search term + sort to the `data_*` Rust commands so filtering/sorting span the
+ * *entire* file, not just loaded rows. SQLite files get a table picker. Each
+ * cell is a string (Rust stringifies every value); a `null` cell renders as a
+ * muted "NULL" so it's distinguishable from "".
  */
 export function DataPane({ path, format, visible }: Props) {
   const { resolvedMode } = useTheme();
@@ -48,8 +59,27 @@ export function DataPane({ path, format, visible }: Props) {
   const [tables, setTables] = useState<string[] | null>(null);
   const [activeTable, setActiveTable] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>({ kind: "loading" });
-  const [preview, setPreview] = useState<DataPreview | null>(null);
-  const [page, setPage] = useState(0);
+  const [columns, setColumns] = useState<string[]>([]);
+  const [total, setTotal] = useState<number | null>(null);
+
+  // Search box: `searchInput` is what the user types; `search` is the debounced
+  // value actually sent to Rust (so we don't re-scan the file on every keypress).
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
+
+  const gridApiRef = useRef<GridApi | null>(null);
+  // Latest search/columns visible to the datasource closure without rebuilding
+  // it. The datasource reads these refs each `getRows` call.
+  const searchRef = useRef("");
+  const columnsRef = useRef<string[]>([]);
+  searchRef.current = search;
+  columnsRef.current = columns;
+
+  // Debounce the search input → `search` (250ms).
+  useEffect(() => {
+    const id = setTimeout(() => setSearch(searchInput.trim()), 250);
+    return () => clearTimeout(id);
+  }, [searchInput]);
 
   // Discover SQLite tables once. CSV/Parquet have no picker step.
   useEffect(() => {
@@ -79,79 +109,116 @@ export function DataPane({ path, format, visible }: Props) {
     };
   }, [path, format]);
 
-  // Reset to the first page whenever the source (file or selected table)
-  // changes, so we never request an offset past a smaller table's end.
-  useEffect(() => {
-    setPage(0);
-  }, [path, activeTable]);
+  // One IPC fetch for a block. Translates the grid's row window + sort into the
+  // shared `data_*` command arguments. `activeTable` is read fresh via closure
+  // (the datasource is rebuilt when it changes).
+  const fetchBlock = useCallback(
+    (
+      startRow: number,
+      sort: SortSpec | undefined,
+      table: string | null,
+    ): Promise<DataPreview> => {
+      const common = {
+        path,
+        limit: BLOCK_SIZE,
+        offset: startRow,
+        search: searchRef.current || null,
+        sort: sort ?? null,
+        workspace: currentWorkspaceEnv(),
+      };
+      if (format === "sqlite") {
+        return invoke<DataPreview>("data_sqlite_rows", { ...common, table });
+      }
+      if (format === "csv") {
+        return invoke<DataPreview>("data_csv_preview", common);
+      }
+      return invoke<DataPreview>("data_parquet_preview", common);
+    },
+    [path, format],
+  );
 
-  // Fetch the active page. SQLite waits for a selected table; CSV/Parquet load
-  // immediately.
-  useEffect(() => {
-    if (format === "sqlite" && !activeTable) return;
-    let cancelled = false;
-    setStatus({ kind: "loading" });
-    const offset = page * PAGE_SIZE;
-    const common = {
-      path,
-      limit: PAGE_SIZE,
-      offset,
-      workspace: currentWorkspaceEnv(),
-    };
-    const call =
-      format === "sqlite"
-        ? invoke<DataPreview>("data_sqlite_rows", {
-            ...common,
-            table: activeTable,
+  // Build the datasource for the current source (file + selected table). Rebuilt
+  // when the table changes so the grid drops stale blocks. Search changes are
+  // handled by purging the existing datasource (see effect below) rather than
+  // rebuilding, which keeps the column set stable.
+  const datasource = useMemo<IDatasource>(() => {
+    return {
+      rowCount: undefined,
+      getRows: (params: IGetRowsParams) => {
+        // The grid sends at most one sort column for the infinite model. colId
+        // is `c<index>`, so slice(1) recovers the column index Rust expects.
+        const sm = params.sortModel[0];
+        const sortSpec: SortSpec | undefined = sm
+          ? { col: Number(String(sm.colId).slice(1)), desc: sm.sort === "desc" }
+          : undefined;
+
+        setStatus({ kind: "loading" });
+        fetchBlock(params.startRow, sortSpec, activeTable)
+          .then((res) => {
+            // First block also establishes columns + total for the toolbar.
+            if (params.startRow === 0) {
+              setColumns(res.columns);
+              setTotal(res.total);
+            }
+            const rows = res.rows.map((row) => {
+              const obj: Record<string, string | null> = {};
+              row.forEach((cell, i) => {
+                obj[`c${i}`] = cell;
+              });
+              return obj;
+            });
+            // lastRow tells the grid the definitive total so it stops paging.
+            const lastRow =
+              res.total !== null
+                ? res.total
+                : res.rows.length < BLOCK_SIZE
+                  ? params.startRow + res.rows.length
+                  : -1;
+            params.successCallback(rows, lastRow);
+            setStatus({ kind: "ready" });
           })
-        : format === "csv"
-          ? invoke<DataPreview>("data_csv_preview", common)
-          : invoke<DataPreview>("data_parquet_preview", common);
-    call
-      .then((res) => {
-        if (cancelled) return;
-        setPreview(res);
-        setStatus({ kind: "ready" });
-      })
-      .catch((e) => {
-        if (!cancelled) setStatus({ kind: "error", message: String(e) });
-      });
-    return () => {
-      cancelled = true;
+          .catch((e) => {
+            params.failCallback();
+            setStatus({ kind: "error", message: String(e) });
+          });
+      },
     };
-  }, [path, format, activeTable, page]);
+    // activeTable in deps so a table switch yields a fresh datasource.
+  }, [fetchBlock, activeTable]);
 
-  // The Rust side returns row-major arrays; AG Grid wants row objects. We key
-  // columns by index (`c0`, `c1`, …) so duplicate or empty column names in the
-  // source file don't collide.
+  // Push a new datasource whenever it changes (table switch) so the grid resets.
+  useEffect(() => {
+    gridApiRef.current?.setGridOption("datasource", datasource);
+  }, [datasource]);
+
+  // A search change keeps the same datasource (and columns) but invalidates all
+  // cached blocks so they refetch with the new term, and snaps back to the top.
+  useEffect(() => {
+    const api = gridApiRef.current;
+    if (!api) return;
+    api.refreshInfiniteCache();
+    api.ensureIndexVisible(0, "top");
+  }, [search]);
+
   const columnDefs = useMemo<ColDef[]>(() => {
-    if (!preview) return [];
-    return preview.columns.map((name, i) => ({
+    return columns.map((name, i) => ({
       headerName: name,
       field: `c${i}`,
-      // Show NULL distinctly from an empty string.
+      // colId is stable + index-encoded so sortModel maps back to a column index.
+      colId: `c${i}`,
       valueFormatter: (p) => (p.value === null ? "NULL" : p.value),
       cellClass: (p) =>
         p.value === null ? "italic text-muted-foreground/60" : "",
     }));
-  }, [preview]);
-
-  const rowData = useMemo(() => {
-    if (!preview) return [];
-    return preview.rows.map((row) => {
-      const obj: Record<string, string | null> = {};
-      row.forEach((cell, i) => {
-        obj[`c${i}`] = cell;
-      });
-      return obj;
-    });
-  }, [preview]);
+  }, [columns]);
 
   const defaultColDef = useMemo<ColDef>(
     () => ({
+      // Server-side sort: the grid emits sortModel; we forward it to Rust.
       sortable: true,
-      filter: true,
-      floatingFilter: false,
+      // Per-column client filters are disabled — search spans the whole file
+      // server-side instead, which client filters on a partial cache can't do.
+      filter: false,
       resizable: true,
       minWidth: 80,
       flex: 1,
@@ -159,12 +226,13 @@ export function DataPane({ path, format, visible }: Props) {
     [],
   );
 
-  const total = preview?.total ?? null;
-  const pageCount =
-    total !== null ? Math.max(1, Math.ceil(total / PAGE_SIZE)) : null;
-  const offset = page * PAGE_SIZE;
-  const showingFrom = preview && preview.rows.length > 0 ? offset + 1 : 0;
-  const showingTo = offset + (preview?.rows.length ?? 0);
+  const onGridReady = useCallback(
+    (e: GridReadyEvent) => {
+      gridApiRef.current = e.api;
+      e.api.setGridOption("datasource", datasource);
+    },
+    [datasource],
+  );
 
   const onTableChange = useCallback(
     (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -180,7 +248,7 @@ export function DataPane({ path, format, visible }: Props) {
         !visible && "pointer-events-none",
       )}
     >
-      {/* Toolbar: SQLite table picker + status. */}
+      {/* Toolbar: SQLite table picker + search + status. */}
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border/60 px-3 text-[12px]">
         {format === "sqlite" && tables && tables.length > 0 ? (
           <>
@@ -202,12 +270,21 @@ export function DataPane({ path, format, visible }: Props) {
             {format}
           </span>
         )}
+
+        <input
+          type="search"
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          placeholder="Search all rows…"
+          className="h-6 w-48 rounded-sm border border-border/60 bg-card px-2 text-[12px] outline-none focus:border-ring placeholder:text-muted-foreground/60"
+        />
+
         <div className="ml-auto text-muted-foreground">
           {status.kind === "loading" && "Loading…"}
           {status.kind === "ready" && total !== null && (
             <span>
-              {showingFrom.toLocaleString()}–{showingTo.toLocaleString()} of{" "}
-              {total.toLocaleString()} rows
+              {total.toLocaleString()} {total === 1 ? "row" : "rows"}
+              {search && " (filtered)"}
             </span>
           )}
         </div>
@@ -224,11 +301,14 @@ export function DataPane({ path, format, visible }: Props) {
             <AgGridReact
               theme={theme}
               columnDefs={columnDefs}
-              rowData={rowData}
               defaultColDef={defaultColDef}
-              // DOM virtualization is on by default (rowBuffer 10); these keep
-              // big-page scrolling smooth.
-              suppressColumnVirtualisation={false}
+              // Infinite Row Model: blocks fetched on demand via the datasource.
+              rowModelType="infinite"
+              cacheBlockSize={BLOCK_SIZE}
+              // Keep a bounded number of blocks so memory stays flat on huge files.
+              maxBlocksInCache={10}
+              infiniteInitialRowCount={BLOCK_SIZE}
+              onGridReady={onGridReady}
               animateRows={false}
               suppressCellFocus={false}
               enableCellTextSelection
@@ -237,31 +317,6 @@ export function DataPane({ path, format, visible }: Props) {
           </div>
         )}
       </div>
-
-      {/* Pager. */}
-      {pageCount !== null && pageCount > 1 && status.kind !== "error" ? (
-        <div className="flex h-8 shrink-0 items-center justify-end gap-2 border-t border-border/60 px-3 text-[12px]">
-          <button
-            type="button"
-            disabled={page === 0}
-            onClick={() => setPage((p) => Math.max(0, p - 1))}
-            className="rounded-sm border border-border/60 bg-card px-2 py-0.5 disabled:opacity-40 hover:bg-accent/50"
-          >
-            Prev
-          </button>
-          <span className="text-muted-foreground">
-            Page {page + 1} / {pageCount}
-          </span>
-          <button
-            type="button"
-            disabled={page >= pageCount - 1}
-            onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
-            className="rounded-sm border border-border/60 bg-card px-2 py-0.5 disabled:opacity-40 hover:bg-accent/50"
-          >
-            Next
-          </button>
-        </div>
-      ) : null}
     </div>
   );
 }

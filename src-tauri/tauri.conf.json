@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Terax-Camelot",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "identifier": "app.crynta.terax",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -64,6 +64,9 @@
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
+      },
+      "wix": {
+        "upgradeCode": "76B0EE29-A6D4-47DE-A98A-36310975C623"
       },
       "nsis": {
         "installMode": "currentUser",

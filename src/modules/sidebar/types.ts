@@ -3,4 +3,5 @@ export type SidebarViewId =
   | "source-control"
   | "ssh-remote"
   | "docker"
-  | "projects";
+  | "projects"
+  | "s3";

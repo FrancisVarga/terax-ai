@@ -1,6 +1,6 @@
 [package]
 name = "terax"
-version = "0.10.0"
+version = "0.11.0"
 description = "Terax — an open-source AI-native terminal emulator"
 authors = ["crynta"]
 license = "Apache-2.0"
@@ -33,15 +33,30 @@ grep-matcher = "0.1"
 globset = "0.4"
 shared_child = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
-# Parquet preview via the Arrow reader. `default-features = false` drops the
-# async/object_store paths we don't use; the listed features cover the Arrow
-# bridge plus the common on-disk compression codecs (snappy/gzip/zstd).
+# Parquet preview via the Arrow reader. `async` + `object_store` enable the
+# `ParquetObjectReader`/`ParquetRecordBatchStreamBuilder` path so S3 objects can
+# be range-paged without a full download (see `modules/s3.rs`); the listed
+# features cover the Arrow bridge plus the common on-disk compression codecs.
 parquet = { version = "53", default-features = false, features = [
 	"arrow",
+	"async",
+	"object_store",
 	"snap",
 	"flate2",
 	"zstd",
 ] }
+# S3 object access for the S3 browser. `object_store` gives a uniform ranged
+# reader the async parquet stream consumes; `aws-sdk-s3`/`aws-config` cover
+# listing, byte fetches, and the full AWS auth chain (static keys, profiles,
+# SSO, IAM) plus custom endpoints (MinIO/R2/Wasabi).
+object_store = { version = "0.11", features = ["aws"] }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
+aws-credential-types = "1"
+# `DisplayErrorContext` walks the full Smithy error `source()` chain into one
+# string so S3 failures surface the real cause (e.g. `PermanentRedirect` region
+# mismatch) instead of the flat top-level "service error".
+aws-smithy-types = "1"
 # Arrow with default features so `arrow::util::display::array_value_to_string`
 # (used to stringify cells) is always available.
 arrow = "53"

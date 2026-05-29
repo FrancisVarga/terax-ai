@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
 import {
+  CloudIcon,
   ContainerIcon,
   FolderGitTwoIcon,
   FolderLibraryIcon,
@@ -36,6 +37,7 @@ export function SidebarRail({ activeView, onSelectView, changedCount }: Props) {
     { id: "ssh-remote", label: "SSH", icon: ServerStack02Icon },
     { id: "docker", label: "Docker", icon: ContainerIcon },
     { id: "projects", label: "Projects", icon: FolderLibraryIcon },
+    { id: "s3", label: "S3", icon: CloudIcon },
   ];
 
   return (

@@ -73,6 +73,7 @@ import { BunqueueStack } from "@/modules/bunqueue";
 import { CommandPopup } from "@/modules/command-popup";
 import { MarkdownStack } from "@/modules/markdown";
 import { DataStack, dataFormatForPath } from "@/modules/data";
+import { S3Stack, S3Panel } from "@/modules/s3";
 import { PreviewStack, type PreviewPaneHandle } from "@/modules/preview";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -282,6 +283,7 @@ export default function App() {
     newPreviewTab,
     newMarkdownTab,
     newDataTab,
+    openS3Tab,
     openBunqueueTab,
     openAnalyticsTab,
     openCcusageTab,
@@ -685,6 +687,7 @@ export default function App() {
   const isPreviewTab = activeTab?.kind === "preview";
   const isMarkdownTab = activeTab?.kind === "markdown";
   const isDataTab = activeTab?.kind === "data";
+  const isS3Tab = activeTab?.kind === "s3";
   const isAiDiffTab = activeTab?.kind === "ai-diff";
   const isGitDiffTab =
     activeTab?.kind === "git-diff" || activeTab?.kind === "git-commit-file";
@@ -1885,6 +1888,15 @@ export default function App() {
       <div
         className={cn(
           "absolute inset-0 px-3 pt-2 pb-2",
+          !isS3Tab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isS3Tab}
+      >
+        <S3Stack tabs={tabs} activeId={activeId} />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0 px-3 pt-2 pb-2",
           !isAiDiffTab && "invisible pointer-events-none",
         )}
         aria-hidden={!isAiDiffTab}
@@ -2061,6 +2073,8 @@ export default function App() {
                       />
                     ) : sidebarView === "projects" ? (
                       <ProjectsPanel onOpenProject={openProject} />
+                    ) : sidebarView === "s3" ? (
+                      <S3Panel onOpenBrowser={() => openS3Tab()} />
                     ) : (
                       <SourceControlPanel
                         open

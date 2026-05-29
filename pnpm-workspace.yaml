@@ -4,3 +4,9 @@ allowBuilds:
   msgpackr-extract: true
   msw: true
   sharp: false
+
+supportedArchitectures:
+  os:
+    - win32
+  cpu:
+    - x64

@@ -64,6 +64,13 @@ export type DataTab = {
   format: "sqlite" | "csv" | "parquet";
 };
 
+/** S3 file browser — a singleton main-content tab (tree + object preview). */
+export type S3Tab = {
+  id: number;
+  kind: "s3";
+  title: string;
+};
+
 export type AiDiffStatus = "pending" | "approved" | "rejected";
 
 export type AiDiffTab = {
@@ -159,6 +166,7 @@ export type Tab =
   | PreviewTab
   | MarkdownTab
   | DataTab
+  | S3Tab
   | AiDiffTab
   | GitDiffTab
   | GitHistoryTab
@@ -598,6 +606,23 @@ export function useTabs(
       const id = nextIdRef.current++;
       targetId = id;
       return [...curr, { id, kind: "projects", title: "Projects" }];
+    });
+    if (targetId !== null) setActiveId(targetId);
+    return targetId;
+  }, []);
+
+  /** Open (or focus) the singleton S3 file browser tab. */
+  const openS3Tab = useCallback(() => {
+    let targetId: number | null = null;
+    setTabs((curr) => {
+      const existing = curr.find((t) => t.kind === "s3");
+      if (existing) {
+        targetId = existing.id;
+        return curr;
+      }
+      const id = nextIdRef.current++;
+      targetId = id;
+      return [...curr, { id, kind: "s3", title: "S3" } satisfies S3Tab];
     });
     if (targetId !== null) setActiveId(targetId);
     return targetId;
@@ -1122,6 +1147,7 @@ export function useTabs(
     newPreviewTab,
     newMarkdownTab,
     newDataTab,
+    openS3Tab,
     openBunqueueTab,
     openProjectsTab,
     openProjectDetailTab,

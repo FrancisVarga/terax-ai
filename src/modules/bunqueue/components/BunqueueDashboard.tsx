@@ -26,6 +26,7 @@ import { OverviewSection } from "./sections/OverviewSection";
 import { WorkersSection } from "./sections/WorkersSection";
 import { QueuesSection } from "./sections/QueuesSection";
 import { JobsSection } from "./sections/JobsSection";
+import { SchemaSection } from "./sections/SchemaSection";
 import { LogView } from "./LogView";
 
 /**
@@ -146,6 +147,7 @@ export function BunqueueDashboard({ className }: { className?: string }) {
           <TabsTrigger value="workers">Workers</TabsTrigger>
           <TabsTrigger value="queues">Queues</TabsTrigger>
           <TabsTrigger value="jobs">Jobs</TabsTrigger>
+          <TabsTrigger value="schema">Schema</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
         </TabsList>
 
@@ -164,6 +166,9 @@ export function BunqueueDashboard({ className }: { className?: string }) {
         </TabsContent>
         <TabsContent value="jobs" className="min-h-0 flex-1">
           <JobsSection queues={data.queues} />
+        </TabsContent>
+        <TabsContent value="schema" className="min-h-0 flex-1">
+          <SchemaSection queues={data.queues} />
         </TabsContent>
         <TabsContent value="logs" className="min-h-0 flex-1">
           <LogsTab
