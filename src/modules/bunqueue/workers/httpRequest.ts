@@ -79,6 +79,70 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/**
+ * SSRF guard. The http-request worker fetches arbitrary caller-supplied URLs,
+ * so without this an enqueuer can reach loopback/private hosts — including this
+ * very box's bunqueue HTTP API and cloud metadata endpoints (169.254.169.254).
+ * We reject any literal IP that falls in a non-public range; hostnames that
+ * resolve to such ranges are still possible (DNS rebinding), but Bun's `fetch`
+ * gives no resolve hook, so we re-validate the *final* URL after each manual
+ * redirect (see performRequest) as the practical mitigation.
+ */
+
+/** Headers stripped when a redirect crosses to a different origin. */
+const SENSITIVE_HEADERS = ["authorization", "cookie", "proxy-authorization"];
+
+function ipv4InBlockedRange(ip: string): boolean {
+  const parts = ip.split(".").map((p) => Number(p));
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+    return false; // not a dotted-quad IPv4 literal
+  }
+  const [a, b] = parts;
+  return (
+    a === 0 || // 0.0.0.0/8 ("this host")
+    a === 127 || // 127.0.0.0/8 loopback
+    a === 10 || // 10.0.0.0/8 private
+    (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12 private
+    (a === 192 && b === 168) || // 192.168.0.0/16 private
+    (a === 169 && b === 254) || // 169.254.0.0/16 link-local (cloud metadata)
+    (a === 100 && b >= 64 && b <= 127) || // 100.64.0.0/10 CGNAT
+    a >= 224 // 224.0.0.0/4 multicast + 240.0.0.0/4 reserved
+  );
+}
+
+function ipv6InBlockedRange(host: string): boolean {
+  // Strip zone id and brackets, lowercase for prefix checks.
+  const h = host.replace(/^\[|\]$/g, "").split("%")[0]!.toLowerCase();
+  if (h === "::1" || h === "::") return true; // loopback / unspecified
+  if (h.startsWith("fe80")) return true; // link-local fe80::/10
+  if (h.startsWith("fc") || h.startsWith("fd")) return true; // unique-local fc00::/7
+  if (h.startsWith("ff")) return true; // multicast ff00::/8
+  // IPv4-mapped (::ffff:127.0.0.1) — re-check the embedded v4.
+  const mapped = h.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (mapped) return ipv4InBlockedRange(mapped[1]!);
+  return false;
+}
+
+/**
+ * Reject URLs whose host is a literal IP in a loopback/private/link-local/
+ * multicast range. Hostnames are allowed (we can't resolve them here) but are
+ * re-validated after each redirect hop.
+ */
+function assertPublicTarget(url: URL): void {
+  const host = url.hostname;
+  // Bare numeric / bracketed-IPv6 hosts get range-checked.
+  const isV6 = host.includes(":") || (url.host.startsWith("[") && url.host.includes("]"));
+  const blocked = isV6 ? ipv6InBlockedRange(host) : ipv4InBlockedRange(host);
+  if (blocked) {
+    throw new Error(`refusing request to non-public address: ${host}`);
+  }
+  // Block the obvious loopback hostnames too.
+  const lower = host.toLowerCase();
+  if (lower === "localhost" || lower.endsWith(".localhost")) {
+    throw new Error(`refusing request to loopback host: ${host}`);
+  }
+}
+
 /** Validate + normalize a raw job payload. Throws on bad input. */
 function validate(data: unknown): HttpRequestPayload {
   if (!isPlainObject(data)) throw new Error("payload must be an object");
@@ -149,16 +213,18 @@ function withQuery(
   return u.toString();
 }
 
-/** Build fetch init: method, headers, serialized body. */
+/** Build fetch init: method, headers, serialized body. Redirects are always
+ * handled manually here so each hop can be re-validated against the SSRF guard,
+ * regardless of the payload's `redirect` preference. */
 function buildInit(
   p: HttpRequestPayload,
+  headers: Headers,
   signal: AbortSignal,
 ): RequestInit {
-  const headers = new Headers(p.headers);
   const init: RequestInit = {
     method: p.method,
     headers,
-    redirect: p.redirect,
+    redirect: "manual",
     signal,
   };
 
@@ -175,6 +241,10 @@ function buildInit(
   }
   return init;
 }
+
+/** Max redirect hops we follow manually before giving up (mirrors the common
+ * browser/curl default of 20). */
+const MAX_REDIRECTS = 20;
 
 /** Read the response body up to `maxBytes`, reporting truncation. */
 async function readCapped(
@@ -222,7 +292,49 @@ export async function performRequest(
   );
   const startedAt = performance.now();
   try {
-    const res = await fetch(url, buildInit(payload, controller.signal));
+    // Manual redirect loop: validate every hop (incl. the initial URL) against
+    // the SSRF guard, and drop sensitive headers when an origin boundary is
+    // crossed so credentials never leak to a redirect-chosen host.
+    const headersOut = new Headers(payload.headers);
+    let currentUrl = new URL(url);
+    assertPublicTarget(currentUrl);
+    let origin = currentUrl.origin;
+    let res: Response;
+    let redirected = false;
+    for (let hops = 0; ; hops++) {
+      res = await fetch(
+        currentUrl.toString(),
+        buildInit(payload, headersOut, controller.signal),
+      );
+      const isRedirect = res.status >= 300 && res.status < 400 && res.headers.has("location");
+      // Honor the caller's intent: only "follow" chases redirects. "manual" and
+      // "error" return / throw on the redirect response as fetch would.
+      if (!isRedirect || payload.redirect !== "follow") {
+        if (isRedirect && payload.redirect === "error") {
+          throw new Error(`unexpected redirect (${res.status}) to ${res.headers.get("location")}`);
+        }
+        break;
+      }
+      if (hops >= MAX_REDIRECTS) {
+        throw new Error(`too many redirects (>${MAX_REDIRECTS})`);
+      }
+      const next = new URL(res.headers.get("location")!, currentUrl);
+      if (next.protocol !== "http:" && next.protocol !== "https:") {
+        throw new Error(`redirect to unsupported protocol: ${next.protocol}`);
+      }
+      assertPublicTarget(next);
+      if (next.origin !== origin) {
+        for (const h of SENSITIVE_HEADERS) headersOut.delete(h);
+        origin = next.origin;
+      }
+      // A 303 (and historically 302/301 in practice) downgrades to GET.
+      if (res.status === 303 && payload.method !== "GET" && payload.method !== "HEAD") {
+        payload = { ...payload, method: "GET", body: undefined };
+      }
+      currentUrl = next;
+      redirected = true;
+      await res.body?.cancel();
+    }
     const { text, truncated } = await readCapped(
       res,
       payload.maxBytes ?? DEFAULT_MAX_BYTES,
@@ -248,8 +360,8 @@ export async function performRequest(
       ok: res.ok,
       status: res.status,
       statusText: res.statusText,
-      url: res.url || url,
-      redirected: res.redirected,
+      url: currentUrl.toString(),
+      redirected,
       headers,
       body: text,
       truncated,
