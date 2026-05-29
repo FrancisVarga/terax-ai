@@ -119,7 +119,13 @@ export function TabBar({
                     if (e.button === 1) e.preventDefault();
                   }}
                   className={cn(
-                    "group h-7 shrink-0 gap-1.5 rounded-md text-xs text-muted-foreground transition-colors data-[state=active]:bg-accent data-[state=active]:text-foreground hover:text-foreground/80 justify-between",
+                    "group relative h-7 shrink-0 gap-1.5 rounded-md text-xs text-muted-foreground transition-all justify-between overflow-hidden",
+                    // Metallic glass base: translucent gradient + blur + edge highlight.
+                    "border border-white/10 bg-gradient-to-b from-white/[0.07] to-white/[0.02] backdrop-blur-md shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08)]",
+                    "before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-1/2 before:bg-gradient-to-b before:from-white/[0.10] before:to-transparent before:opacity-60",
+                    "hover:text-foreground/80 hover:from-white/[0.10] hover:to-white/[0.03] hover:border-white/15",
+                    // Active: brighter sheen, stronger top highlight, glow ring.
+                    "data-[state=active]:text-foreground data-[state=active]:from-white/[0.16] data-[state=active]:to-white/[0.05] data-[state=active]:border-white/25 data-[state=active]:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.20),0_2px_8px_-2px_rgba(0,0,0,0.5)] data-[state=active]:before:opacity-100",
                     compact
                       ? "px-1.5!"
                       : tabs.length === 1
@@ -129,7 +135,7 @@ export function TabBar({
                 >
                   <span
                     className={cn(
-                      "flex items-center gap-1.5 truncate",
+                      "relative z-10 flex items-center gap-1.5 truncate",
                       compact ? "max-w-48" : "max-w-80",
                     )}
                   >
@@ -154,7 +160,7 @@ export function TabBar({
                         e.stopPropagation();
                         onClose(t.id);
                       }}
-                      className="rounded p-0.5 opacity-0 transition-opacity hover:bg-accent hover:opacity-100 group-hover:opacity-60"
+                      className="relative z-10 rounded p-0.5 opacity-0 transition-opacity hover:bg-accent hover:opacity-100 group-hover:opacity-60"
                     >
                       <HugeiconsIcon
                         icon={Cancel01Icon}
