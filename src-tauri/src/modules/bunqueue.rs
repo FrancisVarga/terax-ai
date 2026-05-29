@@ -17,11 +17,18 @@
 //! domain socket / named pipe requires upstream auth support in bunqueue and is
 //! tracked as future hardening. See <https://bunqueue.dev/guide/server/>.
 //!
-//! Runtime strategy (dev target): bunqueue ships as an npm dependency, so the
-//! CLI entry lives at `node_modules/bunqueue/dist/cli/index.js`. Because it is
-//! Bun-only we invoke it as `bun <entry> start`, resolving `bun` from PATH.
-//! Packaging this for a release build (no node_modules, no system Bun) is a
-//! separate sidecar task and intentionally out of scope here.
+//! Runtime strategy: bunqueue is Bun-only, so it always runs in the Bun runtime.
+//! We resolve it two ways, sidecar-first:
+//!   1. PACKAGED: Tauri ships standalone `bun build --compile` executables as
+//!      sidecars next to the app binary (`bunqueue-server`, `bunqueue-worker-*`).
+//!      These embed both the Bun runtime and the bundled code, so a packaged
+//!      build needs neither `node_modules` nor a system Bun. Built by
+//!      `pnpm build:sidecars` and declared in `tauri.conf.json` `externalBin`.
+//!   2. DEV FALLBACK: when no sidecar is found next to the exe (running from the
+//!      source tree via `tauri dev`), we fall back to invoking the npm CLI entry
+//!      `node_modules/bunqueue/dist/cli/index.js` (and the `.ts` worker scripts)
+//!      through `bun` resolved from PATH. This keeps the dev loop fast — no
+//!      sidecar rebuild needed to iterate on the worker scripts.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -135,6 +142,24 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Locate a Tauri sidecar executable next to the app binary.
+///
+/// Tauri installs `externalBin` sidecars alongside the main executable with the
+/// target-triple suffix stripped, so `<exe-dir>/<base>(.exe)` is the resolved
+/// path in a packaged build. Returns `None` in dev (no sidecars staged there),
+/// which triggers the `bun + node_modules` fallback in the callers.
+fn find_sidecar(base: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let name = if cfg!(windows) {
+        format!("{base}.exe")
+    } else {
+        base.to_string()
+    };
+    let candidate = dir.join(name);
+    candidate.is_file().then_some(candidate)
+}
+
 /// Locate the bunqueue CLI entry shipped in node_modules.
 ///
 /// We walk up from the executable dir and the cwd looking for
@@ -174,29 +199,40 @@ fn find_cli_entry() -> Option<PathBuf> {
 ///
 /// Returns the configured `Command` and a human-readable command string.
 fn build_command(data_path: Option<&Path>) -> Result<(Command, String), String> {
-    let entry = find_cli_entry()
-        .ok_or("bunqueue CLI not found (expected node_modules/bunqueue/dist/cli/index.js)")?;
-
-    // bunqueue is Bun-only — we always launch through `bun`. Resolved from PATH
-    // in dev; packaged sidecar support is a separate task.
+    // Sidecar-first: the packaged standalone exe embeds Bun + bundled code, so
+    // it's invoked directly (`<sidecar> start ...`). In dev we fall back to
+    // `bun <node_modules cli> start ...`.
     //
     // Ports are passed explicitly (non-default) so we never clash with a
     // standalone bunqueue. The server binds loopback-only; HTTP API + no-auth
     // remain bunqueue defaults (see the module-level SECURITY CAVEAT).
     let tcp = TCP_PORT.to_string();
     let http = HTTP_PORT.to_string();
-    let mut cmd = Command::new("bun");
-    cmd.arg(&entry)
-        .arg("start")
+
+    let (mut cmd, mut display) = match find_sidecar("bunqueue-server") {
+        Some(exe) => {
+            let cmd = Command::new(&exe);
+            let display = exe.display().to_string();
+            (cmd, display)
+        }
+        None => {
+            let entry = find_cli_entry().ok_or(
+                "bunqueue not found (no sidecar next to the app binary, and no \
+                 node_modules/bunqueue/dist/cli/index.js for dev fallback)",
+            )?;
+            let mut cmd = Command::new("bun");
+            cmd.arg(&entry);
+            let display = format!("bun {}", entry.display());
+            (cmd, display)
+        }
+    };
+
+    cmd.arg("start")
         .arg("--tcp-port")
         .arg(&tcp)
         .arg("--http-port")
         .arg(&http);
-
-    let mut display = format!(
-        "bun {} start --tcp-port {tcp} --http-port {http}",
-        entry.display()
-    );
+    display.push_str(&format!(" start --tcp-port {tcp} --http-port {http}"));
 
     // Persistent SQLite: without --data-path bunqueue runs in-memory and loses
     // all jobs on restart.
@@ -299,18 +335,23 @@ fn resolved_exit_code(proc: &ManagedProc) -> Option<i32> {
     }
 }
 
-/// Workers Terax registers and auto-starts. Each entry maps a queue to its Bun
-/// worker script (path relative to project root).
-const WORKERS: &[(&str, &str, &str)] = &[
+/// Workers Terax registers and auto-starts. Tuple is
+/// `(name, queue, script_rel, sidecar_base)`:
+///   - `script_rel`: dev-fallback path to the `.ts` worker, relative to root.
+///   - `sidecar_base`: packaged standalone exe name (no triple, no extension),
+///     matching `tauri.conf.json` `externalBin`.
+const WORKERS: &[(&str, &str, &str, &str)] = &[
     (
         "github-create-issue",
         "github-create-issue",
         "src/modules/bunqueue/workers/githubCreateIssue.ts",
+        "bunqueue-worker-github-create-issue",
     ),
     (
         "http-request",
         "http-request",
         "src/modules/bunqueue/workers/httpRequest.ts",
+        "bunqueue-worker-http-request",
     ),
 ];
 
@@ -339,29 +380,39 @@ fn find_worker_script(rel: &str) -> Option<PathBuf> {
     None
 }
 
-/// Spawn one worker script: `bun <script>` with the server's TCP port in env.
-fn spawn_worker(script_rel: &str) -> Result<Arc<ManagedProc>, String> {
-    let script = find_worker_script(script_rel)
-        .ok_or_else(|| format!("worker script not found: {script_rel}"))?;
-    let mut cmd = Command::new("bun");
-    cmd.arg(&script)
-        .env("BUNQUEUE_HOST", "127.0.0.1")
+/// Spawn one worker, sidecar-first. Packaged: run the standalone `<sidecar>`
+/// exe. Dev fallback: `bun <script>`. Either way the server's host/TCP port is
+/// passed via env so the worker connects to the embedded server.
+fn spawn_worker(script_rel: &str, sidecar_base: &str) -> Result<Arc<ManagedProc>, String> {
+    let (mut cmd, display) = match find_sidecar(sidecar_base) {
+        Some(exe) => {
+            let cmd = Command::new(&exe);
+            (cmd, exe.display().to_string())
+        }
+        None => {
+            let script = find_worker_script(script_rel)
+                .ok_or_else(|| format!("worker not found (no sidecar '{sidecar_base}', no script {script_rel})"))?;
+            let mut cmd = Command::new("bun");
+            cmd.arg(&script);
+            (cmd, format!("bun {}", script.display()))
+        }
+    };
+    cmd.env("BUNQUEUE_HOST", "127.0.0.1")
         .env("BUNQUEUE_TCP_PORT", TCP_PORT.to_string());
-    let display = format!("bun {}", script.display());
     spawn_managed(cmd, display, None, None, None)
 }
 
 /// Start all registered workers. Best-effort; failures are logged.
 fn start_workers(state: &BunqueueState) {
     let mut guard = state.workers.lock().expect("bunqueue workers mutex poisoned");
-    for (name, queue, script_rel) in WORKERS {
+    for (name, queue, script_rel, sidecar_base) in WORKERS {
         let already = guard
             .iter()
             .any(|w| w.name == *name && !w.proc.exited.load(Ordering::Acquire));
         if already {
             continue;
         }
-        match spawn_worker(script_rel) {
+        match spawn_worker(script_rel, sidecar_base) {
             Ok(proc) => {
                 log::info!("bunqueue worker '{name}' started (queue '{queue}')");
                 guard.retain(|w| w.name != *name);

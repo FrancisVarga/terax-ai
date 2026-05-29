@@ -25,3 +25,7 @@ dist-ssr
 
 *.tsbuildinfo
 .env
+
+# bunqueue sidecars — compiled per-platform by `pnpm build:sidecars`, not committed
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
