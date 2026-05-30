@@ -205,7 +205,11 @@ pub fn spawn(
                     Ok(n) => {
                         if !logged_first {
                             logged_first = true;
-                            log::debug!("pty first byte after {}ms", spawn_at.elapsed().as_millis());
+                            // Info level so the spawn-to-first-byte stopwatch is
+                            // visible in shipped builds (logger runs at Info); it
+                            // splits "Rust spawn slow" from "shell init slow" when
+                            // diagnosing slow terminal opens.
+                            log::info!("pty first byte after {}ms", spawn_at.elapsed().as_millis());
                         }
                         agent_detect.process(&buf[..n], |t| {
                             let _ = app_reader.emit(AGENT_EVENT, t.into_signal(id));

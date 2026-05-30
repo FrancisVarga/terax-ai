@@ -486,6 +486,30 @@ const WATCHDOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3)
 /// Backoff cap after repeated spawn failures (e.g. Bun not installed), so a
 /// broken environment doesn't spin-respawn every 3s forever.
 const WATCHDOG_MAX_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+/// A child that exits sooner than this after spawn is treated as a failed start,
+/// not a healthy run that happened to die. Without this guard a server that
+/// crashes on boot (missing sidecar, port already bound by a second Terax
+/// instance) is respawned every WATCHDOG_INTERVAL forever: each spawn briefly
+/// reports `running` before it crashes, which reset the backoff to 3s. The storm
+/// then runs at 20 respawns/min indefinitely. Measuring the child's lifetime
+/// against this floor lets the backoff engage and climb to the cap instead.
+const CRASH_LOOP_MIN_UPTIME_MS: u64 = 5_000;
+
+/// True when the managed server child is alive and has stayed up past the
+/// crash-loop floor (i.e. this is a genuinely healthy run, not a fast crash that
+/// the watchdog is about to respawn). Returns false when there is no child, the
+/// child has exited, or it died within `CRASH_LOOP_MIN_UPTIME_MS` of spawning.
+fn server_stably_running(state: &BunqueueState) -> bool {
+    let guard = state.proc.lock_safe();
+    let Some(proc) = guard.as_ref() else {
+        return false;
+    };
+    if proc.exited.load(Ordering::Acquire) {
+        // Exited: only count as a non-crash if it had lived past the floor.
+        return now_ms().saturating_sub(proc.started_at_ms) >= CRASH_LOOP_MIN_UPTIME_MS;
+    }
+    true
+}
 
 /// Spawn a background thread that supervises the server + workers, restarting
 /// any that die. Call once after `start_on_boot`. The `AppHandle` is `'static`
@@ -496,11 +520,16 @@ pub fn start_watchdog(app: tauri::AppHandle) {
         loop {
             thread::sleep(backoff);
             let state = app.state::<BunqueueState>();
-            let healthy = ensure_running(&state);
-            backoff = if healthy {
+            ensure_running(&state);
+            // Judge health by stable uptime, NOT by the momentary `running` flag
+            // ensure_running returns: a child that crashes on boot is `running`
+            // for the instant after spawn, which would otherwise reset backoff
+            // and produce a 3s respawn storm. server_stably_running treats a
+            // short-lived child as a failed start so the backoff climbs.
+            backoff = if server_stably_running(&state) {
                 WATCHDOG_INTERVAL
             } else {
-                // Widen interval up to the cap while unhealthy.
+                // Widen interval up to the cap while unhealthy / crash-looping.
                 (backoff * 2).min(WATCHDOG_MAX_INTERVAL)
             };
         }
