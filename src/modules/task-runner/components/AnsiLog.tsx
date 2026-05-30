@@ -251,37 +251,43 @@ export function AnsiLog({
             onScroll={onScroll}
             className="h-full select-text overflow-auto font-mono text-[11px] leading-[16px]"
           >
-            <div
-              style={{
-                height: virtualizer.getTotalSize(),
-                position: "relative",
-                width: "100%",
-              }}
-            >
-              {virtualizer.getVirtualItems().map((vr) => {
-                const row = rows[vr.index];
-                if (!row) return null;
-                return (
-                  <div
-                    key={row.id}
-                    data-index={vr.index}
-                    ref={virtualizer.measureElement}
-                    className="absolute left-0 top-0 w-full"
-                    style={{ transform: `translateY(${vr.start}px)` }}
-                  >
-                    <RenderRow
-                      row={row}
-                      wrap={wrap}
-                      structured={structured}
-                      query={q}
-                      gutterWidth={gutterWidth}
-                      collapsed={collapsed}
-                      onToggle={toggle}
-                    />
-                  </div>
-                );
-              })}
-            </div>
+            {/* Rows render in normal flow (not absolutely positioned) so native
+                text-selection can span multiple rows. A leading + trailing
+                spacer reproduces the scroll height the virtualizer expects;
+                absolute rows would break cross-row drag-select. */}
+            {(() => {
+              const items = virtualizer.getVirtualItems();
+              const total = virtualizer.getTotalSize();
+              const padTop = items.length ? items[0].start : 0;
+              const padBottom = items.length
+                ? total - items[items.length - 1].end
+                : 0;
+              return (
+                <div style={{ paddingTop: padTop, paddingBottom: padBottom }}>
+                  {items.map((vr) => {
+                    const row = rows[vr.index];
+                    if (!row) return null;
+                    return (
+                      <div
+                        key={row.id}
+                        data-index={vr.index}
+                        ref={virtualizer.measureElement}
+                      >
+                        <RenderRow
+                          row={row}
+                          wrap={wrap}
+                          structured={structured}
+                          query={q}
+                          gutterWidth={gutterWidth}
+                          collapsed={collapsed}
+                          onToggle={toggle}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
           </div>
         )}
 
