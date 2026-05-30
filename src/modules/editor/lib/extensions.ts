@@ -39,6 +39,35 @@ export function buildSharedExtensions(): Extension[] {
         WebkitFontSmoothing: "antialiased",
         MozOsxFontSmoothing: "grayscale",
         textRendering: "geometricPrecision",
+        // Always reserve the right-edge gutter so content never shifts when the
+        // bar appears; Firefox uses the standard scrollbar-* props, Chromium
+        // (Tauri WebView2) uses the ::-webkit-scrollbar pseudo-elements below.
+        scrollbarWidth: "thin",
+        scrollbarColor:
+          "color-mix(in srgb, var(--foreground) 25%, transparent) transparent",
+      },
+      ".cm-scroller::-webkit-scrollbar": {
+        width: "10px",
+        height: "10px",
+      },
+      ".cm-scroller::-webkit-scrollbar-track": {
+        backgroundColor: "transparent",
+      },
+      ".cm-scroller::-webkit-scrollbar-thumb": {
+        backgroundColor:
+          "color-mix(in srgb, var(--foreground) 22%, transparent)",
+        borderRadius: "5px",
+        // Inset the thumb off the right edge with a transparent border so the
+        // bar reads as a floating pill rather than a full-height rail.
+        border: "2px solid transparent",
+        backgroundClip: "content-box",
+      },
+      ".cm-scroller::-webkit-scrollbar-thumb:hover": {
+        backgroundColor:
+          "color-mix(in srgb, var(--foreground) 38%, transparent)",
+      },
+      ".cm-scroller::-webkit-scrollbar-corner": {
+        backgroundColor: "transparent",
       },
       ".cm-content": {
         caretColor: "var(--foreground)",

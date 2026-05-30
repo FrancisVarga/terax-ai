@@ -12,8 +12,10 @@ import {
 import { IncognitoIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { CwdBreadcrumb } from "./CwdBreadcrumb";
+import { GitStatusIndicator } from "./GitStatusIndicator";
 import { WorkspaceEnvSelector } from "./WorkspaceEnvSelector";
 import type { WorkspaceEnv } from "@/modules/workspace";
+import type { SourceControlSummary } from "@/modules/source-control";
 
 type Props = {
   cwd: string | null;
@@ -25,6 +27,9 @@ type Props = {
   /** Only rendered when the AI panel is open and a key is loaded. */
   hasComposer: boolean;
   privateActive: boolean;
+  /** Shared git summary; the branch chip opens the Source Control panel. */
+  sourceControl: SourceControlSummary;
+  onOpenSourceControl?: () => void;
 };
 
 export function StatusBar({
@@ -36,6 +41,8 @@ export function StatusBar({
   onOpenMini,
   hasComposer,
   privateActive,
+  sourceControl,
+  onOpenSourceControl,
 }: Props) {
   const panelOpen = useChatStore((s) => s.panelOpen);
   const openPanel = useChatStore((s) => s.openPanel);
@@ -45,6 +52,10 @@ export function StatusBar({
       <div className="flex min-w-0 flex-1 items-center gap-2">
         <WorkspaceEnvSelector onSelect={onWorkspaceChange} />
         <CwdBreadcrumb cwd={cwd} filePath={filePath} home={home} onCd={onCd} />
+        <GitStatusIndicator
+          sourceControl={sourceControl}
+          onOpen={onOpenSourceControl}
+        />
         {privateActive ? (
           <Tooltip>
             <TooltipTrigger asChild>
