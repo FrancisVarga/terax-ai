@@ -3,6 +3,7 @@ import {
   BotIcon,
   Clock01Icon,
   EyeIcon,
+  GithubIcon,
   PlaySquareIcon,
   SparklesIcon,
 } from "@hugeicons/core-free-icons";
@@ -28,6 +29,7 @@ export function RightSidebarRail({ activeView, onSelectView }: Props) {
     { id: "ai", label: "AI", icon: SparklesIcon },
     { id: "agents", label: "Agents", icon: BotIcon },
     { id: "tasks", label: "Tasks", icon: PlaySquareIcon },
+    { id: "actions", label: "Actions", icon: GithubIcon },
     { id: "history", label: "History", icon: Clock01Icon },
     { id: "preview", label: "Preview", icon: EyeIcon },
   ];
