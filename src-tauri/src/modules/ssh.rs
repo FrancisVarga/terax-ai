@@ -263,6 +263,10 @@ pub struct RemoteDirEntry {
     pub size: u64,
     /// mtime in seconds since the epoch (0 when unknown).
     pub mtime: u64,
+    /// True when `git check-ignore` matches this entry on the remote host, so
+    /// the explorer dims it like the local tree does. False when the remote dir
+    /// is not inside a git work tree (git errors → empty match set).
+    pub ignored: bool,
 }
 
 /// A live remote connection: the russh handle (kept alive so the transport
@@ -750,9 +754,22 @@ pub async fn ssh_fs_read_dir(
             kind: file_type_str(entry.file_type()).to_string(),
             size: meta.size.unwrap_or(0),
             mtime: meta.mtime.map(u64::from).unwrap_or(0),
+            ignored: false,
             name,
         });
     }
+
+    // Mark git-ignored entries so the explorer dims them, mirroring the local
+    // tree. One `git check-ignore` exec covers the whole directory; a remote dir
+    // outside any git work tree yields an empty match set (git exits non-zero,
+    // stdout empty) so nothing is dimmed — a safe default.
+    let ignored = remote_git_ignored(&conn, &path, &out).await;
+    for e in &mut out {
+        if ignored.contains(&e.name) {
+            e.ignored = true;
+        }
+    }
+
     // Dirs first, then case-insensitive name — same ordering feel as local.
     out.sort_by(|a, b| {
         let ad = a.kind == "dir";
@@ -761,6 +778,50 @@ pub async fn ssh_fs_read_dir(
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(out)
+}
+
+/// Return the set of entry names in `dir` that git ignores on the remote host.
+///
+/// Runs a single `git check-ignore` from inside `dir`, passing each child's
+/// basename as an argument; git echoes back the ones it ignores (verbatim, so
+/// the returned names match `RemoteDirEntry::name` directly). Directories are
+/// passed bare — git matches `node_modules` against a `node_modules/` rule
+/// regardless of a trailing slash.
+///
+/// Failure modes all degrade to "nothing ignored": if `dir` is outside a git
+/// work tree, git prints a fatal to stderr (dropped by `exec`) and exits
+/// non-zero with empty stdout; if `git` is absent the command fails the same
+/// way. Either way the caller leaves every entry un-dimmed, which is the
+/// pre-existing behavior — so this only ever *adds* correct dimming.
+async fn remote_git_ignored(
+    conn: &RemoteConn,
+    dir: &str,
+    entries: &[RemoteDirEntry],
+) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    if entries.is_empty() {
+        return HashSet::new();
+    }
+    // `--` stops git from treating a name that starts with `-` as a flag.
+    let args = entries
+        .iter()
+        .map(|e| sh_single_quote(&e.name))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cmd = format!(
+        "cd {dir} && git check-ignore -- {args} 2>/dev/null",
+        dir = sh_single_quote(dir),
+    );
+    let stdout = match conn.exec(&cmd).await {
+        Ok(s) => s,
+        Err(_) => return HashSet::new(),
+    };
+    stdout
+        .lines()
+        .map(|l| l.trim_end_matches('\r').trim())
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 #[tauri::command]

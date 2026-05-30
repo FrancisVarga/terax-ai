@@ -38,6 +38,7 @@ type RemoteEntry = {
   kind: string;
   size: number;
   mtime: number;
+  ignored: boolean;
 };
 
 /**
@@ -61,7 +62,9 @@ export async function readDir(
       kind: e.kind as DirEntry["kind"],
       size: e.size,
       mtime: e.mtime,
-      ignored: false, // remote roots have no gitignore evaluation
+      // Real `git check-ignore` result from the remote host (false when the
+      // remote root is outside a git work tree). See ssh_fs_read_dir.
+      ignored: e.ignored,
     }));
   }
   return invoke<DirEntry[]>("fs_read_dir", {
