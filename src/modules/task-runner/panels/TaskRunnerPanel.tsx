@@ -42,6 +42,7 @@ export function TaskRunnerPanel() {
   const clearOutput = useTaskRunnerStore((s) => s.clearOutput);
   const select = useTaskRunnerStore((s) => s.select);
   const findRunning = useTaskRunnerStore((s) => s.findRunning);
+  const setManifests = useTaskRunnerStore((s) => s.setManifests);
   const loadScan = useTaskRunnerStore((s) => s.loadScan);
   // Subscribe to the SWR scan cache for this root. The store serves the
   // last-known manifests instantly and only re-walks the filesystem when the
@@ -64,6 +65,14 @@ export function TaskRunnerPanel() {
   // re-scan does not rebuild the tree or re-render the rows.
   const manifests = scan?.manifests;
   const tree = useMemo(() => (manifests ? buildTree(manifests) : []), [manifests]);
+
+  // Publish the scanned manifests to the store's flat `manifests` field so the
+  // command palette can list the same runnable scripts without re-scanning.
+  // Keyed off the (referentially-stable) scan manifests, so it only fires when
+  // a scan actually produces new data.
+  useEffect(() => {
+    setManifests(manifests ?? []);
+  }, [manifests, setManifests]);
 
   // Derive the view status from the cache. Spinner shows only on the first scan
   // (no cache entry yet); a stale revalidation keeps the previous tree visible.

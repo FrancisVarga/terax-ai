@@ -12,12 +12,14 @@ import type {
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { buildDataGridTheme } from "./lib/agGridTheme";
+import { buildDataGridTheme, ensureAgGridRegistered } from "./lib/agGridTheme";
 import {
   SqlQueryBar,
   type ExportFormat,
   type SqlQueryBarHandle,
 } from "./SqlQueryBar";
+
+ensureAgGridRegistered();
 
 /** Wire format returned by the `data_*` Rust commands. */
 type DataPreview = {

@@ -7,10 +7,15 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 .omc
+
+# Per-developer Claude Code / agent tooling state (local settings, task locks).
+.claude/
+
 node_modules
 dist
 dist-ssr
 *.local
+.gitstatus.tmp
 
 # Editor directories and files
 .vscode/*
@@ -34,3 +39,8 @@ src-tauri/binaries/*
 
 # Bun incremental build artifacts (e.g. .<hash>-00000000.bun-build)
 *.bun-build
+
+# Machine-specific local-dev cargo build shim (MSVC toolchain pin).
+# Must NOT be committed: its hardcoded VS BuildTools paths break CI's native
+# compiler detection (cc-rs cannot parse the space in "C:\Program Files").
+src-tauri/.cargo/

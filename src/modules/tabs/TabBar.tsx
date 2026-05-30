@@ -33,7 +33,7 @@ import {
   Table01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { EditorTab, Tab } from "./lib/useTabs";
 
 type Props = {
@@ -55,6 +55,8 @@ type Props = {
   onClose: (id: number) => void;
   /** Pin (promote) a preview tab to persistent on double-click. */
   onPin: (id: number) => void;
+  /** Drag-reorder: move tab `fromId` into the slot of `toId`. */
+  onReorder: (fromId: number, toId: number) => void;
   compact?: boolean;
 };
 
@@ -76,9 +78,14 @@ export function TabBar({
   onOpenCcusage,
   onClose,
   onPin,
+  onReorder,
   compact,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Tab id currently being dragged, and the id of the tab it's hovering over.
+  // dragOverId drives the drop-indicator styling; both reset on drag end.
+  const dragIdRef = useRef<number | null>(null);
+  const [dragOverId, setDragOverId] = useState<number | null>(null);
 
   // Horizontal wheel scroll without holding shift.
   useEffect(() => {
@@ -121,6 +128,41 @@ export function TabBar({
                   key={t.id}
                   value={String(t.id)}
                   data-tab-id={t.id}
+                  // Carve this tab OUT of the parent Tauri window-drag region —
+                  // otherwise Tauri hijacks the pointerdown to move the OS
+                  // window and the HTML5 `dragstart` never fires. Must be the
+                  // STRING "false": React drops a boolean-`false` attribute
+                  // entirely, which would leave the tab inside the drag region.
+                  data-tauri-drag-region="false"
+                  draggable
+                  onDragStart={(e) => {
+                    dragIdRef.current = t.id;
+                    e.dataTransfer.effectAllowed = "move";
+                    // Firefox requires data to be set for the drag to start.
+                    e.dataTransfer.setData("text/plain", String(t.id));
+                  }}
+                  onDragOver={(e) => {
+                    // preventDefault is mandatory — without it the element is
+                    // not a valid drop target and onDrop never fires.
+                    if (dragIdRef.current === null) return;
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "move";
+                    if (t.id !== dragOverId) setDragOverId(t.id);
+                  }}
+                  onDragLeave={() => {
+                    if (t.id === dragOverId) setDragOverId(null);
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    const from = dragIdRef.current;
+                    if (from !== null && from !== t.id) onReorder(from, t.id);
+                    dragIdRef.current = null;
+                    setDragOverId(null);
+                  }}
+                  onDragEnd={() => {
+                    dragIdRef.current = null;
+                    setDragOverId(null);
+                  }}
                   onDoubleClick={() => isPreview && onPin(t.id)}
                   onAuxClick={(e) => {
                     if (e.button === 1 && tabs.length > 1) {
@@ -145,6 +187,11 @@ export function TabBar({
                       : tabs.length === 1
                         ? "px-2!"
                         : "ps-2! pe-1!",
+                    // Drop indicator: highlight the tab being hovered during a
+                    // drag-reorder (skip when it's the dragged tab itself).
+                    dragOverId === t.id &&
+                      dragIdRef.current !== t.id &&
+                      "ring-1 ring-primary/60 ring-inset",
                   )}
                 >
                   <span

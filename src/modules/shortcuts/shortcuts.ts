@@ -29,6 +29,7 @@ export type ShortcutId =
   | "ai.askSelection"
   | "claude.newTab"
   | "claude.splitRight"
+  | "claude.goldenDuo"
   | "claude.team"
   | "window.new"
   | "commandPopup.open"
@@ -218,6 +219,12 @@ export const SHORTCUTS: Shortcut[] = [
     label: "Open Claude Code in split pane right",
     group: "AI",
     defaultBindings: [],
+  },
+  {
+    id: "claude.goldenDuo",
+    label: "Claude Golden Duo (split screen, claude in both)",
+    group: "AI",
+    defaultBindings: [{ ctrl: true, shift: true, key: "t" }],
   },
   {
     id: "claude.team",

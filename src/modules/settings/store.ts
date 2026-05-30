@@ -90,6 +90,8 @@ export type Preferences = {
   shortcuts: Record<ShortcutId, KeyBinding[]>;
   editorAutoSave: boolean;
   editorAutoSaveDelay: number;
+  /** Run the embedded bunqueue job-queue server. Off by default — opt in. */
+  bunqueueEnabled: boolean;
 };
 
 const STORE_PATH = "terax-settings.json";
@@ -135,6 +137,9 @@ const KEY_NOTIFICATION_SOUND = "notificationSound";
 const KEY_SHORTCUTS = "shortcuts";
 const KEY_EDITOR_AUTO_SAVE = "editorAutoSave";
 const KEY_EDITOR_AUTO_SAVE_DELAY = "editorAutoSaveDelay";
+// Mirrored in Rust (src-tauri/src/modules/bunqueue.rs `read_enabled_pref`).
+// Keep this string in sync — the backend reads the same persisted key at boot.
+const KEY_BUNQUEUE_ENABLED = "bunqueueEnabled";
 
 export const TERMINAL_FONT_SIZE_DEFAULT = 14;
 export const TERMINAL_FONT_SIZE_MIN = 8;
@@ -193,6 +198,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   shortcuts: {} as Record<ShortcutId, KeyBinding[]>,
   editorAutoSave: false,
   editorAutoSaveDelay: 1000,
+  bunqueueEnabled: false,
 };
 
 const store = new LazyStore(STORE_PATH, { defaults: {}, autoSave: 200 });
@@ -328,6 +334,9 @@ export async function loadPreferences(): Promise<Preferences> {
       get<number>(KEY_EDITOR_AUTO_SAVE_DELAY) ??
         DEFAULT_PREFERENCES.editorAutoSaveDelay,
     ),
+    bunqueueEnabled:
+      get<boolean>(KEY_BUNQUEUE_ENABLED) ??
+      DEFAULT_PREFERENCES.bunqueueEnabled,
   };
 }
 
@@ -529,6 +538,10 @@ export async function setAgentNotifications(value: boolean): Promise<void> {
   await writePref(KEY_AGENT_NOTIFICATIONS, value);
 }
 
+export async function setBunqueueEnabled(value: boolean): Promise<void> {
+  await writePref(KEY_BUNQUEUE_ENABLED, value);
+}
+
 export async function setNotificationSound(value: boolean): Promise<void> {
   await writePref(KEY_NOTIFICATION_SOUND, value);
 }
@@ -591,6 +604,7 @@ export async function onPreferencesChange(
     [KEY_SHORTCUTS]: "shortcuts",
     [KEY_EDITOR_AUTO_SAVE]: "editorAutoSave",
     [KEY_EDITOR_AUTO_SAVE_DELAY]: "editorAutoSaveDelay",
+    [KEY_BUNQUEUE_ENABLED]: "bunqueueEnabled",
   };
   // Same-process writes still fire onChange immediately; cross-window writes
   // arrive via the Tauri event emitted by writePref().

@@ -56,8 +56,13 @@ export const bunqueueNative = {
       sinceOffset: sinceOffset ?? null,
     }),
   restart: () => invoke<BunqueueStatus>("bunqueue_restart"),
-  /** Idempotently start the server + workers if not already running. */
+  /** Idempotently start the server + workers if not already running. No-op
+   *  while the server is disabled (opt-in). */
   ensure: () => invoke<BunqueueStatus>("bunqueue_ensure"),
+  /** Enable/disable the server at runtime. Enabling spawns it; disabling kills
+   *  the server + workers. Persisting the pref is the caller's job. */
+  setEnabled: (enabled: boolean) =>
+    invoke<BunqueueStatus>("bunqueue_set_enabled", { enabled }),
   /** Status of the Bun worker processes Terax spawned. */
   workers: () => invoke<BunqueueWorkerInfo[]>("bunqueue_workers"),
 };

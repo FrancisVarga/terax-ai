@@ -247,15 +247,14 @@ export function useTabs(
 ) {
   const [tabs, setTabs] = useState<Tab[]>(() => {
     // Seed the projects dashboard as the first (and initially active) tab,
-    // followed by the bunqueue dashboard and a default shell.
-    // IDs: projects=1, bunqueue=2, terminal=3, its leaf=4.
+    // followed by a default shell. The bunqueue dashboard is NOT seeded — the
+    // server is opt-in (off by default), so its tab opens on demand via
+    // `openBunqueueTab`. IDs: projects=1, terminal=2, its leaf=3.
     const projectsId = 1;
-    const bunqueueId = 2;
-    const termId = 3;
-    const leafId = 4;
+    const termId = 2;
+    const leafId = 3;
     return [
       { id: projectsId, kind: "projects", title: "Projects" },
-      { id: bunqueueId, kind: "bunqueue", title: "bunqueue" },
       {
         id: termId,
         kind: "terminal",
@@ -266,12 +265,12 @@ export function useTabs(
       },
     ];
   });
-  // A project window (opened via `?dir=`) focuses its terminal (id 3); a plain
+  // A project window (opened via `?dir=`) focuses its terminal (id 2); a plain
   // launch focuses the Projects dashboard (id 1).
   const [activeId, setActiveId] = useState(
-    options?.focusTerminalOnLaunch ? 3 : 1,
+    options?.focusTerminalOnLaunch ? 2 : 1,
   );
-  const nextIdRef = useRef(5);
+  const nextIdRef = useRef(4);
   const tabsRef = useRef(tabs);
 
   useEffect(() => {
@@ -364,6 +363,39 @@ export function useTabs(
       ]);
       setActiveId(tabId);
       return { tabId, leafIds: [a, b, c, d] as const };
+    },
+    [],
+  );
+
+  // Open a terminal tab pre-split into two side-by-side panes (2 leaves). Used
+  // by the "Claude Golden Duo" command. Returns the tab id and both leaf ids in
+  // left-to-right order so the caller can launch a process in each.
+  const newDuoTab = useCallback(
+    (cwd: string | undefined, title: string) => {
+      const tabId = nextIdRef.current++;
+      const split = nextIdRef.current++;
+      const left = nextIdRef.current++;
+      const right = nextIdRef.current++;
+      const leaf = (id: number): PaneNode => ({ kind: "leaf", id, cwd });
+      const paneTree: PaneNode = {
+        kind: "split",
+        id: split,
+        dir: "row",
+        children: [leaf(left), leaf(right)],
+      };
+      setTabs((t) => [
+        ...t,
+        {
+          id: tabId,
+          kind: "terminal",
+          title,
+          cwd,
+          paneTree,
+          activeLeafId: left,
+        },
+      ]);
+      setActiveId(tabId);
+      return { tabId, leafIds: [left, right] as const };
     },
     [],
   );
@@ -991,6 +1023,25 @@ export function useTabs(
     [],
   );
 
+  /**
+   * Move the tab `fromId` to the slot occupied by `toId` (drag-reorder).
+   * No-op when either id is missing or they're already adjacent in the
+   * requested direction. Ids are stable, so only the array order changes —
+   * nothing else (active tab, pane trees) is touched.
+   */
+  const reorderTab = useCallback((fromId: number, toId: number) => {
+    if (fromId === toId) return;
+    setTabs((curr) => {
+      const from = curr.findIndex((t) => t.id === fromId);
+      const to = curr.findIndex((t) => t.id === toId);
+      if (from === -1 || to === -1) return curr;
+      const next = [...curr];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    });
+  }, []);
+
   const closeTab = useCallback((id: number) => {
     let toDispose: number[] = [];
     setTabs((curr) => {
@@ -1252,6 +1303,7 @@ export function useTabs(
     newTab,
     newAgentTab,
     newGridTab,
+    newDuoTab,
     newPrivateTab,
     openFileTab,
     pinTab,
@@ -1276,6 +1328,7 @@ export function useTabs(
     setAiDiffStatus,
     closeAiDiffTab,
     closeTab,
+    reorderTab,
     updateTab,
     selectByIndex,
     setLeafCwd,

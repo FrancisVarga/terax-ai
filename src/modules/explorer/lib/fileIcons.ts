@@ -575,6 +575,7 @@ const fileIcons: FileIcons = {
       "dockerfile.ci",
       "dockerfile.web",
       "dockerfile.worker",
+      "dockerfile.scaffold",
 
       "containerfile",
       "containerfile.prod",

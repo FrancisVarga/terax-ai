@@ -371,12 +371,15 @@ pub fn run() {
                 .map(|dir| dir.join("bunqueue").join(db_file));
 
             // Start the bunqueue job-queue server on boot (HTTP API + no auth,
-            // persistent SQLite). Non-fatal if Bun is unavailable.
+            // persistent SQLite) — but only if the user opted in via the
+            // `bunqueueEnabled` pref. Off by default. Non-fatal if Bun is
+            // unavailable.
             let state = app.state::<bunqueue::BunqueueState>();
             bunqueue::set_data_path(&state, data_path);
-            bunqueue::start_on_boot(&state);
+            bunqueue::init_from_pref(app.handle(), &state);
             // Supervise: a background watchdog restarts the server/workers if
-            // they die.
+            // they die — gated on the same enabled flag, so it stays idle while
+            // bunqueue is disabled.
             bunqueue::start_watchdog(app.handle().clone());
 
             // Open the OTEL store under the app data dir, then start the local
@@ -510,6 +513,7 @@ pub fn run() {
             bunqueue::bunqueue_logs,
             bunqueue::bunqueue_restart,
             bunqueue::bunqueue_ensure,
+            bunqueue::bunqueue_set_enabled,
             bunqueue::bunqueue_workers,
             otel::otel_ingest_port,
             otel::otel_counts,

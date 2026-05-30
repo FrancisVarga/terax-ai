@@ -16,6 +16,11 @@ import {
   revealInFinder,
 } from "./lib/contextActions";
 import { fileIconUrl, folderIconUrl } from "./lib/iconResolver";
+import {
+  type GitDecorationStatus,
+  statusColorClass,
+  statusLetter,
+} from "./lib/gitDecoration";
 import { COMPACT_CONTENT, COMPACT_ITEM } from "./lib/menuItemClass";
 import type { useFileTree } from "./lib/useFileTree";
 
@@ -33,6 +38,9 @@ export type EntryRowProps = {
   isRenaming: boolean;
   /** Git-ignored: the row is dimmed to de-emphasize untracked/ignored paths. */
   ignored: boolean;
+  /** Git change status: colors the name + shows a status letter. Folders pass
+   * "modified" as a rollup marker for a dirty descendant. */
+  gitStatus: GitDecorationStatus | null;
   onOpenFile: (path: string, pin?: boolean) => void;
   onSelectPath: (path: string) => void;
   onRevealInTerminal?: (path: string) => void;
@@ -62,6 +70,7 @@ function EntryRowImpl(props: EntryRowProps) {
     isSelected,
     isRenaming,
     ignored,
+    gitStatus,
     onOpenFile,
     onSelectPath,
     onRevealInTerminal,
@@ -73,10 +82,12 @@ function EntryRowImpl(props: EntryRowProps) {
 
   const [isConfirming, setIsConfirming] = useState(false);
   const iconUrl = isDir ? folderIconUrl(name, isExpanded) : fileIconUrl(name);
-  // Folders render at 24px; files at half that (12px) so the colored folder art
-  // stays prominent while file-type glyphs read as secondary. The glyph column
-  // width stays 24px (centered) so icon centers align down the tree.
-  const iconSize = "size-6";
+  // Glyph column: folders render slightly larger for emphasis; the span is
+  // overflow-visible so the folder art can extend past the row instead of
+  // clipping. The inner img sizes via `glyphSize` (folders 24px; file-type
+  // glyphs 17px so they read as secondary) and keeps object-contain so the SVG
+  // scales without distortion.
+  const iconSize = isDir ? "size-[26px]" : "size-5";
   const glyphSize = isDir ? "size-6" : "size-[17px]";
   const createTarget = isDir ? path : path.slice(0, path.lastIndexOf("/")) || rootPath;
   const paddingLeft = 6 + depth * 12;
@@ -98,7 +109,7 @@ function EntryRowImpl(props: EntryRowProps) {
           >
             <span className="size-4 shrink-0" />
             {iconUrl ? (
-              <span className={cn(iconSize, "flex shrink-0 items-center justify-center")}>
+              <span className={cn(iconSize, "flex shrink-0 items-center justify-center overflow-visible")}>
                 <img src={iconUrl} alt="" className={cn(glyphSize, "object-contain")} />
               </span>
             ) : (
@@ -137,12 +148,40 @@ function EntryRowImpl(props: EntryRowProps) {
                 />
               ) : null}
             </span>
-            <span className={cn(iconSize, "flex shrink-0 items-center justify-center")}>
+            <span className={cn(iconSize, "flex shrink-0 items-center justify-center overflow-visible")}>
               {iconUrl ? (
                 <img src={iconUrl} alt="" className={cn(glyphSize, "object-contain")} />
               ) : null}
             </span>
-            <span className="min-w-0 flex-1 truncate">{name}</span>
+            <span
+              className={cn(
+                "min-w-0 flex-1 truncate",
+                gitStatus && statusColorClass(gitStatus),
+              )}
+            >
+              {name}
+            </span>
+            {gitStatus ? (
+              isDir ? (
+                <span
+                  className={cn(
+                    "mr-1 size-1.5 shrink-0 rounded-full bg-current",
+                    statusColorClass(gitStatus),
+                  )}
+                  aria-hidden
+                />
+              ) : (
+                <span
+                  className={cn(
+                    "mr-1 shrink-0 font-mono text-[11px] font-semibold tabular-nums",
+                    statusColorClass(gitStatus),
+                  )}
+                  title={`Git: ${gitStatus}`}
+                >
+                  {statusLetter(gitStatus)}
+                </span>
+              )
+            ) : null}
           </button>
         )}
       </ContextMenuTrigger>
@@ -282,8 +321,13 @@ export function PendingRow({ depth, kind, onCommit, onCancel }: PendingRowProps)
       className="flex h-8 w-full min-w-0 items-center gap-2 px-1.5 text-[13px]"
       style={{ paddingLeft: 6 + depth * 12 }}
     >
-      <span className="size-6 shrink-0" />
-      <span className="flex size-6 shrink-0 items-center justify-center">
+      <span className="size-4 shrink-0" />
+      <span
+        className={cn(
+          "flex shrink-0 items-center justify-center overflow-visible",
+          kind === "dir" ? "size-[26px]" : "size-5",
+        )}
+      >
         <img
           src={kind === "dir" ? folderIconUrl("", false) : fileIconUrl("untitled")}
           alt=""

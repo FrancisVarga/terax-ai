@@ -1,4 +1,22 @@
-import { themeQuartz } from "ag-grid-community";
+import {
+  AllCommunityModule,
+  ModuleRegistry,
+  themeQuartz,
+} from "ag-grid-community";
+
+let registered = false;
+
+/**
+ * Register every AG Grid community feature exactly once. Called from the grid
+ * panes (DataPane / S3ParquetGrid) rather than at app boot so the ag-grid
+ * bundle code-splits into a lazy chunk and stays out of the startup critical
+ * path. The module-level guard makes repeat calls across grid instances free.
+ */
+export function ensureAgGridRegistered(): void {
+  if (registered) return;
+  ModuleRegistry.registerModules([AllCommunityModule]);
+  registered = true;
+}
 
 /**
  * Build an AG Grid theme matched to the app's current palette.

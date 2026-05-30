@@ -34,11 +34,15 @@ const dataUrlCache = new Map<string, string>();
 // the iconify export keys a few icons under a different output slug. Bridge the
 // divergent names here. Extend when another mismatch surfaces.
 const SLUG_ALIASES: Record<string, string> = {
-  // file-icon slug renames. The association manifest uses material-icon-theme
-  // *definition* IDs; the iconify export keys SVGs under the theme's *output*
-  // slug, which diverges for many icons (e.g. `bash`→`console`, `csv`→`table`,
-  // `typescript-config`→`tsconfig`). Each entry bridges one such divergence so
-  // the slug resolves to a real SVG instead of falling back to `document`.
+  // file-icon slug renames.
+  //
+  // The fileIcons manifest mirrors material-icon-theme's upstream source
+  // definition IDs. The published @iconify-json/material-icon-theme export
+  // only ships icons with a unique SVG body, collapsing many `-config` /
+  // `-ignore` / `-lock` / language-variant definitions onto a base slug and
+  // dropping the variant name. Each entry below bridges a manifest slug that
+  // is absent from the export to the base slug that is present, so these file
+  // types render their real glyph instead of the `document` fallback.
   "adobe-ai": "adobe-illustrator",
   "adobe-ps": "adobe-photoshop",
   "api-blueprint": "apiblueprint",
@@ -61,7 +65,7 @@ const SLUG_ALIASES: Record<string, string> = {
   "docker-compose": "docker",
   "docker-ignore": "docker",
   "drizzle-orm": "drizzle",
-  env: "tune",
+  env: "settings",
   envrc: "tune",
   "eslint-ignore": "eslint",
   flutter: "dart",
@@ -72,11 +76,11 @@ const SLUG_ALIASES: Record<string, string> = {
   "go-template": "go",
   hacking: "document",
   humans: "document",
-  "java-class": "javaclass",
+  "java-class": "java",
   "java-jar": "jar",
   "javascript-config": "javascript",
   "javascript-react": "react",
-  "javascript-test": "test-js",
+  "javascript-test": "javascript",
   latex: "tex",
   "lint-staged": "lintstaged",
   "lua-check": "lua",
@@ -95,6 +99,7 @@ const SLUG_ALIASES: Record<string, string> = {
   marko: "markojs",
   midi: "audio",
   moonrepo: "moon",
+  moonwave: "moon",
   msbuild: "makefile",
   "ms-powerpoint": "powerpoint",
   "ms-word": "word",
@@ -103,6 +108,7 @@ const SLUG_ALIASES: Record<string, string> = {
   "npm-lock": "npm",
   "nuxt-ignore": "nuxt",
   "nx-ignore": "nx",
+  org: "document",
   "package-json": "nodejs",
   "panda-css": "panda",
   plantuml: "uml",
@@ -114,14 +120,14 @@ const SLUG_ALIASES: Record<string, string> = {
   properties: "settings",
   prototools: "proto",
   "python-compiled": "python",
-  "python-config": "python-misc",
+  "python-config": "python",
   rdata: "r",
   release: "semantic-release",
   rmd: "r",
   rokit: "rojo",
   rproj: "r",
-  "ruby-gem": "gemfile",
-  "ruby-gem-lock": "gemfile",
+  "ruby-gem": "ruby",
+  "ruby-gem-lock": "ruby",
   "rust-config": "rust",
   security: "lock",
   "semgrep-ignore": "semgrep",
@@ -135,10 +141,11 @@ const SLUG_ALIASES: Record<string, string> = {
   swiftformat: "swift",
   tailwind: "tailwindcss",
   "tauri-ignore": "tauri",
+  text: "document",
   turbo: "turborepo",
-  "typescript-config": "tsconfig",
+  "typescript-config": "typescript",
   "typescript-react": "react-ts",
-  "typescript-test": "test-ts",
+  "typescript-test": "typescript",
   v: "vlang",
   vapi: "vala",
   "vercel-ignore": "vercel",

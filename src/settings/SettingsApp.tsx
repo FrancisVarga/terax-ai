@@ -5,6 +5,7 @@ import type { SettingsTab } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   AiScanIcon,
+  Database02Icon,
   InformationCircleIcon,
   PaintBoardIcon,
   Settings01Icon,
@@ -16,6 +17,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { JSX, useEffect, useState } from "react";
 import { AboutSection } from "./sections/AboutSection";
 import { AgentsSection } from "./sections/AgentsSection";
+import { BunqueueSection } from "./sections/BunqueueSection";
 import { GeneralSection } from "./sections/GeneralSection";
 import { ModelsSection } from "./sections/ModelsSection";
 import { ShortcutsSection } from "./sections/ShortcutsSection";
@@ -28,6 +30,7 @@ const TABS: { id: SettingsTab; label: string; icon: typeof Settings01Icon, compo
     { id: "shortcuts", label: "Shortcuts", icon: KeyboardIcon, component: ShortcutsSection },
     { id: "models", label: "Models", icon: AiScanIcon, component: ModelsSection },
     { id: "agents", label: "Agents", icon: UserMultiple02Icon, component: AgentsSection },
+    { id: "bunqueue", label: "Bunqueue", icon: Database02Icon, component: BunqueueSection },
     { id: "about", label: "About", icon: InformationCircleIcon, component: AboutSection },
   ];
 
@@ -37,6 +40,7 @@ const VALID_TABS: SettingsTab[] = [
   "shortcuts",
   "models",
   "agents",
+  "bunqueue",
   "about",
 ];
 

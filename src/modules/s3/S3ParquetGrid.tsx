@@ -8,7 +8,12 @@ import type {
 } from "ag-grid-community";
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useMemo, useRef, useState } from "react";
-import { buildDataGridTheme } from "@/modules/data/lib/agGridTheme";
+import {
+  buildDataGridTheme,
+  ensureAgGridRegistered,
+} from "@/modules/data/lib/agGridTheme";
+
+ensureAgGridRegistered();
 import { useTheme } from "@/modules/theme";
 import { cn } from "@/lib/utils";
 
