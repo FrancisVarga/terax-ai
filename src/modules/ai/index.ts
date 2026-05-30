@@ -11,6 +11,7 @@ export {
   EMPTY_PROVIDER_KEYS,
   getAllKeys,
   getKey,
+  getAccountKey,
   setKey,
   clearKey,
   hasAnyKey,
@@ -24,6 +25,7 @@ export {
   removeAccount,
   type ProviderKeys,
 } from "./lib/keyring";
+export { testProviderKey, type KeyTestResult } from "./lib/testKey";
 export {
   type AccountRegistry,
   type ProviderAccount,

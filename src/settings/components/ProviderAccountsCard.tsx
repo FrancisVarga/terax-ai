@@ -4,9 +4,10 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import type { ProviderInfo } from "@/modules/ai/config";
-import type { ProviderAccount } from "@/modules/ai";
+import type { KeyTestResult, ProviderAccount } from "@/modules/ai";
 import {
   Add01Icon,
+  AlertCircleIcon,
   ArrowUpRight01Icon,
   Cancel01Icon,
   CheckmarkCircle02Icon,
@@ -26,6 +27,7 @@ type Props = {
   onSetActive: (accountId: string) => Promise<void>;
   onRename: (accountId: string, label: string) => Promise<void>;
   onRemove: (accountId: string) => Promise<void>;
+  onTest: (accountId: string) => Promise<KeyTestResult>;
   /** Remove the whole provider from the connected list. */
   onRemoveProvider?: () => void;
 };
@@ -38,6 +40,7 @@ export function ProviderAccountsCard({
   onSetActive,
   onRename,
   onRemove,
+  onTest,
   onRemoveProvider,
 }: Props) {
   const [adding, setAdding] = useState(accounts.length === 0);
@@ -89,6 +92,7 @@ export function ProviderAccountsCard({
               onSetActive={() => onSetActive(a.id)}
               onRename={(label) => onRename(a.id, label)}
               onRemove={() => onRemove(a.id)}
+              onTest={() => onTest(a.id)}
             />
           ))}
         </div>
@@ -118,26 +122,47 @@ export function ProviderAccountsCard({
   );
 }
 
+type TestState =
+  | { kind: "idle" }
+  | { kind: "testing" }
+  | { kind: "result"; result: KeyTestResult };
+
 function AccountRow({
   account,
   active,
   onSetActive,
   onRename,
   onRemove,
+  onTest,
 }: {
   account: ProviderAccount;
   active: boolean;
   onSetActive: () => Promise<void>;
   onRename: (label: string) => Promise<void>;
   onRemove: () => Promise<void>;
+  onTest: () => Promise<KeyTestResult>;
 }) {
   const [editingLabel, setEditingLabel] = useState(false);
   const [labelDraft, setLabelDraft] = useState(account.label);
+  const [test, setTest] = useState<TestState>({ kind: "idle" });
+
+  const runTest = async () => {
+    setTest({ kind: "testing" });
+    try {
+      const result = await onTest();
+      setTest({ kind: "result", result });
+    } catch (e) {
+      setTest({
+        kind: "result",
+        result: { kind: "unreachable", message: String(e) },
+      });
+    }
+  };
 
   return (
     <div
       className={cn(
-        "flex items-center gap-2 rounded-md border px-2 py-1.5",
+        "flex flex-wrap items-center gap-2 rounded-md border px-2 py-1.5",
         active
           ? "border-primary/40 bg-primary/5"
           : "border-transparent hover:bg-muted/30",
@@ -197,6 +222,20 @@ function AccountRow({
         </span>
       ) : null}
 
+      <TestVerdict state={test} />
+
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={() => void runTest()}
+        disabled={test.kind === "testing"}
+        title="Send an authenticated request to verify this key"
+        className="h-6 gap-1 px-2 text-[10.5px]"
+      >
+        {test.kind === "testing" ? <Spinner className="size-3" /> : null}
+        Test
+      </Button>
+
       <Button
         size="icon"
         variant="ghost"
@@ -207,6 +246,42 @@ function AccountRow({
         <HugeiconsIcon icon={Cancel01Icon} size={11} strokeWidth={1.75} />
       </Button>
     </div>
+  );
+}
+
+function TestVerdict({ state }: { state: TestState }) {
+  if (state.kind !== "result") return null;
+  const r = state.result;
+  if (r.kind === "ok") {
+    return (
+      <span className="flex items-center gap-1 text-[10px] text-emerald-500">
+        <HugeiconsIcon icon={CheckmarkCircle02Icon} size={11} strokeWidth={2} />
+        Valid
+      </span>
+    );
+  }
+  const label =
+    r.kind === "unauthorized"
+      ? r.status === 0
+        ? "No key stored"
+        : "Key rejected"
+      : r.kind === "unreachable"
+        ? "Unreachable"
+        : r.message;
+  return (
+    <span
+      className="flex items-center gap-1 text-[10px] text-destructive"
+      title={
+        r.kind === "unreachable"
+          ? r.message
+          : r.kind === "error"
+            ? r.message
+            : undefined
+      }
+    >
+      <HugeiconsIcon icon={AlertCircleIcon} size={11} strokeWidth={2} />
+      {label}
+    </span>
   );
 }
 

@@ -233,6 +233,15 @@ export async function getKey(provider: ProviderId): Promise<string | null> {
   return rawGet(accountSlot(provider, id));
 }
 
+/** A specific account's stored key (not necessarily the active one). */
+export async function getAccountKey(
+  provider: ProviderId,
+  accountId: string,
+): Promise<string | null> {
+  if (!providerSupportsKey(provider)) return null;
+  return rawGet(accountSlot(provider, accountId));
+}
+
 /**
  * Resolve the active account's key for every keyed provider into the flat
  * ProviderKeys map. Runs legacy migration on first call. One IPC roundtrip

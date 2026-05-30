@@ -32,6 +32,7 @@ import {
   renameAccount,
   setActiveAccount,
   setKey,
+  testProviderKey,
   type AccountRegistry,
 } from "@/modules/ai";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -358,6 +359,7 @@ export function ModelsSection() {
                   }
                   onRename={onRenameAccount}
                   onRemove={(accountId) => onRemoveAccount(p.id, accountId)}
+                  onTest={(accountId) => testProviderKey(p.id, accountId)}
                   onRemoveProvider={() => removeProvider(p.id)}
                 />
               ),
