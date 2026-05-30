@@ -154,6 +154,7 @@ export default function App() {
     newTab,
     newAgentTab,
     newGridTab,
+    newDuoTab,
     newPrivateTab,
     openFileTab,
     pinTab,
@@ -691,6 +692,14 @@ export default function App() {
     for (const leafId of gridLeaves) launchClaudeInLeaf(leafId);
   }, [newGridTab, projectCwd, launchClaudeInLeaf]);
 
+  // Claude Golden Duo: a fresh tab split into two side-by-side panes, each
+  // running claude at the project root. Always opens a clean duo regardless of
+  // the active tab (unlike claude.splitRight, which splits the current pane).
+  const openClaudeGoldenDuo = useCallback(() => {
+    const { leafIds: duoLeaves } = newDuoTab(projectCwd(), "claude duo");
+    for (const leafId of duoLeaves) launchClaudeInLeaf(leafId);
+  }, [newDuoTab, projectCwd, launchClaudeInLeaf]);
+
   const openNewPrivateTab = useCallback(() => {
     newPrivateTab(inheritedCwdForNewTab());
   }, [newPrivateTab, inheritedCwdForNewTab]);
@@ -1150,6 +1159,7 @@ export default function App() {
       "ai.askSelection": askFromSelection,
       "claude.newTab": openClaudeNewTab,
       "claude.splitRight": openClaudeSplitRight,
+      "claude.goldenDuo": openClaudeGoldenDuo,
       "claude.team": openClaudeTeam,
       "window.new": () => void invoke("open_main_window"),
       "commandPopup.open": () => setCommandPopupOpen((v) => !v),
@@ -1183,6 +1193,7 @@ export default function App() {
       askFromSelection,
       openClaudeNewTab,
       openClaudeSplitRight,
+      openClaudeGoldenDuo,
       openClaudeTeam,
       cycleSidebarView,
       addCurrentFolderToProjects,

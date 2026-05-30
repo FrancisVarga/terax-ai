@@ -351,6 +351,39 @@ export function useTabs(
     [],
   );
 
+  // Open a terminal tab pre-split into two side-by-side panes (2 leaves). Used
+  // by the "Claude Golden Duo" command. Returns the tab id and both leaf ids in
+  // left-to-right order so the caller can launch a process in each.
+  const newDuoTab = useCallback(
+    (cwd: string | undefined, title: string) => {
+      const tabId = nextIdRef.current++;
+      const split = nextIdRef.current++;
+      const left = nextIdRef.current++;
+      const right = nextIdRef.current++;
+      const leaf = (id: number): PaneNode => ({ kind: "leaf", id, cwd });
+      const paneTree: PaneNode = {
+        kind: "split",
+        id: split,
+        dir: "row",
+        children: [leaf(left), leaf(right)],
+      };
+      setTabs((t) => [
+        ...t,
+        {
+          id: tabId,
+          kind: "terminal",
+          title,
+          cwd,
+          paneTree,
+          activeLeafId: left,
+        },
+      ]);
+      setActiveId(tabId);
+      return { tabId, leafIds: [left, right] as const };
+    },
+    [],
+  );
+
   const newPrivateTab = useCallback((cwd?: string) => {
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;
@@ -1217,6 +1250,7 @@ export function useTabs(
     newTab,
     newAgentTab,
     newGridTab,
+    newDuoTab,
     newPrivateTab,
     openFileTab,
     pinTab,
