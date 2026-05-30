@@ -1,4 +1,5 @@
 import type { ComponentProps, ReactNode } from "react";
+import { motion, useReducedMotion } from "motion/react";
 import { cn } from "@/lib/utils";
 import type { Tab } from "@/modules/tabs";
 import { TerminalStack, type TerminalPaneHandle } from "@/modules/terminal";
@@ -33,6 +34,9 @@ import type { SearchAddon } from "@xterm/addon-search";
  * `padded` mirrors the original per-stack padding; full-bleed stacks (git
  * history, projects, docker, analytics) omit it.
  */
+// Shared house easing (matches the tab bar + AI input bar).
+const TAB_FADE_EASE = [0.16, 1, 0.3, 1] as const;
+
 function TabLayer({
   visible,
   padded,
@@ -42,17 +46,29 @@ function TabLayer({
   padded: boolean;
   children: ReactNode;
 }) {
+  const reduceMotion = useReducedMotion();
+  // Cross-fade on tab switch. The keep-alive stack NEVER unmounts (terminal /
+  // editor / scroll state must survive), so we can't use AnimatePresence —
+  // instead each layer animates its own opacity. `pointer-events-none` +
+  // `aria-hidden` follow `visible` immediately so the outgoing layer is
+  // click-through the instant it stops being active, even while it's still
+  // fading out. A hidden layer settles at opacity 0 (no `invisible` class, so
+  // it can fade) and stays parked there — at opacity 0 the browser skips its
+  // paint, so kept-alive content costs nothing while inactive.
   return (
-    <div
+    <motion.div
       className={cn(
         "absolute inset-0",
         padded && "px-3 pt-2 pb-2",
-        !visible && "invisible pointer-events-none",
+        !visible && "pointer-events-none",
       )}
+      initial={false}
+      animate={{ opacity: visible ? 1 : 0 }}
+      transition={{ duration: reduceMotion ? 0 : 0.16, ease: TAB_FADE_EASE }}
       aria-hidden={!visible}
     >
       {children}
-    </div>
+    </motion.div>
   );
 }
 

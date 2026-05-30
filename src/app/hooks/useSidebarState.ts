@@ -100,6 +100,28 @@ type UseSidebarStateArgs = {
 export function useSidebarState({ explorerRef }: UseSidebarStateArgs) {
   const explorerReturnFocusRef = useRef<HTMLElement | null>(null);
 
+  // Collapse/expand smoothing. `react-resizable-panels` sets panel `flexGrow`
+  // imperatively — a CSS transition on it would also rubber-band live drags,
+  // and this version exposes no "is dragging" DOM attribute to scope it off.
+  // So we gate the transition on a `data-animating` flag that ONLY the
+  // programmatic collapse/expand paths set (never a drag). `animatingTimerRef`
+  // clears it shortly after the animation window so a subsequent drag is crisp.
+  const [sidebarsAnimating, setSidebarsAnimating] = useState(false);
+  const animatingTimerRef = useRef(0);
+  const beginSidebarAnim = useCallback(() => {
+    setSidebarsAnimating(true);
+    if (animatingTimerRef.current) window.clearTimeout(animatingTimerRef.current);
+    animatingTimerRef.current = window.setTimeout(() => {
+      animatingTimerRef.current = 0;
+      setSidebarsAnimating(false);
+    }, 240);
+  }, []);
+  useEffect(() => {
+    return () => {
+      if (animatingTimerRef.current) window.clearTimeout(animatingTimerRef.current);
+    };
+  }, []);
+
   // On a plain launch (no project dir) both sidebars start collapsed so the
   // projects dashboard owns the full window. A dir-launched project window
   // keeps its normal sidebars. Read once at construction so re-renders keep the
@@ -130,36 +152,40 @@ export function useSidebarState({ explorerRef }: UseSidebarStateArgs) {
   const toggleSidebar = useCallback(() => {
     const p = sidebarRef.current;
     if (!p) return;
+    beginSidebarAnim();
     // `.resize()` (not `.expand()`) so the rail reopens at the stored width even
     // on the first toggle.
     if (p.getSize().asPercentage <= 0) p.resize(`${sidebarWidthRef.current}px`);
     else p.collapse();
-  }, []);
+  }, [beginSidebarAnim]);
 
   const toggleRightSidebar = useCallback(() => {
     const p = rightSidebarRef.current;
     if (!p) return;
+    beginSidebarAnim();
     if (p.getSize().asPercentage <= 0)
       p.resize(`${rightSidebarWidthRef.current}px`);
     else p.collapse();
-  }, []);
+  }, [beginSidebarAnim]);
 
   const cycleSidebarView = useCallback(
     (view: SidebarViewId) => {
       const panel = sidebarRef.current;
       const collapsed = panel ? panel.getSize().asPercentage <= 0 : false;
       if (collapsed) {
+        beginSidebarAnim();
         if (panel) panel.resize(`${sidebarWidthRef.current}px`);
         if (view !== sidebarView) persistSidebarView(view);
         return;
       }
       if (view === sidebarView) {
+        beginSidebarAnim();
         panel?.collapse();
         return;
       }
       persistSidebarView(view);
     },
-    [persistSidebarView, sidebarView],
+    [beginSidebarAnim, persistSidebarView, sidebarView],
   );
 
   const persistSidebarWidth = useCallback((next: number) => {
@@ -201,17 +227,19 @@ export function useSidebarState({ explorerRef }: UseSidebarStateArgs) {
       const panel = rightSidebarRef.current;
       const collapsed = panel ? panel.getSize().asPercentage <= 0 : false;
       if (collapsed) {
+        beginSidebarAnim();
         if (panel) panel.resize(`${rightSidebarWidthRef.current}px`);
         if (view !== rightSidebarView) persistRightSidebarView(view);
         return;
       }
       if (view === rightSidebarView) {
+        beginSidebarAnim();
         panel?.collapse();
         return;
       }
       persistRightSidebarView(view);
     },
-    [persistRightSidebarView, rightSidebarView],
+    [beginSidebarAnim, persistRightSidebarView, rightSidebarView],
   );
 
   // From the global background-tasks indicator: always reveal the Tasks panel
@@ -221,12 +249,14 @@ export function useSidebarState({ explorerRef }: UseSidebarStateArgs) {
   const openTaskInSidebar = useCallback(
     (id: string) => {
       const panel = rightSidebarRef.current;
-      if (panel && panel.getSize().asPercentage <= 0)
+      if (panel && panel.getSize().asPercentage <= 0) {
+        beginSidebarAnim();
         panel.resize(`${rightSidebarWidthRef.current}px`);
+      }
       if (rightSidebarView !== "tasks") persistRightSidebarView("tasks");
       useTaskRunnerStore.getState().select(id);
     },
-    [persistRightSidebarView, rightSidebarView],
+    [beginSidebarAnim, persistRightSidebarView, rightSidebarView],
   );
 
   const persistRightSidebarWidth = useCallback((next: number) => {
@@ -260,7 +290,10 @@ export function useSidebarState({ explorerRef }: UseSidebarStateArgs) {
     const panel = sidebarRef.current;
     const collapsed = panel ? panel.getSize().asPercentage <= 0 : false;
     if (sidebarView !== "explorer" || collapsed) {
-      if (panel && collapsed) panel.resize(`${sidebarWidthRef.current}px`);
+      if (panel && collapsed) {
+        beginSidebarAnim();
+        panel.resize(`${sidebarWidthRef.current}px`);
+      }
       if (sidebarView !== "explorer") persistSidebarView("explorer");
       const active = document.activeElement;
       explorerReturnFocusRef.current =
@@ -285,10 +318,14 @@ export function useSidebarState({ explorerRef }: UseSidebarStateArgs) {
     explorerReturnFocusRef.current =
       active instanceof HTMLElement && active !== document.body ? active : null;
     explorer.focus();
-  }, [explorerRef, persistSidebarView, sidebarView]);
+  }, [beginSidebarAnim, explorerRef, persistSidebarView, sidebarView]);
 
   return {
     startSidebarsCollapsedRef,
+    // True for ~240ms after a programmatic collapse/expand; App keys the
+    // panel-group's `data-animating` (→ flex-grow transition) off it. Never set
+    // by a drag, so live resizes stay instant.
+    sidebarsAnimating,
     // left
     sidebarRef,
     sidebarWidthRef,

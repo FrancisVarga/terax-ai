@@ -1,4 +1,5 @@
 import { Fragment } from "react";
+import { motion, useReducedMotion } from "motion/react";
 import { Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -45,11 +46,23 @@ export function PaneTreeView({
   // Root call: derive split-ness once and recurse with it fixed.
   const isSplit = split ?? leafIds(node).length > 1;
 
+  const reduceMotion = useReducedMotion();
+
   if (node.kind === "leaf") {
     const focused = node.id === activeLeafId;
     const b = getBundle(node.id);
     return (
-      <div
+      <motion.div
+        // A freshly split pane fades + lifts in on mount. We deliberately do
+        // NOT animate the pane's WIDTH/HEIGHT: xterm's fit addon refits on every
+        // container resize, so a width animation would trigger a reflow storm on
+        // each frame. The Resizable layout snaps to final size instantly (no
+        // refit thrash) while only the pane's opacity/translate animate — the
+        // terminal canvas already sits at its final dimensions. Existing panes
+        // are already mounted, so only the new leaf runs this enter.
+        initial={reduceMotion ? false : { opacity: 0, y: 4 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: reduceMotion ? 0 : 0.2, ease: [0.16, 1, 0.3, 1] }}
         onMouseDownCapture={() => {
           if (!focused) onFocusLeaf(node.id);
         }}
@@ -104,7 +117,7 @@ export function PaneTreeView({
             onExit={(_id, code) => b.onExit(code)}
           />
         </div>
-      </div>
+      </motion.div>
     );
   }
 

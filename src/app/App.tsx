@@ -262,6 +262,7 @@ export default function App() {
 
   const {
     startSidebarsCollapsedRef,
+    sidebarsAnimating,
     sidebarRef,
     sidebarWidthRef,
     sidebarView,
@@ -1139,10 +1140,13 @@ export default function App() {
   );
   const sourceControlActive =
     hasOpenGitTab || sidebarView === "source-control";
-  // Stable per-session path so switching tabs / cd-ing in a shell does NOT
-  // re-fire git IPC for the badge. The active panel resolves the current
-  // context path on its own when the user actually opens git.
-  const badgeContextPath = workspaceFallbackPath;
+  // Stable per-window path so switching tabs / cd-ing in a shell does NOT
+  // re-fire git IPC for the badge. Prefer the explorer root (the project this
+  // window actually shows — matches the breadcrumb/title) over the process
+  // launch cwd, which can differ from the open project when a project window
+  // is restored at a path other than where the app started. The active panel
+  // resolves the current context path on its own when the user opens git.
+  const badgeContextPath = explorerRoot ?? workspaceFallbackPath;
   const sourceControlPath = sourceControlActive
     ? sourceControlContextPath
     : badgeContextPath;
@@ -1542,6 +1546,10 @@ export default function App() {
             <ResizablePanelGroup
               orientation="horizontal"
               className="min-h-0 flex-1"
+              // While a sidebar collapse/expand is in flight, opt the panels
+              // into a flex-grow transition (see globals.css). Cleared right
+              // after the animation so handle-drags stay instant.
+              data-animating={sidebarsAnimating ? "true" : undefined}
             >
               <ResizablePanel
                 id="sidebar"

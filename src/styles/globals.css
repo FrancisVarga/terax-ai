@@ -423,3 +423,17 @@ html[data-glass] [data-slot="dropdown-menu-content"] {
     inset 0 1px 0 0 rgba(255, 255, 255, 0.09),
     0 8px 32px -8px rgba(0, 0, 0, 0.5);
 }
+
+/* Sidebar collapse/expand smoothing. react-resizable-panels drives panel size
+ * via inline `flex-grow`; we only want to transition it during a programmatic
+ * collapse/expand, NOT during a handle-drag (which updates flex-grow every
+ * frame and would feel rubbery). App.tsx flips `data-animating` on the panel
+ * group for ~240ms around a toggle; the transition is scoped to that window. */
+[data-slot="resizable-panel-group"][data-animating="true"] > [data-panel] {
+  transition: flex-grow 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="resizable-panel-group"][data-animating="true"] > [data-panel] {
+    transition: none;
+  }
+}

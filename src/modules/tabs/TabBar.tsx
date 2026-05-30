@@ -33,8 +33,33 @@ import {
   Table01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type DragEventHandler,
+} from "react";
 import type { EditorTab, Tab } from "./lib/useTabs";
+
+// Native HTML5 drag-and-drop handler set for a tab button. Declared explicitly
+// so the per-tab `dndProps` object stays fully typed even though it's later
+// spread through a cast (motion.create narrows the drag props — see usage).
+type DragEventHandlers = {
+  draggable: boolean;
+  onDragStart: DragEventHandler<HTMLButtonElement>;
+  onDragOver: DragEventHandler<HTMLButtonElement>;
+  onDragLeave: DragEventHandler<HTMLButtonElement>;
+  onDrop: DragEventHandler<HTMLButtonElement>;
+  onDragEnd: DragEventHandler<HTMLButtonElement>;
+};
+
+// House easing — same curve the AI input bar uses in App.tsx so tab motion
+// feels of-a-piece with the rest of the shell. A motion-wrapped Radix
+// TabsTrigger still forwards `value`/`data-state` and the native drag props,
+// so animation rides on top of selection + reorder without breaking either.
+const EASE = [0.16, 1, 0.3, 1] as const;
+const MotionTabsTrigger = motion.create(TabsTrigger);
 
 type Props = {
   tabs: Tab[];
@@ -82,6 +107,7 @@ export function TabBar({
   compact,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const reduceMotion = useReducedMotion();
   // Tab id currently being dragged, and the id of the tab it's hovering over.
   // dragOverId drives the drop-indicator styling; both reset on drag end.
   const dragIdRef = useRef<number | null>(null);
@@ -121,48 +147,71 @@ export function TabBar({
           onValueChange={(v) => onSelect(Number(v))}
         >
           <TabsList className="h-7 w-max gap-0.5 bg-transparent p-0">
+            <AnimatePresence initial={false}>
             {tabs.map((t) => {
               const isPreview = t.kind === "editor" && (t as EditorTab).preview;
+              // Native HTML5 drag-reorder handlers. Kept in a plain object and
+              // spread through `dndPropsAsMotion` because `motion.create` narrows
+              // onDragStart/onDragEnd to its PAN-gesture signature (PanInfo),
+              // which structurally clashes with React's DragEvent. Isolating the
+              // cast here keeps the native DnD types intact at the call sites.
+              const dndProps: DragEventHandlers = {
+                draggable: true,
+                onDragStart: (e) => {
+                  dragIdRef.current = t.id;
+                  e.dataTransfer.effectAllowed = "move";
+                  // Firefox requires data to be set for the drag to start.
+                  e.dataTransfer.setData("text/plain", String(t.id));
+                },
+                onDragOver: (e) => {
+                  // preventDefault is mandatory — without it the element is
+                  // not a valid drop target and onDrop never fires.
+                  if (dragIdRef.current === null) return;
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "move";
+                  if (t.id !== dragOverId) setDragOverId(t.id);
+                },
+                onDragLeave: () => {
+                  if (t.id === dragOverId) setDragOverId(null);
+                },
+                onDrop: (e) => {
+                  e.preventDefault();
+                  const from = dragIdRef.current;
+                  if (from !== null && from !== t.id) onReorder(from, t.id);
+                  dragIdRef.current = null;
+                  setDragOverId(null);
+                },
+                onDragEnd: () => {
+                  dragIdRef.current = null;
+                  setDragOverId(null);
+                },
+              };
               return (
-                <TabsTrigger
+                <MotionTabsTrigger
                   key={t.id}
                   value={String(t.id)}
                   data-tab-id={t.id}
+                  // Enter: fade + grow from a hair narrower so a freshly opened
+                  // tab eases in instead of snapping. Exit: collapse width to 0
+                  // so the surviving tabs slide left to fill the gap. Reduced
+                  // motion skips it all (duration 0). `layout` is intentionally
+                  // OFF — it would fight HTML5 drag-reorder's own transform.
+                  initial={reduceMotion ? false : { opacity: 0, scaleX: 0.85 }}
+                  animate={{ opacity: 1, scaleX: 1 }}
+                  exit={
+                    reduceMotion
+                      ? { opacity: 0 }
+                      : { opacity: 0, scaleX: 0.6, marginInline: 0, width: 0, paddingLeft: 0, paddingRight: 0 }
+                  }
+                  transition={{ duration: reduceMotion ? 0 : 0.18, ease: EASE }}
+                  style={{ originX: 0 }}
                   // Carve this tab OUT of the parent Tauri window-drag region —
                   // otherwise Tauri hijacks the pointerdown to move the OS
                   // window and the HTML5 `dragstart` never fires. Must be the
                   // STRING "false": React drops a boolean-`false` attribute
                   // entirely, which would leave the tab inside the drag region.
                   data-tauri-drag-region="false"
-                  draggable
-                  onDragStart={(e) => {
-                    dragIdRef.current = t.id;
-                    e.dataTransfer.effectAllowed = "move";
-                    // Firefox requires data to be set for the drag to start.
-                    e.dataTransfer.setData("text/plain", String(t.id));
-                  }}
-                  onDragOver={(e) => {
-                    // preventDefault is mandatory — without it the element is
-                    // not a valid drop target and onDrop never fires.
-                    if (dragIdRef.current === null) return;
-                    e.preventDefault();
-                    e.dataTransfer.dropEffect = "move";
-                    if (t.id !== dragOverId) setDragOverId(t.id);
-                  }}
-                  onDragLeave={() => {
-                    if (t.id === dragOverId) setDragOverId(null);
-                  }}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    const from = dragIdRef.current;
-                    if (from !== null && from !== t.id) onReorder(from, t.id);
-                    dragIdRef.current = null;
-                    setDragOverId(null);
-                  }}
-                  onDragEnd={() => {
-                    dragIdRef.current = null;
-                    setDragOverId(null);
-                  }}
+                  {...(dndProps as Record<string, unknown>)}
                   onDoubleClick={() => isPreview && onPin(t.id)}
                   onAuxClick={(e) => {
                     if (e.button === 1 && tabs.length > 1) {
@@ -230,9 +279,10 @@ export function TabBar({
                       />
                     </span>
                   )}
-                </TabsTrigger>
+                </MotionTabsTrigger>
               );
             })}
+            </AnimatePresence>
           </TabsList>
         </Tabs>
         <DropdownMenu>
