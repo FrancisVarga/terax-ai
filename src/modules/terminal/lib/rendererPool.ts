@@ -442,6 +442,19 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   if (p.snapshot) {
     writeSnapshotChunked(slot, p.snapshot);
   }
+
+  // Register OSC handlers BEFORE draining the dormant ring. A prompt drawn
+  // while the slot was dormant has its OSC 133;B / OSC 7 buffered in the ring;
+  // if we drained first these would replay through the parser with no handler
+  // installed and the session would only be marked ready via the 4s timeout
+  // fallback, delaying any gated programmatic launch.
+  for (const d of slot.oscDisposers) {
+    try {
+      d();
+    } catch {}
+  }
+  slot.oscDisposers = p.registerOsc(slot.term);
+
   if (p.altScreen) {
     // Discard the dormant ring. TUI output is incremental cursor-positioned
     // updates that can't be replayed coherently on top of a stale snapshot
@@ -453,13 +466,6 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   try {
     slot.term.write("\x1b[?25h");
   } catch {}
-
-  for (const d of slot.oscDisposers) {
-    try {
-      d();
-    } catch {}
-  }
-  slot.oscDisposers = p.registerOsc(slot.term);
 
   setupResizeObserver(slot, p);
   slot.fitAddon.fit();

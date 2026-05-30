@@ -38,6 +38,12 @@ type Callbacks = {
 type Session = {
   pty: PtySession | null;
   ptyOpening: boolean;
+  // Input typed (or programmatically written) before the async PTY open
+  // resolves. Without this the write is silently swallowed by `pty?.write`,
+  // dropping the first keystroke on a freshly-opened panel (claude -> laude),
+  // a race that widens when a second panel's eager open competes with an
+  // existing panel's rebind. Flushed in pty order the moment the pty resolves.
+  inputQueue: string[];
   initialCwd: string | undefined;
   lastCwd: string | null;
   pendingExit: number | null;
@@ -95,11 +101,30 @@ export function whenSessionReady(leafId: number, timeoutMs = 4000): Promise<void
   });
 }
 
+// Write to the pty, or buffer until it opens. Returns false only when the
+// session is gone or its shell has already exited (a genuinely undeliverable
+// write); a not-yet-open pty queues and is reported as accepted.
+function writeOrQueue(s: Session, data: string): boolean {
+  if (s.disposed || s.shellExited) return false;
+  if (s.pty) {
+    void s.pty.write(data);
+    return true;
+  }
+  s.inputQueue.push(data);
+  return true;
+}
+
+function flushInputQueue(s: Session): void {
+  if (!s.pty || s.inputQueue.length === 0) return;
+  const pending = s.inputQueue;
+  s.inputQueue = [];
+  for (const data of pending) void s.pty.write(data);
+}
+
 export function writeToSession(leafId: number, data: string): boolean {
   const s = sessions.get(leafId);
-  if (!s || !s.pty) return false;
-  void s.pty.write(data);
-  return true;
+  if (!s) return false;
+  return writeOrQueue(s, data);
 }
 
 /**
@@ -131,7 +156,7 @@ configureRendererPool({
     if (!s) return null;
     return {
       writeToPty: (data) => {
-        s.pty?.write(data);
+        writeOrQueue(s, data);
       },
       resizePty: (cols, rows) => {
         s.cols = cols;
@@ -183,6 +208,7 @@ function ensureSession(leafId: number, initialCwd?: string): Session {
   const session: Session = {
     pty: null,
     ptyOpening: false,
+    inputQueue: [],
     initialCwd,
     lastCwd: null,
     pendingExit: null,
@@ -233,6 +259,7 @@ function openPtyEagerly(leafId: number, s: Session): void {
       }
       s.pty = pty;
       if (s.cols > 0 && s.rows > 0) pty.resize(s.cols, s.rows);
+      flushInputQueue(s);
     })
     .catch((e) => {
       s.ptyOpening = false;
@@ -430,6 +457,7 @@ function attachSession(
         }
         s.pty = pty;
         if (s.cols > 0 && s.rows > 0) pty.resize(s.cols, s.rows);
+        flushInputQueue(s);
       })
       .catch((e) => {
         s.ptyOpening = false;
@@ -454,6 +482,7 @@ export async function respawnSession(
   if (!s || s.disposed) return;
   s.pty?.close();
   s.pty = null;
+  s.inputQueue = [];
   s.snapshot = null;
   s.dormantRing = new DormantRing();
   s.shellExited = false;
@@ -483,6 +512,7 @@ export async function respawnSession(
   }
   s.pty = pty;
   if (s.cols > 0 && s.rows > 0) pty.resize(s.cols, s.rows);
+  flushInputQueue(s);
 }
 
 export function disposeSession(leafId: number): void {
@@ -491,6 +521,7 @@ export function disposeSession(leafId: number): void {
   s.disposed = true;
   unbindLeafFromSlot(leafId, s);
   s.snapshot = null;
+  s.inputQueue = [];
   s.pty?.close();
   s.pty = null;
   writeQueues.delete(leafId);
@@ -628,10 +659,10 @@ export function useTerminalSession({
     }
   }, [leafId, visible, focused]);
 
-  const write = useCallback(
-    (data: string) => sessions.get(leafId)?.pty?.write(data),
-    [leafId],
-  );
+  const write = useCallback((data: string) => {
+    const s = sessions.get(leafId);
+    if (s) writeOrQueue(s, data);
+  }, [leafId]);
 
   const focus = useCallback(() => focusSlot(leafId), [leafId]);
 
