@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import {
   CommandDialog,
   CommandEmpty,
@@ -8,6 +8,7 @@ import {
   CommandList,
   CommandShortcut,
 } from "@/components/ui/command";
+import { useChatStore } from "@/modules/ai/store/chatStore";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   getBindingTokens,
@@ -16,6 +17,7 @@ import {
   type ShortcutHandlers,
   type ShortcutId,
 } from "@/modules/shortcuts";
+import { useTaskRunnerStore } from "@/modules/task-runner";
 
 type Props = {
   open: boolean;
@@ -38,6 +40,21 @@ const HIDDEN_IDS = new Set<ShortcutId>([
 
 export function CommandPopup({ open, onOpenChange, handlers }: Props) {
   const userShortcuts = usePreferencesStore((s) => s.shortcuts);
+  // Runnable scripts discovered by the Tasks panel's last scan, plus its runner.
+  // Listing them here makes Ctrl+Shift+P a second front-end onto "run a task",
+  // grouped per manifest to mirror the panel's package headers.
+  const manifests = useTaskRunnerStore((s) => s.manifests);
+  const runTask = useTaskRunnerStore((s) => s.run);
+  const scanTasks = useTaskRunnerStore((s) => s.scan);
+
+  // Populate runnable scripts the first time the palette opens, so Ctrl+Shift+P
+  // lists tasks even if the user has never visited the Tasks panel. If the panel
+  // already scanned, `manifests` is non-empty and we skip the redundant walk.
+  useEffect(() => {
+    if (!open || manifests.length > 0) return;
+    const root = useChatStore.getState().live.getWorkspaceRoot();
+    if (root) void scanTasks(root);
+  }, [open, manifests.length, scanTasks]);
 
   // Only list commands that actually have a runnable handler. Re-derived from
   // the shared SHORTCUTS registry so new shortcuts appear automatically.
@@ -60,6 +77,16 @@ export function CommandPopup({ open, onOpenChange, handlers }: Props) {
     // Defer so the dialog's close/focus-restore settles before the action runs
     // (some handlers move focus, e.g. ai.toggle / explorer.focus).
     requestAnimationFrame(() => handlers[id]?.(new KeyboardEvent("keydown")));
+  };
+
+  const runScript = (manifestPath: string, scriptName: string) => {
+    // Resolve fresh from the store at click time — the cached `manifests` array
+    // is fine, but re-finding keeps the closure tiny and avoids stale captures.
+    const manifest = manifests.find((m) => m.path === manifestPath);
+    const script = manifest?.scripts.find((s) => s.name === scriptName);
+    if (!manifest || !script) return;
+    onOpenChange(false);
+    requestAnimationFrame(() => void runTask(manifest, script));
   };
 
   return (
@@ -86,6 +113,25 @@ export function CommandPopup({ open, onOpenChange, handlers }: Props) {
                 </CommandItem>
               );
             })}
+          </CommandGroup>
+        ))}
+        {/* One group per manifest mirrors the Tasks panel's package headers.
+            Selecting a script runs it via the same store action as the panel. */}
+        {manifests.map((m) => (
+          <CommandGroup key={m.path} heading={m.name}>
+            {m.scripts.map((s) => (
+              <CommandItem
+                key={s.name}
+                // Include manifest + script + command so cmdk search matches any.
+                value={`${m.name} ${s.name} ${s.command}`}
+                onSelect={() => runScript(m.path, s.name)}
+              >
+                <span>{s.name}</span>
+                <CommandShortcut className="font-mono opacity-70">
+                  {s.command}
+                </CommandShortcut>
+              </CommandItem>
+            ))}
           </CommandGroup>
         ))}
       </CommandList>

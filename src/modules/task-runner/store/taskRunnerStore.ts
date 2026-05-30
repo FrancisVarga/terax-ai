@@ -1,6 +1,6 @@
 import { native } from "@/modules/ai/lib/native";
 import { create } from "zustand";
-import { runInvocation } from "../lib/scan";
+import { runInvocation, scanManifests } from "../lib/scan";
 import type { PackageManifest, RunningTask, TaskScript } from "../lib/types";
 
 const POLL_INTERVAL_MS = 400;
@@ -14,12 +14,27 @@ const pollers = new Map<string, ReturnType<typeof setInterval>>();
 
 type TaskRunnerState = {
   tasks: Record<string, RunningTask>;
+  /**
+   * Manifests discovered by the most recent workspace scan. Owned here (not in
+   * the panel's local state) so the command palette can list runnable scripts
+   * without re-scanning — the panel writes via {@link setManifests}, the palette
+   * reads. Both then drive the same {@link run}.
+   */
+  manifests: PackageManifest[];
   /** Task id whose output is shown in the detail pane. */
   selectedId: string | null;
   run: (manifest: PackageManifest, script: TaskScript) => Promise<void>;
   stop: (id: string) => Promise<void>;
   remove: (id: string) => void;
   select: (id: string | null) => void;
+  /** Publish the latest scan result so the palette stays in sync with the panel. */
+  setManifests: (manifests: PackageManifest[]) => void;
+  /**
+   * Scan `root` for manifests and publish them. Lets the command palette
+   * populate runnable scripts on demand without the Tasks panel being mounted.
+   * Swallows errors (best-effort) — the palette just shows no tasks on failure.
+   */
+  scan: (root: string) => Promise<void>;
   /** Re-key an existing run+script pair: returns its id if already running. */
   findRunning: (dir: string, script: string) => RunningTask | undefined;
 };
@@ -75,7 +90,18 @@ export const useTaskRunnerStore = create<TaskRunnerState>((set, get) => {
 
   return {
     tasks: {},
+    manifests: [],
     selectedId: null,
+
+    setManifests: (manifests) => set({ manifests }),
+
+    scan: async (root) => {
+      try {
+        set({ manifests: await scanManifests(root) });
+      } catch {
+        set({ manifests: [] });
+      }
+    },
 
     findRunning: (dir, script) =>
       Object.values(get().tasks).find(

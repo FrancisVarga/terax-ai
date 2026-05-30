@@ -45,16 +45,20 @@ export function TaskRunnerPanel() {
   const remove = useTaskRunnerStore((s) => s.remove);
   const select = useTaskRunnerStore((s) => s.select);
   const findRunning = useTaskRunnerStore((s) => s.findRunning);
+  const setManifests = useTaskRunnerStore((s) => s.setManifests);
 
   const rescan = useCallback(async () => {
     setScan({ status: "loading" });
     try {
       const root = live.getWorkspaceRoot();
       if (!root) {
+        setManifests([]);
         setScan({ status: "empty" });
         return;
       }
       const manifests = await scanManifests(root);
+      // Publish to the store so the command palette can list the same scripts.
+      setManifests(manifests);
       if (manifests.length === 0) {
         setScan({ status: "empty" });
         return;
@@ -65,9 +69,10 @@ export function TaskRunnerPanel() {
         count: manifests.length,
       });
     } catch (e) {
+      setManifests([]);
       setScan({ status: "error", message: String(e) });
     }
-  }, [live]);
+  }, [live, setManifests]);
 
   useEffect(() => {
     void rescan();
