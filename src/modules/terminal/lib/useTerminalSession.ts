@@ -343,11 +343,21 @@ function bindLeafToSlot(leafId: number, s: Session): void {
       // 7 emitted by untrusted command output (remote SSH, `cat` of an
       // attacker file, etc.).
       const shellState = createShellIntegrationState();
-      const prompt = registerPromptTracker(term, shellState);
+      // Readiness is gated on OSC 133;B (prompt fully drawn, stdin draining),
+      // NOT on the cwd OSC. profile.ps1 emits OSC 7 *before* the (slow,
+      // starship) prompt body, so marking ready there lets a programmatic
+      // `claude\r` write land mid-prompt and lose its first byte (`laude`).
+      const prompt = registerPromptTracker(term, shellState, () =>
+        markSessionReady(leafId),
+      );
       const cwd = registerCwdHandler(
         term,
         (next) => {
-          markSessionReady(leafId);
+          // Fallback readiness ONLY for shells that emit OSC 7 but no OSC 133
+          // (no shell integration). When 133 is live, defer to its B marker —
+          // OSC 7 fires before the prompt finishes, so marking ready here would
+          // re-introduce the dropped-leading-char race.
+          if (!shellState.sawPrompt) markSessionReady(leafId);
           if (s.lastCwd === next) return;
           s.lastCwd = next;
           s.callbacks.onCwd?.(next);

@@ -10,10 +10,15 @@ import type { IMarker, Terminal } from "@xterm/xterm";
  */
 export type ShellIntegrationState = {
   inCommand: boolean;
+  // True once any OSC 133 marker has been seen on this terminal. Lets the OSC 7
+  // cwd handler know shell integration is live, so it can defer the
+  // "session ready to type" signal to OSC 133;B instead of firing it early
+  // (OSC 7 is emitted *before* the prompt finishes — see profile.ps1).
+  sawPrompt: boolean;
 };
 
 export function createShellIntegrationState(): ShellIntegrationState {
-  return { inCommand: false };
+  return { inCommand: false, sawPrompt: false };
 }
 
 export function registerCwdHandler(
@@ -42,9 +47,17 @@ export type PromptTracker = {
 export function registerPromptTracker(
   term: Terminal,
   state?: ShellIntegrationState,
+  // Fired on OSC 133;B — the prompt has finished drawing and the shell is now
+  // draining stdin. This is the only safe moment to programmatically type a
+  // command: gating on OSC 7 (cwd) instead races shell startup and drops the
+  // leading character (e.g. `claude` → `laude`). See profile.ps1 prompt order.
+  onPromptInputReady?: () => void,
 ): PromptTracker {
   let marker: IMarker | null = null;
   const d = term.parser.registerOscHandler(133, (data) => {
+    // Any 133 marker means shell integration is live; the cwd handler uses this
+    // to stop treating OSC 7 as the readiness signal.
+    if (state) state.sawPrompt = true;
     // OSC 133 A — start of new prompt (between commands).
     if (data.startsWith("A")) {
       if (state) state.inCommand = false;
@@ -54,6 +67,7 @@ export function registerPromptTracker(
       // OSC 133 B — command begins. From here on, treat all output as
       // untrusted until we see D (command exit) or the next A (new prompt).
       if (state) state.inCommand = true;
+      onPromptInputReady?.();
     } else if (data.startsWith("C")) {
       // OSC 133 C — command pre-execution marker; still inside command.
       if (state) state.inCommand = true;

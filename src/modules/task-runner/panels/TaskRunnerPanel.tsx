@@ -89,12 +89,25 @@ export function TaskRunnerPanel() {
   const [outputHeight, setOutputHeight] = useState(224); // ~ old h-56
   const [maximized, setMaximized] = useState(false);
 
+  const [resizing, setResizing] = useState(false);
+
   const startResize = useCallback(
     (e: React.PointerEvent) => {
       e.preventDefault();
       const root = rootRef.current;
       if (!root) return;
       const rootBottom = root.getBoundingClientRect().bottom;
+      // Capture the pointer on the handle so the drag keeps tracking even when
+      // the cursor outruns the thin grip (the handle's hit area is small).
+      const handle = e.currentTarget as HTMLElement;
+      handle.setPointerCapture(e.pointerId);
+      setResizing(true);
+      // Lock the body cursor + kill text selection for the whole drag so a fast
+      // drag over the log doesn't highlight output.
+      const prevCursor = document.body.style.cursor;
+      const prevSelect = document.body.style.userSelect;
+      document.body.style.cursor = "row-resize";
+      document.body.style.userSelect = "none";
       const onMove = (ev: PointerEvent) => {
         // Height = distance from pointer to the panel bottom, clamped so the
         // tree keeps a usable sliver and the pane can't underflow its toolbar.
@@ -102,11 +115,16 @@ export function TaskRunnerPanel() {
         setOutputHeight(Math.max(120, Math.min(next, root.clientHeight - 80)));
       };
       const onUp = () => {
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
+        handle.releasePointerCapture?.(e.pointerId);
+        setResizing(false);
+        document.body.style.cursor = prevCursor;
+        document.body.style.userSelect = prevSelect;
+        handle.removeEventListener("pointermove", onMove);
+        handle.removeEventListener("pointerup", onUp);
       };
-      window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", onUp);
+      // With pointer capture the events fire on the handle element itself.
+      handle.addEventListener("pointermove", onMove);
+      handle.addEventListener("pointerup", onUp);
     },
     [],
   );
@@ -182,15 +200,29 @@ export function TaskRunnerPanel() {
             maximized ? "flex-1" : "shrink-0",
           )}
         >
-          {/* Drag handle to resize the output pane (hidden when maximized). */}
+          {/* Drag handle to resize the output pane (hidden when maximized).
+              The hit area is a tall, transparent strip (-my-1 makes it overlap
+              the neighboring borders without adding layout height) so it's easy
+              to grab; the visible grip stays a thin pill. */}
           {selected && !maximized ? (
             <div
               onPointerDown={startResize}
               role="separator"
+              aria-orientation="horizontal"
               aria-label="Resize output"
-              className="group h-1 shrink-0 cursor-row-resize"
+              className={cn(
+                "group relative z-10 -my-1 flex h-3 shrink-0 cursor-row-resize touch-none items-center justify-center",
+                resizing && "cursor-row-resize",
+              )}
             >
-              <div className="mx-auto mt-px h-0.5 w-8 rounded-full bg-border transition-colors group-hover:bg-foreground/40" />
+              <div
+                className={cn(
+                  "h-1 w-10 rounded-full transition-colors",
+                  resizing
+                    ? "bg-primary"
+                    : "bg-border group-hover:bg-foreground/40",
+                )}
+              />
             </div>
           ) : null}
           <div className="flex shrink-0 items-center gap-1 overflow-x-auto px-1.5 py-1.5">
@@ -283,7 +315,11 @@ export function TaskRunnerPanel() {
                 </button>
               </div>
               <div
-                className="min-h-0 flex-1"
+                // When maximized the log fills remaining space (flex-1). When
+                // not, JS owns the height via state, so it must be shrink-0 with
+                // an explicit pixel height — a flex-1 child would let flexbox
+                // recompute the size and visually ignore the dragged value.
+                className={cn("min-h-0", maximized ? "flex-1" : "shrink-0")}
                 style={maximized ? undefined : { height: outputHeight }}
               >
                 <AnsiLog
