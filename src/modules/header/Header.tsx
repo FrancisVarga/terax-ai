@@ -45,6 +45,8 @@ type Props = {
   onNewPreview: () => void;
   onNewEditor: () => void;
   onNewGitGraph: () => void;
+  onOpenClaude: () => void;
+  onOpenGemini: () => void;
   onOpenBunqueue: () => void;
   onOpenAnalytics: () => void;
   onOpenOtel: () => void;
@@ -76,6 +78,8 @@ export function Header({
   onNewPreview,
   onNewEditor,
   onNewGitGraph,
+  onOpenClaude,
+  onOpenGemini,
   onOpenBunqueue,
   onOpenAnalytics,
   onOpenOtel,
@@ -275,6 +279,8 @@ export function Header({
           onNewPreview={onNewPreview}
           onNewEditor={onNewEditor}
           onNewGitGraph={onNewGitGraph}
+          onOpenClaude={onOpenClaude}
+          onOpenGemini={onOpenGemini}
           onOpenBunqueue={onOpenBunqueue}
           onOpenAnalytics={onOpenAnalytics}
           onOpenOtel={onOpenOtel}

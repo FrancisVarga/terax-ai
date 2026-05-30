@@ -113,6 +113,7 @@ import {
   type RightSidebarViewId,
 } from "@/modules/right-sidebar";
 import { TaskRunnerPanel, useTaskRunnerStore } from "@/modules/task-runner";
+import { GitHubActionsPanel } from "@/modules/github-actions";
 import {
   SourceControlPanel,
   useSourceControl,
@@ -1144,6 +1145,20 @@ export default function App() {
     launchClaudeInLeaf(leafId);
   }, [newAgentTab, projectCwd, launchClaudeInLeaf]);
 
+  // Gemini CLI has no managed-hook integration (unlike Claude), so its launcher
+  // just opens an agent terminal at the project root and runs `gemini`.
+  const launchGeminiInLeaf = useCallback((leafId: number) => {
+    void (async () => {
+      await whenSessionReady(leafId);
+      writeToSession(leafId, "gemini\r");
+    })();
+  }, []);
+
+  const openGeminiNewTab = useCallback(() => {
+    const { leafId } = newAgentTab(projectCwd(), "gemini");
+    launchGeminiInLeaf(leafId);
+  }, [newAgentTab, projectCwd, launchGeminiInLeaf]);
+
   const openClaudeSplitRight = useCallback(() => {
     const t = tabsRef.current.find((x) => x.id === activeId);
     // Split only works inside a terminal tab; fall back to a fresh tab so the
@@ -2171,6 +2186,8 @@ export default function App() {
             onNewPreview={() => openPreviewTab("")}
             onNewEditor={() => setNewEditorOpen(true)}
             onNewGitGraph={openGitGraphFromContext}
+            onOpenClaude={openClaudeNewTab}
+            onOpenGemini={openGeminiNewTab}
             onOpenBunqueue={() => openBunqueueTab()}
             onOpenAnalytics={() => openAnalyticsTab()}
             onOpenOtel={() => openOtelTab()}
@@ -2318,6 +2335,8 @@ export default function App() {
                       />
                     ) : rightSidebarView === "tasks" ? (
                       <TaskRunnerPanel />
+                    ) : rightSidebarView === "actions" ? (
+                      <GitHubActionsPanel />
                     ) : rightSidebarView === "history" ? (
                       <SessionHistoryPanel onActivate={onActivateAgent} />
                     ) : (

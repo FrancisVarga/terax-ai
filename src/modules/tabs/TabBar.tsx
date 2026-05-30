@@ -10,6 +10,7 @@ import { fmtShortcut, MOD_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
 import {
+  AiBrain01Icon,
   Cancel01Icon,
   ChartLineData01Icon,
   Clock01Icon,
@@ -26,6 +27,7 @@ import {
   PencilEdit02Icon,
   PlusSignIcon,
   SatelliteIcon,
+  SparklesIcon,
   Table01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -41,6 +43,8 @@ type Props = {
   onNewPreview: () => void;
   onNewEditor: () => void;
   onNewGitGraph: () => void;
+  onOpenClaude: () => void;
+  onOpenGemini: () => void;
   onOpenBunqueue: () => void;
   onOpenAnalytics: () => void;
   onOpenOtel: () => void;
@@ -61,6 +65,8 @@ export function TabBar({
   onNewPreview,
   onNewEditor,
   onNewGitGraph,
+  onOpenClaude,
+  onOpenGemini,
   onOpenBunqueue,
   onOpenAnalytics,
   onOpenOtel,
@@ -235,6 +241,14 @@ export function TabBar({
             <DropdownMenuItem onSelect={() => onNewGitGraph()}>
               <HugeiconsIcon icon={GitBranchIcon} size={14} strokeWidth={1.75} />
               <span className="flex-1">Git Graph</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onOpenClaude()}>
+              <HugeiconsIcon icon={AiBrain01Icon} size={14} strokeWidth={1.75} />
+              <span className="flex-1">Claude Code</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onOpenGemini()}>
+              <HugeiconsIcon icon={SparklesIcon} size={14} strokeWidth={1.75} />
+              <span className="flex-1">Gemini</span>
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => onOpenBunqueue()}>
               <HugeiconsIcon
