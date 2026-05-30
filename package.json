@@ -1,7 +1,7 @@
 {
   "name": "terax",
   "private": true,
-  "version": "0.17.0",
+  "version": "0.18.0",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
@@ -13,6 +13,7 @@
     "pretauri": "node scripts/build-sidecars.mjs && node scripts/fetch-sidecar-binaries.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build --features sql",
     "test": "vitest run",
     "test:watch": "vitest",
     "seed:otel": "node scripts/otel-seed.mjs"

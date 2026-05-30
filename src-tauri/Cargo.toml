@@ -1,6 +1,6 @@
 [package]
 name = "terax"
-version = "0.17.0"
+version = "0.18.0"
 description = "Terax — an open-source AI-native terminal emulator"
 authors = ["crynta"]
 license = "Apache-2.0"
@@ -32,6 +32,15 @@ path = "src/bin/terax-dbg.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[features]
+default = []
+# Enables the DuckDB-backed SQL query editor for CSV/Parquet files. Off by
+# default so the daily `pnpm tauri dev` clean build skips DuckDB's bundled C++
+# amalgamation (the ~1h build-time hot path — see issue #72). Release / CI builds
+# pass `--features sql` to get the full query/export surface. The SQLite query
+# path (rusqlite) is unaffected and works in every build.
+sql = ["dep:duckdb"]
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
@@ -81,7 +90,12 @@ arrow = "53"
 # query files go through `rusqlite` instead (genuine SQLite SQL, already bundled),
 # so we never depend on DuckDB's network-installed `sqlite_scanner`. Accessed via
 # the row API only (not its Arrow bridge) to avoid pulling a second `arrow` major.
-duckdb = { version = "1", features = ["bundled"] }
+#
+# `optional = true` + the `sql` feature below keeps DuckDB *out* of the default
+# (dev-loop) build: its bundled C++ amalgamation is a ~50 MB compile that
+# dominates a clean `src-tauri` build (~1h). Default `pnpm tauri dev` skips it;
+# release builds opt in via `--features sql`. See issue #72.
+duckdb = { version = "1", features = ["bundled"], optional = true }
 # Excel (.xlsx) export of query results. Pure-Rust writer, no native dep.
 rust_xlsxwriter = "0.79"
 tauri-plugin-log = "2"

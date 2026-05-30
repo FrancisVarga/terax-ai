@@ -17,6 +17,13 @@ use crate::modules::workspace::{resolve_path, WorkspaceEnv};
 /// `limit`. Keeps a single IPC payload bounded even if the UI asks for more.
 const MAX_PAGE_ROWS: u32 = 5_000;
 
+/// Error returned by `data_query` / `data_export` for CSV/Parquet files when the
+/// build was compiled without the `sql` feature (DuckDB excluded — issue #72).
+/// SQLite queries are unaffected. The message is user-facing in the query editor.
+#[cfg(not(feature = "sql"))]
+const SQL_DISABLED_MSG: &str =
+    "SQL query for CSV/Parquet is disabled in this build (compiled without the `sql` feature).";
+
 /// One column sort forwarded from the grid. `col` is a column index into the
 /// preview's `columns`; `dir` is "asc" or "desc". Index (not name) avoids any
 /// ambiguity from duplicate/empty source column names.
@@ -563,6 +570,7 @@ fn ensure_read_only_query(sql: &str) -> Result<&str, String> {
 /// Build the DuckDB SQL that exposes a CSV/Parquet file as a view named `data`.
 /// The path is bound as a parameter to the table function, never spliced, so a
 /// path containing quotes can't break out. Returns the `CREATE VIEW` statement.
+#[cfg(feature = "sql")]
 fn duckdb_view_sql(format: DataFormat) -> &'static str {
     match format {
         DataFormat::Csv => "CREATE VIEW data AS SELECT * FROM read_csv_auto(?)",
@@ -573,6 +581,7 @@ fn duckdb_view_sql(format: DataFormat) -> &'static str {
 }
 
 /// Open an in-memory, read-only DuckDB with the file mounted as view `data`.
+#[cfg(feature = "sql")]
 fn open_duckdb_with_view(p: &std::path::Path, format: DataFormat) -> Result<duckdb::Connection, String> {
     let conn = duckdb::Connection::open_in_memory().map_err(|e| format!("duckdb: {e}"))?;
     let path_str = p.to_string_lossy();
@@ -587,6 +596,7 @@ fn open_duckdb_with_view(p: &std::path::Path, format: DataFormat) -> Result<duck
 /// Run a user query through DuckDB (CSV/Parquet) and collect every cell as an
 /// `Option<String>`. `paged` adds an outer `LIMIT/OFFSET`; when `None` the full
 /// result is returned (used by export). Returns `(columns, rows)`.
+#[cfg(feature = "sql")]
 fn duckdb_run(
     conn: &duckdb::Connection,
     user_sql: &str,
@@ -637,6 +647,7 @@ fn duckdb_run(
 
 /// Stringify one DuckDB cell. DuckDB's row API exposes values as `duckdb::types::
 /// Value`; we render each variant to text mirroring `sqlite_value_to_string`.
+#[cfg(feature = "sql")]
 fn duckdb_value_to_string(row: &duckdb::Row, idx: usize) -> Option<String> {
     use duckdb::types::Value;
     match row.get::<_, Value>(idx).ok()? {
@@ -730,13 +741,23 @@ pub fn data_query(
         let (columns, rows) = sqlite_run(&conn, user_sql, Some((limit, offset)))?;
         (columns, rows, total)
     } else {
-        let conn = open_duckdb_with_view(&p, format)?;
-        // DuckDB COUNT(*) is a BIGINT (i64); cast to the u64 the grid expects.
-        let total: u64 = conn
-            .query_row(&count_sql(user_sql), [], |r| r.get::<_, i64>(0))
-            .map_err(|e| e.to_string())? as u64;
-        let (columns, rows) = duckdb_run(&conn, user_sql, Some((limit, offset)))?;
-        (columns, rows, total)
+        // CSV/Parquet SQL runs through DuckDB, gated behind the `sql` feature so
+        // the default dev build skips DuckDB's bundled C++ compile (issue #72).
+        #[cfg(feature = "sql")]
+        {
+            let conn = open_duckdb_with_view(&p, format)?;
+            // DuckDB COUNT(*) is a BIGINT (i64); cast to the u64 the grid expects.
+            let total: u64 = conn
+                .query_row(&count_sql(user_sql), [], |r| r.get::<_, i64>(0))
+                .map_err(|e| e.to_string())? as u64;
+            let (columns, rows) = duckdb_run(&conn, user_sql, Some((limit, offset)))?;
+            (columns, rows, total)
+        }
+        #[cfg(not(feature = "sql"))]
+        {
+            let _ = (&p, user_sql, limit, offset);
+            return Err(SQL_DISABLED_MSG.into());
+        }
     };
 
     Ok(DataPreview {
@@ -791,8 +812,17 @@ pub fn data_export(
         .map_err(|e| format!("open sqlite: {e}"))?;
         sqlite_run(&conn, user_sql, None)?
     } else {
-        let conn = open_duckdb_with_view(&p, format)?;
-        duckdb_run(&conn, user_sql, None)?
+        // CSV/Parquet export runs through DuckDB; gated behind `sql` (issue #72).
+        #[cfg(feature = "sql")]
+        {
+            let conn = open_duckdb_with_view(&p, format)?;
+            duckdb_run(&conn, user_sql, None)?
+        }
+        #[cfg(not(feature = "sql"))]
+        {
+            let _ = (&p, user_sql);
+            return Err(SQL_DISABLED_MSG.into());
+        }
     };
 
     let dest = std::path::Path::new(&dest_path);

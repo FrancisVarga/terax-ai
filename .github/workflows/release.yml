@@ -21,8 +21,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `--features sql` compiles DuckDB into the release (CSV/Parquet SQL
+          # editor). DuckDB is OFF by default so `tauri dev` skips its bundled
+          # C++ amalgamation (issue #72); release builds opt back in here.
           - platform: windows-latest
-            args: ""
+            args: "--features sql"
             rust-target: ""
 
     runs-on: ${{ matrix.platform }}
@@ -77,9 +80,12 @@ jobs:
       # main-branch runs stop here: the cache is already populated above by the
       # cargo compile that tauri-action would do, so on main we run a plain
       # release build purely to warm the cache (no release artifacts/publish).
+      # `--features sql` compiles DuckDB into release builds (the CSV/Parquet SQL
+      # editor). It is OFF by default so `tauri dev` skips DuckDB's bundled C++
+      # amalgamation (issue #72); release/CI opts back in here.
       - name: Warm cache (main only, no release)
         if: github.ref == 'refs/heads/main'
-        run: pnpm tauri build --no-bundle
+        run: pnpm tauri build --no-bundle --features sql
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
