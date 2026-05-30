@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, Notify};
 
 use crate::modules::shell::ringbuffer::BoundedRingBuffer;
@@ -896,8 +897,18 @@ pub async fn ssh_fs_write_file(
     reject_control_bytes(&path)?;
     let state = state.inner().clone();
     let conn = get_conn(&state, &alias).await?;
-    conn.sftp
-        .write(&path, content.as_bytes())
+    // `create` opens CREATE|TRUNCATE|WRITE so this works whether the file exists
+    // or not (the overwrite contract). The bare `SftpSession::write` helper would
+    // open WRITE-only and fail on a not-yet-existing path.
+    let mut file = conn
+        .sftp
+        .create(&path)
+        .await
+        .map_err(|e| format!("write {path}: {e}"))?;
+    file.write_all(content.as_bytes())
+        .await
+        .map_err(|e| format!("write {path}: {e}"))?;
+    file.shutdown()
         .await
         .map_err(|e| format!("write {path}: {e}"))
 }
@@ -916,8 +927,17 @@ pub async fn ssh_fs_create_file(
     if conn.sftp.try_exists(&path).await.unwrap_or(false) {
         return Err(format!("already exists: {path}"));
     }
-    conn.sftp
-        .write(&path, b"")
+    // `SftpSession::write` opens with WRITE only (no CREATE) — it fails on a
+    // path that doesn't exist yet, so it can't make a new file. `create` opens
+    // with CREATE|TRUNCATE|WRITE, which materializes the zero-length file on the
+    // server. Explicitly `shutdown` (close) the handle so the create is flushed
+    // before we return, rather than relying on Drop ordering.
+    let mut file = conn
+        .sftp
+        .create(&path)
+        .await
+        .map_err(|e| format!("create file {path}: {e}"))?;
+    file.shutdown()
         .await
         .map_err(|e| format!("create file {path}: {e}"))
 }

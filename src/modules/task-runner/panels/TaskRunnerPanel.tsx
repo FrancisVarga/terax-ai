@@ -13,15 +13,9 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnsiLog } from "../components/AnsiLog";
-import { buildTree, scanManifests } from "../lib/scan";
+import { buildTree } from "../lib/scan";
 import type { PackageManifest, TaskScript, TreeNode } from "../lib/types";
 import { useTaskRunnerStore } from "../store/taskRunnerStore";
-
-type ScanState =
-  | { status: "loading" }
-  | { status: "ready"; tree: TreeNode[]; count: number }
-  | { status: "empty" }
-  | { status: "error"; message: string };
 
 const PM_BADGE: Record<string, string> = {
   npm: "text-red-500",
@@ -31,7 +25,6 @@ const PM_BADGE: Record<string, string> = {
 };
 
 export function TaskRunnerPanel() {
-  const [scan, setScan] = useState<ScanState>({ status: "loading" });
   // Re-scan whenever the active workspace env changes (e.g. switching to WSL).
   const workspaceEnv = useWorkspaceEnvStore((s) => s.env);
   // The project root the rest of the app uses (active terminal cwd → explorer
@@ -39,6 +32,7 @@ export function TaskRunnerPanel() {
   // re-runs the scan when the user changes folders / terminal cwd. See
   // chatStore.live.getWorkspaceRoot in App.tsx.
   const live = useChatStore((s) => s.live);
+  const root = live.getWorkspaceRoot();
 
   const tasks = useTaskRunnerStore((s) => s.tasks);
   const selectedId = useTaskRunnerStore((s) => s.selectedId);
@@ -48,33 +42,36 @@ export function TaskRunnerPanel() {
   const clearOutput = useTaskRunnerStore((s) => s.clearOutput);
   const select = useTaskRunnerStore((s) => s.select);
   const findRunning = useTaskRunnerStore((s) => s.findRunning);
+  const loadScan = useTaskRunnerStore((s) => s.loadScan);
+  // Subscribe to the SWR scan cache for this root. The store serves the
+  // last-known manifests instantly and only re-walks the filesystem when the
+  // entry is stale, so re-opening the Tasks tab never re-flashes the spinner.
+  const scan = useTaskRunnerStore((s) => (root ? s.scanCache[root] : undefined));
 
-  const rescan = useCallback(async () => {
-    setScan({ status: "loading" });
-    try {
-      const root = live.getWorkspaceRoot();
-      if (!root) {
-        setScan({ status: "empty" });
-        return;
-      }
-      const manifests = await scanManifests(root);
-      if (manifests.length === 0) {
-        setScan({ status: "empty" });
-        return;
-      }
-      setScan({
-        status: "ready",
-        tree: buildTree(manifests),
-        count: manifests.length,
-      });
-    } catch (e) {
-      setScan({ status: "error", message: String(e) });
-    }
-  }, [live]);
-
+  // SWR: ensure the scan is warm on mount / root / env change. The store no-ops
+  // when the cache is still fresh, so rapid sidebar toggles don't re-walk.
   useEffect(() => {
-    void rescan();
-  }, [rescan, workspaceEnv]);
+    if (root) void loadScan(root);
+  }, [root, workspaceEnv, loadScan]);
+
+  // The rescan button bypasses the TTL and forces a fresh filesystem walk.
+  const rescan = useCallback(() => {
+    if (root) void loadScan(root, true);
+  }, [root, loadScan]);
+
+  // Build the display tree only when the manifests reference actually changes
+  // (the store keeps it stable across unchanged revalidations), so an identical
+  // re-scan does not rebuild the tree or re-render the rows.
+  const manifests = scan?.manifests;
+  const tree = useMemo(() => (manifests ? buildTree(manifests) : []), [manifests]);
+
+  // Derive the view status from the cache. Spinner shows only on the first scan
+  // (no cache entry yet); a stale revalidation keeps the previous tree visible.
+  const status: "loading" | "ready" | "empty" | "error" = !root
+    ? "empty"
+    : !scan || (scan.status === "loading" && scan.fetchedAt === 0)
+      ? "loading"
+      : scan.status;
 
   // Output detail pane sizing. `maximized` makes it fill the panel (hiding the
   // tree); otherwise `outputHeight` is a draggable pixel height. The drag
@@ -139,23 +136,23 @@ export function TaskRunnerPanel() {
       </div>
 
       <div className={cn("min-h-0 flex-1 overflow-y-auto", maximized && "hidden")}>
-        {scan.status === "loading" ? (
+        {status === "loading" ? (
           <div className="px-3 py-5 text-center text-xs text-muted-foreground">
             Scanning for package.json…
           </div>
-        ) : scan.status === "error" ? (
+        ) : status === "error" ? (
           <div className="px-3 py-5 text-center text-xs leading-relaxed text-destructive">
             Scan failed.
             <br />
-            <span className="text-muted-foreground">{scan.message}</span>
+            <span className="text-muted-foreground">{scan?.error}</span>
           </div>
-        ) : scan.status === "empty" ? (
+        ) : status === "empty" ? (
           <div className="px-3 py-5 text-center text-xs leading-relaxed text-muted-foreground">
             No package.json with scripts found in this workspace.
           </div>
         ) : (
           <div className="p-1">
-            {scan.tree.map((node, i) => (
+            {tree.map((node, i) => (
               <TreeNodeRow
                 key={i}
                 node={node}

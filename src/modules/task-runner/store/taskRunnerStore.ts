@@ -1,21 +1,85 @@
 import { native } from "@/modules/ai/lib/native";
 import { create } from "zustand";
-import { runInvocation } from "../lib/scan";
+import { scanManifests, runInvocation } from "../lib/scan";
 import type { PackageManifest, RunningTask, TaskScript } from "../lib/types";
 
 const POLL_INTERVAL_MS = 400;
 // Cap retained output per task so a chatty `dev` server can't grow the heap
 // unbounded. The backend ring buffer is the source of truth; this is display.
 const MAX_OUTPUT_CHARS = 512 * 1024;
+/**
+ * Stale-while-revalidate window for the cached manifest scan. Within this window
+ * a panel mount serves the cache without re-walking the filesystem; past it, the
+ * stale tree is still shown immediately while a background re-scan runs.
+ */
+const SCAN_TTL_MS = 30_000;
 
 let taskSeq = 0;
 /** Active poll timers keyed by task id, kept outside the store (not state). */
 const pollers = new Map<string, ReturnType<typeof setInterval>>();
 
+/** Default scan-cache entry used before the first scan resolves. */
+const EMPTY_SCAN: ScanCache = {
+  status: "loading",
+  manifests: [],
+  error: undefined,
+  fetchedAt: 0,
+  loading: false,
+};
+
+/**
+ * Cached package.json scan for one workspace root. The panel reads this
+ * synchronously so re-opening the Tasks tab is instant; it is revalidated in
+ * the background once older than {@link SCAN_TTL_MS}.
+ */
+export type ScanCache = {
+  status: "loading" | "ready" | "empty" | "error";
+  /** Discovered manifests (source of the tree); empty unless `status==="ready"`. */
+  manifests: PackageManifest[];
+  error?: string;
+  /** Epoch ms of the last completed scan; 0 while first loading. */
+  fetchedAt: number;
+  /** True while a scan is in flight, to coalesce concurrent revalidations. */
+  loading: boolean;
+};
+
+/**
+ * Whether two manifest lists are identical for the fields the tree renders.
+ * Used to suppress a no-op cache write on revalidation: an unchanged scan keeps
+ * the existing `manifests` reference so the derived tree is not rebuilt and the
+ * panel does not re-render — "revalidate only when there is new data".
+ */
+function manifestsEqual(a: PackageManifest[], b: PackageManifest[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((m, i) => {
+    const o = b[i];
+    if (
+      m.path !== o.path ||
+      m.name !== o.name ||
+      m.packageManager !== o.packageManager ||
+      m.remoteAlias !== o.remoteAlias ||
+      m.scripts.length !== o.scripts.length
+    ) {
+      return false;
+    }
+    return m.scripts.every(
+      (s, j) => s.name === o.scripts[j].name && s.command === o.scripts[j].command,
+    );
+  });
+}
+
 type TaskRunnerState = {
   tasks: Record<string, RunningTask>;
   /** Task id whose output is shown in the detail pane. */
   selectedId: string | null;
+  /** Per-workspace-root cache of the package.json scan (SWR). */
+  scanCache: Record<string, ScanCache>;
+  /**
+   * Ensure the manifest scan for `root` is loaded. Serves cache when fresh,
+   * revalidates in the background when stale, and skips the state write when a
+   * re-scan returns the same manifests. `force` bypasses the TTL (rescan button).
+   */
+  loadScan: (root: string, force?: boolean) => Promise<void>;
   run: (manifest: PackageManifest, script: TaskScript) => Promise<void>;
   stop: (id: string) => Promise<void>;
   remove: (id: string) => void;
@@ -77,9 +141,67 @@ export const useTaskRunnerStore = create<TaskRunnerState>((set, get) => {
     }
   };
 
+  const patchScan = (root: string, p: Partial<ScanCache>) =>
+    set((s) => {
+      const cur = s.scanCache[root] ?? EMPTY_SCAN;
+      return { scanCache: { ...s.scanCache, [root]: { ...cur, ...p } } };
+    });
+
   return {
     tasks: {},
     selectedId: null,
+    scanCache: {},
+
+    loadScan: async (root, force = false) => {
+      if (!root) return;
+      const cached = get().scanCache[root];
+      // Coalesce concurrent scans, and serve a fresh cache without re-walking.
+      if (cached?.loading) return;
+      if (
+        !force &&
+        cached &&
+        cached.status !== "loading" &&
+        Date.now() - cached.fetchedAt < SCAN_TTL_MS
+      ) {
+        return;
+      }
+
+      // First-ever scan shows the spinner; revalidations keep the stale tree.
+      patchScan(root, cached ? { loading: true } : { ...EMPTY_SCAN, loading: true });
+      try {
+        const manifests = await scanManifests(root);
+        const status = manifests.length > 0 ? "ready" : "empty";
+        // Revalidate only when there is new data: if the re-scan matches the
+        // cached manifests, keep the existing array reference so the panel's
+        // derived tree (memoized on `manifests`) is not rebuilt.
+        const prev = get().scanCache[root];
+        const unchanged =
+          prev != null &&
+          prev.status === status &&
+          prev.error === undefined &&
+          manifestsEqual(prev.manifests, manifests);
+        patchScan(
+          root,
+          unchanged
+            ? { fetchedAt: Date.now(), loading: false }
+            : {
+                status,
+                manifests,
+                error: undefined,
+                fetchedAt: Date.now(),
+                loading: false,
+              },
+        );
+      } catch (e) {
+        // Keep any stale tree on failure; record the reason + stop the spinner.
+        patchScan(root, {
+          status: get().scanCache[root]?.manifests.length ? "ready" : "error",
+          error: String(e instanceof Error ? e.message : e),
+          fetchedAt: Date.now(),
+          loading: false,
+        });
+      }
+    },
 
     findRunning: (dir, script) =>
       Object.values(get().tasks).find(

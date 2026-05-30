@@ -3,6 +3,8 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -242,14 +244,6 @@ export function TabBar({
               <HugeiconsIcon icon={GitBranchIcon} size={14} strokeWidth={1.75} />
               <span className="flex-1">Git Graph</span>
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => onOpenClaude()}>
-              <HugeiconsIcon icon={AiBrain01Icon} size={14} strokeWidth={1.75} />
-              <span className="flex-1">Claude Code</span>
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => onOpenGemini()}>
-              <HugeiconsIcon icon={SparklesIcon} size={14} strokeWidth={1.75} />
-              <span className="flex-1">Gemini</span>
-            </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => onOpenBunqueue()}>
               <HugeiconsIcon
                 icon={Database02Icon}
@@ -277,6 +271,16 @@ export function TabBar({
             <DropdownMenuItem onSelect={() => onOpenCcusage()}>
               <HugeiconsIcon icon={Coins01Icon} size={14} strokeWidth={1.75} />
               <span className="flex-1">ccusage</span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>Agents</DropdownMenuLabel>
+            <DropdownMenuItem onSelect={() => onOpenClaude()}>
+              <HugeiconsIcon icon={AiBrain01Icon} size={14} strokeWidth={1.75} />
+              <span className="flex-1">Claude Code</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onOpenGemini()}>
+              <HugeiconsIcon icon={SparklesIcon} size={14} strokeWidth={1.75} />
+              <span className="flex-1">Gemini</span>
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
