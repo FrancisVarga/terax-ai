@@ -138,6 +138,67 @@ static WINDOW_SEQ: AtomicU32 = AtomicU32::new(2);
 #[derive(Default)]
 struct ProjectWindows(Mutex<HashMap<String, String>>);
 
+/// Tracks the *current* project dir of every live app window, keyed by window
+/// label (the `main` window plus each spawned `main-N`). The frontend reports
+/// its window's dir whenever the active project changes (see `report_window_dir`).
+/// Persisted on quit and replayed on next launch so reopening the app restores
+/// the same set of windows. Empty-string dir = a window with no pinned project.
+#[derive(Default)]
+struct OpenWindows(Mutex<HashMap<String, String>>);
+
+/// Store file holding the last session's open-window dirs. Lives alongside the
+/// other Tauri-store JSON in the app data dir.
+const WINDOW_SESSION_STORE: &str = "terax-window-session.json";
+const WINDOW_SESSION_KEY: &str = "dirs";
+
+/// Snapshot the open-window dirs to the store so the next launch can restore
+/// them. Called on `ExitRequested`. Best-effort: any store error is logged and
+/// swallowed — failing to persist the layout must never block shutdown.
+fn persist_window_session<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri_plugin_store::StoreExt;
+    let dirs: Vec<String> = {
+        let state = app.state::<OpenWindows>();
+        let map = state.0.lock_safe();
+        map.values().cloned().collect()
+    };
+    match app.store(WINDOW_SESSION_STORE) {
+        Ok(store) => {
+            store.set(WINDOW_SESSION_KEY, serde_json::json!(dirs));
+            if let Err(e) = store.save() {
+                log::warn!("failed to save window session: {e}");
+            }
+        }
+        Err(e) => log::warn!("failed to open window-session store: {e}"),
+    }
+}
+
+/// Read the last session's open-window dirs. Absent/unreadable → empty (first
+/// run or a wiped store falls back to the single config-declared window).
+fn read_window_session<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<String> {
+    use tauri_plugin_store::StoreExt;
+    let Ok(store) = app.store(WINDOW_SESSION_STORE) else {
+        return Vec::new();
+    };
+    store
+        .get(WINDOW_SESSION_KEY)
+        .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+        .unwrap_or_default()
+}
+
+/// Frontend reports its window's current project dir whenever the active
+/// project changes, so the on-quit snapshot reflects live state. An empty
+/// `dir` records a window with no pinned project (still restored, just at the
+/// default cwd).
+#[tauri::command]
+fn report_window_dir(label: String, dir: Option<String>, state: State<'_, OpenWindows>) {
+    let normalized = dir
+        .as_deref()
+        .filter(|d| !d.is_empty())
+        .map(normalize_dir_key)
+        .unwrap_or_default();
+    state.0.lock_safe().insert(label, normalized);
+}
+
 /// Normalize a project dir for use as a window-registry key: backslashes →
 /// forward slashes and trailing slashes stripped, matching how the frontend
 /// stores project paths. Keeps `ssh://` and other paths comparable too.
@@ -170,6 +231,13 @@ fn encode_query_component(s: &str) -> String {
 
 #[tauri::command]
 async fn open_main_window(app: tauri::AppHandle, dir: Option<String>) -> Result<(), String> {
+    spawn_main_window(&app, dir)
+}
+
+/// Spawn (or focus) a project window. Shared by the `open_main_window` command
+/// and the on-launch session restore in `setup()`. Sync so it can run in the
+/// non-async setup hook; window construction is synchronous anyway.
+fn spawn_main_window(app: &tauri::AppHandle, dir: Option<String>) -> Result<(), String> {
     // Re-opening a project should focus its existing window rather than spawn a
     // duplicate. We track dir → label at spawn time; on lookup, validate the
     // label still maps to a live window (a closed one leaves a stale entry).
@@ -215,7 +283,7 @@ async fn open_main_window(app: tauri::AppHandle, dir: Option<String>) -> Result<
 
     // Mirror the main window defined in tauri.conf.json. WebviewWindowBuilder
     // does not inherit the config window defaults, so size/chrome are restated.
-    let builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url_path.into()))
+    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url_path.into()))
         .title(title)
         .inner_size(800.0, 600.0)
         .min_inner_size(420.0, 280.0)
@@ -242,26 +310,35 @@ async fn open_main_window(app: tauri::AppHandle, dir: Option<String>) -> Result<
         let _ = window.set_decorations(false);
     }
 
-    // Record the dir → label association so a later open of the same project
-    // focuses this window, and prune it when the window closes.
-    if let Some(key) = dir_key {
-        app.state::<ProjectWindows>()
-            .0
-            .lock_safe()
-            .insert(key.clone(), label.clone());
+    // Seed the open-window registry with this window's initial dir so an
+    // immediate quit (before the frontend reports) still restores it. The
+    // frontend later overwrites this entry via `report_window_dir` whenever the
+    // active project changes.
+    app.state::<OpenWindows>()
+        .0
+        .lock_safe()
+        .insert(label.clone(), dir_key.clone().unwrap_or_default());
 
-        let app_handle = app.clone();
-        window.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
+    // Prune both registries when the window closes. `OpenWindows` is pruned for
+    // every spawned window; `ProjectWindows` only for dir-keyed ones.
+    let key_for_close = dir_key.clone();
+    let label_for_close = label.clone();
+    let app_handle = app.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { .. } = event {
+            if let Some(open) = app_handle.try_state::<OpenWindows>() {
+                open.0.lock_safe().remove(&label_for_close);
+            }
+            if let Some(key) = key_for_close.as_deref() {
                 if let Some(reg) = app_handle.try_state::<ProjectWindows>() {
                     let mut map = reg.0.lock_safe();
-                    if map.get(&key).map(|l| l == &label).unwrap_or(false) {
-                        map.remove(&key);
+                    if map.get(key).map(|l| l == &label_for_close).unwrap_or(false) {
+                        map.remove(key);
                     }
                 }
             }
-        });
-    }
+        }
+    });
 
     Ok(())
 }
@@ -338,12 +415,46 @@ pub fn run() {
         .manage(ssh::SshBgState::default())
         .manage(s3::S3State::default())
         .manage(ProjectWindows::default())
+        .manage(OpenWindows::default())
         .manage(otel::OtelState::default())
         .setup(|app| {
             // Window titles (incl. the dev-distinguishing " Dev" suffix and the
             // active project name) are owned by the frontend — see the title
             // effect in App.tsx. The webview overwrites the title on mount, so a
             // Rust-side dev suffix here would just be clobbered.
+
+            // Restore the previous session's window layout: reopen one window per
+            // project dir that was open at last quit. The config-declared `main`
+            // window already exists, so we seed it in the open-window registry and
+            // skip re-spawning the saved dir it already covers. A CLI launch dir
+            // takes precedence as `main`'s dir.
+            {
+                let handle = app.handle();
+                let main_dir = workspace::launch_cwd_snapshot()
+                    .map(|p| normalize_dir_key(&modules::fs::to_canon(&p)))
+                    .unwrap_or_default();
+                app.state::<OpenWindows>()
+                    .0
+                    .lock_safe()
+                    .insert("main".to_string(), main_dir.clone());
+
+                let saved = read_window_session(handle);
+                let mut skipped_main = false;
+                for dir in saved {
+                    let key = normalize_dir_key(&dir);
+                    // Skip the first saved entry that matches `main`'s dir — that
+                    // window already exists. Duplicates beyond the first are
+                    // legitimately separate windows on the same project.
+                    if !skipped_main && key == main_dir {
+                        skipped_main = true;
+                        continue;
+                    }
+                    let arg = if key.is_empty() { None } else { Some(key) };
+                    if let Err(e) = spawn_main_window(handle, arg) {
+                        log::warn!("failed to restore window: {e}");
+                    }
+                }
+            }
 
             // Raise the OS timer resolution so the PTY flusher's sub-tick
             // coalesce sleep is honored instead of rounding to ~15ms (Windows).
@@ -491,6 +602,7 @@ pub fn run() {
             log_renderer_error,
             open_settings_window,
             open_main_window,
+            report_window_dir,
             agent::agent_enable_claude_hooks,
             agent::agent_claude_hooks_status,
             agentscan::agentscan_collect,
@@ -537,6 +649,9 @@ pub fn run() {
             // ServerProc::Drop also covers this, but ExitRequested fires before
             // state teardown — kill eagerly to avoid an orphaned port hold.
             if let RunEvent::ExitRequested { .. } = event {
+                // Snapshot the open-window layout before teardown so the next
+                // launch restores the same set of project windows.
+                persist_window_session(app);
                 bunqueue::shutdown(&app.state::<bunqueue::BunqueueState>());
             }
         });

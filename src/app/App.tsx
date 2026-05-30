@@ -511,6 +511,17 @@ export default function App() {
     void getCurrentWebviewWindow().setTitle(title);
   }, [explorerRoot]);
 
+  // Report this window's current project dir to the backend so the on-quit
+  // snapshot restores the same set of project windows on next launch. Keyed by
+  // window label; an empty/remote root reports null (restored at default cwd).
+  useEffect(() => {
+    const dir = explorerRoot && !isRemote(explorerRoot) ? explorerRoot : null;
+    void invoke("report_window_dir", {
+      label: getCurrentWebviewWindow().label,
+      dir,
+    }).catch(() => {});
+  }, [explorerRoot]);
+
   useEffect(() => {
     setActiveSearchAddon(
       activeLeafId !== null ? (searchAddons.current.get(activeLeafId) ?? null) : null,

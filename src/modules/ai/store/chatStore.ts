@@ -387,10 +387,33 @@ export const useChatStore = create<StoreState>((set, get) => ({
 
   hydrateSessions: async () => {
     if (get().sessionsHydrated) return;
-    const { sessions } = await loadAll();
+    const { sessions, activeId } = await loadAll();
 
-    // Reuse the most recent untitled "New chat" session if one exists from
-    // the previous run — no point stacking empty placeholder sessions every
+    // Restore the session that was active when the window last closed, so
+    // reopening the app drops you back into your previous chat rather than a
+    // blank one. Only fall back to creating/reusing a "New chat" when there's
+    // no saved active session (or it has since been deleted) — e.g. a first
+    // run or a wiped store.
+    const restored =
+      activeId != null ? sessions.find((s) => s.id === activeId) : undefined;
+
+    if (restored) {
+      // Seed the restored session's messages up-front so the chat renders its
+      // history immediately on open instead of starting empty.
+      const messages = await loadMessages(restored.id);
+      if (messages && messages.length > 0 && !chats.has(restored.id)) {
+        seedMessages.set(restored.id, messages);
+      }
+      set({
+        sessions,
+        activeSessionId: restored.id,
+        sessionsHydrated: true,
+      });
+      return;
+    }
+
+    // No valid saved session. Reuse the most recent untitled "New chat" if one
+    // exists from a previous run — no point stacking empty placeholders every
     // launch. Otherwise prepend a fresh one.
     const reusable = sessions[0]?.title === "New chat" ? sessions[0] : null;
     let nextSessions: SessionMeta[];
