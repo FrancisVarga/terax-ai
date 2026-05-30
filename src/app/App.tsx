@@ -721,11 +721,16 @@ export default function App() {
     [newTab],
   );
 
-  // Open a project in a fresh window rooted at its folder. The dir is passed
-  // to the new window (via `?dir=`) so its default tab + explorer start there.
-  const openProject = useCallback((project: Project) => {
-    void invoke("open_main_window", { dir: project.path });
-  }, []);
+  // Open a project in the current window: spawn a terminal tab rooted at the
+  // project folder and `cd` into it. The explorer root is derived from the
+  // active terminal's cwd (see useWorkspaceCwd), so the file tree repoints to
+  // the project automatically — no separate root setter needed.
+  const openProject = useCallback(
+    (project: Project) => {
+      cdInNewTab(project.path);
+    },
+    [cdInNewTab],
+  );
 
   // Open a project's detail page in a main-area tab (focuses an existing one).
   const openProjectDetail = useCallback(

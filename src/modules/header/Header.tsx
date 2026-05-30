@@ -49,6 +49,8 @@ type Props = {
   onClose: (id: number) => void;
   /** Promote a preview (transient) tab to persistent. */
   onPin: (id: number) => void;
+  /** Drag-reorder a tab into another tab's slot. */
+  onReorder: (fromId: number, toId: number) => void;
   onToggleSidebar: () => void;
   onToggleRightSidebar: () => void;
   onSplit: (dir: "row" | "col") => void;
@@ -77,6 +79,7 @@ export function Header({
   onOpenCcusage,
   onClose,
   onPin,
+  onReorder,
   onToggleSidebar,
   onToggleRightSidebar,
   onSplit,
@@ -250,6 +253,7 @@ export function Header({
           onOpenCcusage={onOpenCcusage}
           onClose={onClose}
           onPin={onPin}
+          onReorder={onReorder}
           compact={compact}
         />
         <div data-tauri-drag-region className="h-full min-w-2 flex-1" />
