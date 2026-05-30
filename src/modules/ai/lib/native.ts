@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { currentWorkspaceEnv } from "@/modules/workspace";
+import { parseRemote, remoteUri } from "@/modules/explorer/lib/remote";
 
 export type ReadResult =
   | { kind: "text"; content: string; size: number }
@@ -164,15 +165,28 @@ export const native = {
     glob?: string[];
     caseInsensitive?: boolean;
     maxResults?: number;
-  }) =>
-    invoke<GrepResponse>("fs_grep", {
+  }) => {
+    const ref = parseRemote(params.root);
+    if (ref) {
+      // Remote grep runs `rg`/`grep` over SSH exec; the `glob` filter has no
+      // remote equivalent yet, so it is ignored on the remote path.
+      return invoke<GrepResponse>("ssh_fs_grep", {
+        alias: ref.alias,
+        pattern: params.pattern,
+        root: ref.path,
+        caseInsensitive: params.caseInsensitive ?? null,
+        maxResults: params.maxResults ?? null,
+      });
+    }
+    return invoke<GrepResponse>("fs_grep", {
       pattern: params.pattern,
       root: params.root,
       glob: params.glob ?? null,
       caseInsensitive: params.caseInsensitive ?? null,
       maxResults: params.maxResults ?? null,
       workspace: currentWorkspaceEnv(),
-    }),
+    });
+  },
   glob: (params: { pattern: string; root: string; maxResults?: number }) =>
     invoke<GlobResponse>("fs_glob", {
       pattern: params.pattern,
@@ -271,65 +285,166 @@ export const native = {
         exit_code: number | null;
       }[]
     >("shell_bg_list"),
-  gitResolveRepo: (cwd: string) =>
-    invoke<GitRepoInfo | null>("git_resolve_repo", {
+  // Git routing: a `ssh://alias/path` repoRoot/cwd dispatches to the remote
+  // `ssh_git_*` commands (git run over the SSH exec channel). The remote
+  // backend returns a bare POSIX repoRoot, which we re-wrap as `ssh://alias/...`
+  // so the next call (gitStatus, gitDiff, …) stays on the remote path. Local
+  // paths keep the `workspace`-scoped local git commands unchanged.
+  gitResolveRepo: async (cwd: string): Promise<GitRepoInfo | null> => {
+    const ref = parseRemote(cwd);
+    if (ref) {
+      const info = await invoke<GitRepoInfo | null>("ssh_git_resolve_repo", {
+        alias: ref.alias,
+        cwd: ref.path,
+      });
+      return info
+        ? { ...info, repoRoot: remoteUri(ref.alias, info.repoRoot) }
+        : null;
+    }
+    return invoke<GitRepoInfo | null>("git_resolve_repo", {
       cwd,
       workspace: currentWorkspaceEnv(),
-    }),
-  gitPanelSnapshot: (cwd: string) =>
-    invoke<GitPanelSnapshot>("git_panel_snapshot", {
+    });
+  },
+  gitPanelSnapshot: async (cwd: string): Promise<GitPanelSnapshot> => {
+    const ref = parseRemote(cwd);
+    if (ref) {
+      const snap = await invoke<GitPanelSnapshot>("ssh_git_panel_snapshot", {
+        alias: ref.alias,
+        cwd: ref.path,
+      });
+      const wrap = (root: string) => remoteUri(ref.alias, root);
+      return {
+        repo: snap.repo
+          ? { ...snap.repo, repoRoot: wrap(snap.repo.repoRoot) }
+          : null,
+        status: snap.status
+          ? { ...snap.status, repoRoot: wrap(snap.status.repoRoot) }
+          : null,
+      };
+    }
+    return invoke<GitPanelSnapshot>("git_panel_snapshot", {
       cwd,
       workspace: currentWorkspaceEnv(),
-    }),
-  gitStatus: (repoRoot: string) =>
-    invoke<GitStatusSnapshot>("git_status", {
+    });
+  },
+  gitStatus: async (repoRoot: string): Promise<GitStatusSnapshot> => {
+    const ref = parseRemote(repoRoot);
+    if (ref) {
+      const s = await invoke<GitStatusSnapshot>("ssh_git_status", {
+        alias: ref.alias,
+        repoRoot: ref.path,
+      });
+      return { ...s, repoRoot: remoteUri(ref.alias, s.repoRoot) };
+    }
+    return invoke<GitStatusSnapshot>("git_status", {
       repoRoot,
       workspace: currentWorkspaceEnv(),
-    }),
-  gitDiff: (repoRoot: string, path: string | null, staged: boolean) =>
-    invoke<GitDiffResult>("git_diff", {
+    });
+  },
+  gitDiff: (repoRoot: string, path: string | null, staged: boolean) => {
+    const ref = parseRemote(repoRoot);
+    if (ref) {
+      return invoke<GitDiffResult>("ssh_git_diff", {
+        alias: ref.alias,
+        repoRoot: ref.path,
+        path,
+        staged,
+      });
+    }
+    return invoke<GitDiffResult>("git_diff", {
       repoRoot,
       path,
       staged,
       workspace: currentWorkspaceEnv(),
-    }),
+    });
+  },
   gitDiffContent: (
     repoRoot: string,
     path: string,
     staged: boolean,
     originalPath?: string | null,
-  ) =>
-    invoke<GitDiffContentResult>("git_diff_content", {
+  ) => {
+    const ref = parseRemote(repoRoot);
+    if (ref) {
+      return invoke<GitDiffContentResult>("ssh_git_diff_content", {
+        alias: ref.alias,
+        repoRoot: ref.path,
+        path,
+        staged,
+        originalPath: originalPath ?? null,
+      });
+    }
+    return invoke<GitDiffContentResult>("git_diff_content", {
       repoRoot,
       path,
       staged,
       originalPath: originalPath ?? null,
       workspace: currentWorkspaceEnv(),
-    }),
-  gitStage: (repoRoot: string, paths: string[]) =>
-    invoke<void>("git_stage", {
+    });
+  },
+  gitStage: (repoRoot: string, paths: string[]) => {
+    const ref = parseRemote(repoRoot);
+    if (ref) {
+      return invoke<void>("ssh_git_stage", {
+        alias: ref.alias,
+        repoRoot: ref.path,
+        paths,
+      });
+    }
+    return invoke<void>("git_stage", {
       repoRoot,
       paths,
       workspace: currentWorkspaceEnv(),
-    }),
-  gitUnstage: (repoRoot: string, paths: string[]) =>
-    invoke<void>("git_unstage", {
+    });
+  },
+  gitUnstage: (repoRoot: string, paths: string[]) => {
+    const ref = parseRemote(repoRoot);
+    if (ref) {
+      return invoke<void>("ssh_git_unstage", {
+        alias: ref.alias,
+        repoRoot: ref.path,
+        paths,
+      });
+    }
+    return invoke<void>("git_unstage", {
       repoRoot,
       paths,
       workspace: currentWorkspaceEnv(),
-    }),
-  gitDiscard: (repoRoot: string, entries: GitDiscardEntry[]) =>
-    invoke<void>("git_discard", {
+    });
+  },
+  gitDiscard: (repoRoot: string, entries: GitDiscardEntry[]) => {
+    const ref = parseRemote(repoRoot);
+    if (ref) {
+      // The remote command splits tracked vs untracked into two arg lists.
+      return invoke<void>("ssh_git_discard", {
+        alias: ref.alias,
+        repoRoot: ref.path,
+        tracked: entries.filter((e) => !e.untracked).map((e) => e.path),
+        untracked: entries.filter((e) => e.untracked).map((e) => e.path),
+      });
+    }
+    return invoke<void>("git_discard", {
       repoRoot,
       entries,
       workspace: currentWorkspaceEnv(),
-    }),
-  gitCommit: (repoRoot: string, message: string) =>
-    invoke<GitCommitResult>("git_commit", {
+    });
+  },
+  gitCommit: (repoRoot: string, message: string) => {
+    const ref = parseRemote(repoRoot);
+    if (ref) {
+      return invoke<GitCommitResult>("ssh_git_commit", {
+        alias: ref.alias,
+        repoRoot: ref.path,
+        message,
+      });
+    }
+    return invoke<GitCommitResult>("git_commit", {
       repoRoot,
       message,
       workspace: currentWorkspaceEnv(),
-    }),
+    });
+  },
   gitFetch: (repoRoot: string) =>
     invoke<void>("git_fetch", {
       repoRoot,
@@ -345,19 +460,41 @@ export const native = {
       repoRoot,
       workspace: currentWorkspaceEnv(),
     }),
-  gitLog: (repoRoot: string, options?: { limit?: number; beforeSha?: string }) =>
-    invoke<GitLogEntry[]>("git_log", {
+  gitLog: (
+    repoRoot: string,
+    options?: { limit?: number; beforeSha?: string },
+  ) => {
+    const ref = parseRemote(repoRoot);
+    if (ref) {
+      return invoke<GitLogEntry[]>("ssh_git_log", {
+        alias: ref.alias,
+        repoRoot: ref.path,
+        limit: options?.limit ?? 100,
+        beforeSha: options?.beforeSha ?? null,
+      });
+    }
+    return invoke<GitLogEntry[]>("git_log", {
       repoRoot,
       limit: options?.limit ?? null,
       beforeSha: options?.beforeSha ?? null,
       workspace: currentWorkspaceEnv(),
-    }),
-  gitShowCommit: (repoRoot: string, sha: string) =>
-    invoke<GitDiffResult>("git_show_commit", {
+    });
+  },
+  gitShowCommit: (repoRoot: string, sha: string) => {
+    const ref = parseRemote(repoRoot);
+    if (ref) {
+      return invoke<GitDiffResult>("ssh_git_show_commit", {
+        alias: ref.alias,
+        repoRoot: ref.path,
+        sha,
+      });
+    }
+    return invoke<GitDiffResult>("git_show_commit", {
       repoRoot,
       sha,
       workspace: currentWorkspaceEnv(),
-    }),
+    });
+  },
   gitCommitFiles: (repoRoot: string, sha: string) =>
     invoke<GitCommitFileChange[]>("git_commit_files", {
       repoRoot,
@@ -377,10 +514,19 @@ export const native = {
       originalPath: originalPath ?? null,
       workspace: currentWorkspaceEnv(),
     }),
-  gitRemoteUrl: (repoRoot: string, name?: string) =>
-    invoke<string | null>("git_remote_url", {
+  gitRemoteUrl: (repoRoot: string, name?: string) => {
+    const ref = parseRemote(repoRoot);
+    if (ref) {
+      return invoke<string | null>("ssh_git_remote_url", {
+        alias: ref.alias,
+        repoRoot: ref.path,
+        name: name ?? "origin",
+      });
+    }
+    return invoke<string | null>("git_remote_url", {
       repoRoot,
       name: name ?? null,
       workspace: currentWorkspaceEnv(),
-    }),
+    });
+  },
 };

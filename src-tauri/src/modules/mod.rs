@@ -9,6 +9,7 @@ pub mod fs;
 pub mod git;
 pub mod gpu;
 pub mod net;
+pub mod otel;
 pub mod proc;
 pub mod pty;
 pub mod s3;

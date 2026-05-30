@@ -3,6 +3,7 @@ import type { PanelImperativeHandle } from "react-resizable-panels";
 import type { FileExplorerHandle } from "@/modules/explorer";
 import type { SidebarViewId } from "@/modules/sidebar";
 import type { RightSidebarViewId } from "@/modules/right-sidebar";
+import { useTaskRunnerStore } from "@/modules/task-runner";
 import { hasExplicitLaunchDir } from "@/lib/launchDir";
 
 export const SIDEBAR_MIN_WIDTH = 220;
@@ -213,6 +214,21 @@ export function useSidebarState({ explorerRef }: UseSidebarStateArgs) {
     [persistRightSidebarView, rightSidebarView],
   );
 
+  // From the global background-tasks indicator: always reveal the Tasks panel
+  // (expand the right sidebar if collapsed, switch its view) and select the
+  // task so its output is shown. Unlike `selectRightSidebarView` this never
+  // toggles closed — it's an explicit "show me this task" action.
+  const openTaskInSidebar = useCallback(
+    (id: string) => {
+      const panel = rightSidebarRef.current;
+      if (panel && panel.getSize().asPercentage <= 0)
+        panel.resize(`${rightSidebarWidthRef.current}px`);
+      if (rightSidebarView !== "tasks") persistRightSidebarView("tasks");
+      useTaskRunnerStore.getState().select(id);
+    },
+    [persistRightSidebarView, rightSidebarView],
+  );
+
   const persistRightSidebarWidth = useCallback((next: number) => {
     rightSidebarWidthRef.current = next;
     if (rightSidebarWidthWriteTimerRef.current) {
@@ -290,5 +306,6 @@ export function useSidebarState({ explorerRef }: UseSidebarStateArgs) {
     persistRightSidebarWidth,
     toggleRightSidebar,
     selectRightSidebarView,
+    openTaskInSidebar,
   };
 }

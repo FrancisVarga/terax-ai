@@ -3,6 +3,8 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -10,6 +12,7 @@ import { fmtShortcut, MOD_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
 import {
+  AiBrain01Icon,
   Cancel01Icon,
   ChartLineData01Icon,
   Clock01Icon,
@@ -25,6 +28,9 @@ import {
   IncognitoIcon,
   PencilEdit02Icon,
   PlusSignIcon,
+  SatelliteIcon,
+  SparklesIcon,
+  Table01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useRef, useState } from "react";
@@ -39,8 +45,12 @@ type Props = {
   onNewPreview: () => void;
   onNewEditor: () => void;
   onNewGitGraph: () => void;
+  onOpenClaude: () => void;
+  onOpenGemini: () => void;
   onOpenBunqueue: () => void;
   onOpenAnalytics: () => void;
+  onOpenOtel: () => void;
+  onOpenDataGridMaster: () => void;
   onOpenCcusage: () => void;
   onClose: (id: number) => void;
   /** Pin (promote) a preview tab to persistent on double-click. */
@@ -59,8 +69,12 @@ export function TabBar({
   onNewPreview,
   onNewEditor,
   onNewGitGraph,
+  onOpenClaude,
+  onOpenGemini,
   onOpenBunqueue,
   onOpenAnalytics,
+  onOpenOtel,
+  onOpenDataGridMaster,
   onOpenCcusage,
   onClose,
   onPin,
@@ -293,9 +307,27 @@ export function TabBar({
               />
               <span className="flex-1">Agentlytics</span>
             </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onOpenOtel()}>
+              <HugeiconsIcon icon={SatelliteIcon} size={14} strokeWidth={1.75} />
+              <span className="flex-1">Observability</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onOpenDataGridMaster()}>
+              <HugeiconsIcon icon={Table01Icon} size={14} strokeWidth={1.75} />
+              <span className="flex-1">Data Grid</span>
+            </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => onOpenCcusage()}>
               <HugeiconsIcon icon={Coins01Icon} size={14} strokeWidth={1.75} />
               <span className="flex-1">ccusage</span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>Agents</DropdownMenuLabel>
+            <DropdownMenuItem onSelect={() => onOpenClaude()}>
+              <HugeiconsIcon icon={AiBrain01Icon} size={14} strokeWidth={1.75} />
+              <span className="flex-1">Claude Code</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onOpenGemini()}>
+              <HugeiconsIcon icon={SparklesIcon} size={14} strokeWidth={1.75} />
+              <span className="flex-1">Gemini</span>
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -404,10 +436,30 @@ function TabIcon({ tab }: { tab: Tab }) {
       />
     );
   }
+  if (tab.kind === "otel") {
+    return (
+      <HugeiconsIcon
+        icon={SatelliteIcon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
+    );
+  }
   if (tab.kind === "ccusage") {
     return (
       <HugeiconsIcon
         icon={Coins01Icon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
+    );
+  }
+  if (tab.kind === "data-grid-master") {
+    return (
+      <HugeiconsIcon
+        icon={Table01Icon}
         size={14}
         strokeWidth={2}
         className="shrink-0"
@@ -447,6 +499,8 @@ function labelFor(t: Tab): string {
   if (t.kind === "bunqueue") return t.title;
   if (t.kind === "docker-detail") return t.title;
   if (t.kind === "agentlytics") return t.title;
+  if (t.kind === "otel") return t.title;
+  if (t.kind === "data-grid-master") return t.title;
   if (t.kind === "ccusage") return t.title;
   if (t.kind === "projects") return t.title;
   if (t.kind === "project-detail") return t.title;

@@ -74,6 +74,10 @@ export type Slot = {
   // Set when WebGL was disposed because the slot went dormant; tells the next
   // unhide to reattach the renderer before repainting.
   webglDormant: boolean;
+  // Set when the dormant sweep shrank this slot's scrollback to free buffer
+  // memory; tells the next bind to restore the user's configured value before
+  // replaying the snapshot.
+  scrollbackTrimmed: boolean;
 };
 
 const slots: Slot[] = [];
@@ -186,6 +190,7 @@ function createSlot(): Slot {
     pendingH: 0,
     lastUsedAt: 0,
     webglDormant: false,
+    scrollbackTrimmed: false,
   };
 
   attachWebgl(slot);
@@ -415,6 +420,14 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   }
 
   slot.term.options.disableStdin = p.shellExited;
+  if (slot.scrollbackTrimmed) {
+    // Restore the user's configured scrollback before replaying the snapshot,
+    // so the replayed history lands in a full-size buffer rather than the
+    // dormant-trimmed ring.
+    slot.term.options.scrollback =
+      usePreferencesStore.getState().terminalScrollback;
+    slot.scrollbackTrimmed = false;
+  }
   slot.term.clear();
   slot.term.reset();
 
@@ -467,16 +480,29 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
 
   applyCursorBlinkOnSlot(slot, adapter?.isLeafFocused(p.leafId) ?? false);
 
-  if (p.altScreen && !p.shellExited) {
-    adapter?.resolveLeaf(p.leafId)?.kickPty(slot.term.cols, slot.term.rows);
-  }
+  const altScreenKick =
+    p.altScreen && !p.shellExited
+      ? () => {
+          // Guard: the slot may have been rebound to a different leaf during
+          // the two-frame defer. Read dims at call time so the kick uses the
+          // settled, post-fit grid rather than bindSlot's eager fit() dims.
+          if (slot.currentLeafId !== p.leafId) return;
+          adapter
+            ?.resolveLeaf(p.leafId)
+            ?.kickPty(slot.term.cols, slot.term.rows);
+        }
+      : undefined;
 
-  scheduleUnhide(slot, stale);
+  scheduleUnhide(slot, stale, altScreenKick);
 
   p.onSearchReady(slot.searchAddon);
 }
 
-function scheduleUnhide(slot: Slot, stale: boolean): void {
+function scheduleUnhide(
+  slot: Slot,
+  stale: boolean,
+  altScreenKick?: () => void,
+): void {
   slot.unhideRaf = requestAnimationFrame(() => {
     slot.unhideRaf = requestAnimationFrame(() => {
       slot.unhideRaf = null;
@@ -487,6 +513,13 @@ function scheduleUnhide(slot: Slot, stale: boolean): void {
           slot.term.refresh(0, slot.term.rows - 1);
         } catch {}
       }
+      // SIGWINCH-kick the TUI only now that layout has flushed (double rAF)
+      // and the ResizeObserver's 8ms corrective fit has settled. Kicking in
+      // bindSlot's synchronous body would use the eager fit()'s dims, which
+      // are stale (0×0 / recycler geometry) before layout — the TUI would
+      // repaint at the wrong size, then the observer's corrective resizePty
+      // would land mid-repaint and scatter the glyphs.
+      altScreenKick?.();
       const leafId = slot.currentLeafId;
       if (leafId !== null && adapter?.isLeafFocused(leafId)) {
         slot.term.focus();
@@ -710,17 +743,32 @@ function attachWebgl(slot: Slot): void {
 // slots that are unbound and stale, marking them so the next bind reattaches
 // before unhide. Disabled while the pool is small enough to be cheap.
 const DORMANT_SWEEP_MS = SLOT_STALE_MS;
+// Scrollback a dormant slot is shrunk to. Its full history is already captured
+// in the snapshot taken on release and replayed on rebind, so the in-memory
+// ring beyond a small floor is redundant buffer memory. Restored to the user's
+// configured value by bindSlot before the snapshot replay.
+const DORMANT_SCROLLBACK = 200;
 let dormantSweepTimer: ReturnType<typeof setInterval> | null = null;
 
 function sweepDormantWebgl(): void {
-  if (!usePreferencesStore.getState().terminalWebglEnabled) return;
+  const prefs = usePreferencesStore.getState();
   const now = performance.now();
   for (const slot of slots) {
     if (slot.currentLeafId !== null) continue; // bound/visible — keep hot
-    if (!slot.webglAddon) continue;
     if (now - slot.lastUsedAt < SLOT_STALE_MS) continue;
-    disposeSlotWebgl(slot);
-    slot.webglDormant = true;
+    // Reclaim the WebGL context (gated on the pref so a user-disabled renderer
+    // is never re-touched) and shrink the buffer; both are restored on rebind.
+    if (prefs.terminalWebglEnabled && slot.webglAddon) {
+      disposeSlotWebgl(slot);
+      slot.webglDormant = true;
+    }
+    if (
+      !slot.scrollbackTrimmed &&
+      (slot.term.options.scrollback ?? 0) > DORMANT_SCROLLBACK
+    ) {
+      slot.term.options.scrollback = DORMANT_SCROLLBACK;
+      slot.scrollbackTrimmed = true;
+    }
   }
 }
 
@@ -827,6 +875,10 @@ export function applyFontFamily(family: string): void {
 
 export function applyScrollback(value: number): void {
   for (const slot of slots) {
+    // A live pref change overrides any dormant trim: clear the flag so bindSlot
+    // does not try to "restore" over the value the user just set, and so the
+    // next sweep re-trims from the new baseline.
+    slot.scrollbackTrimmed = false;
     if (slot.term.options.scrollback === value) continue;
     slot.term.options.scrollback = value;
   }

@@ -42,7 +42,8 @@ export type ShortcutId =
   | "view.projects"
   | "projects.addCurrent"
   | "editor.undo"
-  | "editor.redo";
+  | "editor.redo"
+  | "editor.format";
 
 export type ShortcutGroup =
   | "General"
@@ -315,6 +316,14 @@ export const SHORTCUTS: Shortcut[] = [
     label: "Redo",
     group: "Editor",
     defaultBindings: [{ [MOD_PROP]: true, key: "y" }],
+  },
+  // Unlike undo/redo, this has a real App-level handler (CodeMirror has no
+  // native format command), so it gets preventDefault and shows in the palette.
+  {
+    id: "editor.format",
+    label: "Format document",
+    group: "Editor",
+    defaultBindings: [{ shift: true, alt: true, key: "f" }],
   },
 ];
 

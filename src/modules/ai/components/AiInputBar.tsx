@@ -95,7 +95,12 @@ export function AiInputBar() {
 
   const updateTrigger = () => {
     const el = c.textareaRef.current;
-    if (!el) {
+    // The composer value lives in a shared context consumed by every mounted
+    // AiInputBar (bottom bar + right-sidebar panel). Without this focus guard,
+    // a single `@` opens a picker on *every* instance because they all run this
+    // effect on the same `c.value`. Only the focused textarea owns the caret —
+    // and therefore the picker.
+    if (!el || document.activeElement !== el) {
       setTrigger(null);
       setFileTrigger(null);
       return;
@@ -245,6 +250,15 @@ export function AiInputBar() {
                 onKeyUp={updateTrigger}
                 onClick={updateTrigger}
                 onSelect={updateTrigger}
+                onFocus={updateTrigger}
+                onBlur={() => {
+                  // Close this instance's picker when focus leaves, so the
+                  // other (now-focused) bar owns it exclusively. FilePicker's
+                  // PopoverContent preventsDefault on mousedown, so clicking a
+                  // result doesn't blur the textarea before the pick lands.
+                  setTrigger(null);
+                  setFileTrigger(null);
+                }}
                 onKeyDown={(e) => {
                   if (pickerOpen) {
                     const items = fileTrigger ? filteredFiles : filteredItems;

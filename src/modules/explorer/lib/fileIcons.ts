@@ -672,6 +672,8 @@ const fileIcons: FileIcons = {
       ".env.test.local",
       ".env.uat",
       ".env.cat",
+      ".env.deepwiki",
+      ".env.deepwiki.example",
     ],
   },
   envrc: {

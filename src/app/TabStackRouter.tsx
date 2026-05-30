@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import type { Tab } from "@/modules/tabs";
 import { TerminalStack, type TerminalPaneHandle } from "@/modules/terminal";
@@ -21,6 +21,8 @@ import {
 import { BunqueueStack } from "@/modules/bunqueue";
 import { DockerDetailStack } from "@/modules/docker";
 import { AnalyticsStack } from "@/modules/agentlytics";
+import { OtelStack } from "@/modules/otel";
+import { DataGridMasterStack } from "@/modules/data-grid-master";
 import { CcusageStack } from "@/modules/ccusage";
 import { ProjectsDashboard, ProjectDetailStack } from "@/modules/projects";
 import type { SearchAddon } from "@xterm/addon-search";
@@ -56,6 +58,19 @@ function TabLayer({
 
 export type TabStackRouterProps = {
   tabs: Tab[];
+  // Referentially-stable per-kind slices (see `useStableTabSlice`). The content
+  // stacks subscribe to their own slice so a terminal cwd change does not
+  // reconcile the editor/preview/data/git subtrees.
+  editorTabs: ComponentProps<typeof EditorStack>["editors"];
+  previewTabs: ComponentProps<typeof PreviewStack>["previews"];
+  markdownTabs: ComponentProps<typeof MarkdownStack>["markdowns"];
+  imageTabs: ComponentProps<typeof ImageStack>["images"];
+  logTabs: ComponentProps<typeof LogStack>["logs"];
+  dataTabs: ComponentProps<typeof DataStack>["data"];
+  aiDiffTabs: ComponentProps<typeof AiDiffStack>["aiDiffs"];
+  gitDiffTabs: ComponentProps<typeof GitDiffStack>["gitDiffs"];
+  gitHistoryTabs: ComponentProps<typeof GitHistoryStack>["gitHistories"];
+  dockerDetailTabs: ComponentProps<typeof DockerDetailStack>["dockerDetails"];
   activeId: number;
   activeKind: Tab["kind"] | undefined;
   registerTerminalHandle: (id: number, handle: TerminalPaneHandle | null) => void;
@@ -91,6 +106,16 @@ export type TabStackRouterProps = {
  */
 export function TabStackRouter({
   tabs,
+  editorTabs,
+  previewTabs,
+  markdownTabs,
+  imageTabs,
+  logTabs,
+  dataTabs,
+  aiDiffTabs,
+  gitDiffTabs,
+  gitHistoryTabs,
+  dockerDetailTabs,
   activeId,
   activeKind,
   registerTerminalHandle,
@@ -127,7 +152,7 @@ export function TabStackRouter({
       </TabLayer>
       <TabLayer visible={activeKind === "editor"} padded>
         <EditorStack
-          tabs={tabs}
+          editors={editorTabs}
           activeId={activeId}
           registerHandle={registerEditorHandle}
           onDirtyChange={onEditorDirty}
@@ -136,41 +161,41 @@ export function TabStackRouter({
       </TabLayer>
       <TabLayer visible={activeKind === "preview"} padded>
         <PreviewStack
-          tabs={tabs}
+          previews={previewTabs}
           activeId={activeId}
           registerHandle={registerPreviewHandle}
           onUrlChange={onPreviewUrl}
         />
       </TabLayer>
       <TabLayer visible={activeKind === "markdown"} padded>
-        <MarkdownStack tabs={tabs} activeId={activeId} />
+        <MarkdownStack markdowns={markdownTabs} activeId={activeId} />
       </TabLayer>
       <TabLayer visible={activeKind === "image"} padded>
-        <ImageStack tabs={tabs} activeId={activeId} />
+        <ImageStack images={imageTabs} activeId={activeId} />
       </TabLayer>
       <TabLayer visible={activeKind === "log"} padded>
-        <LogStack tabs={tabs} activeId={activeId} />
+        <LogStack logs={logTabs} activeId={activeId} />
       </TabLayer>
       <TabLayer visible={activeKind === "data"} padded>
-        <DataStack tabs={tabs} activeId={activeId} />
+        <DataStack data={dataTabs} activeId={activeId} />
       </TabLayer>
       <TabLayer visible={activeKind === "s3"} padded>
         <S3Stack tabs={tabs} activeId={activeId} />
       </TabLayer>
       <TabLayer visible={activeKind === "ai-diff"} padded>
         <AiDiffStack
-          tabs={tabs}
+          aiDiffs={aiDiffTabs}
           activeId={activeId}
           onAccept={(id) => onApprovalRespond(id, true)}
           onReject={(id) => onApprovalRespond(id, false)}
         />
       </TabLayer>
       <TabLayer visible={isGitDiff} padded>
-        <GitDiffStack tabs={tabs} activeId={activeId} />
+        <GitDiffStack gitDiffs={gitDiffTabs} activeId={activeId} />
       </TabLayer>
       <TabLayer visible={activeKind === "git-history"} padded={false}>
         <GitHistoryStack
-          tabs={tabs}
+          gitHistories={gitHistoryTabs}
           activeId={activeId}
           onOpenCommitFile={onOpenCommitFile}
           onSearchHandle={onGitHistorySearchHandle}
@@ -180,10 +205,16 @@ export function TabStackRouter({
         <BunqueueStack tabs={tabs} activeId={activeId} />
       </TabLayer>
       <TabLayer visible={activeKind === "docker-detail"} padded>
-        <DockerDetailStack tabs={tabs} activeId={activeId} />
+        <DockerDetailStack dockerDetails={dockerDetailTabs} activeId={activeId} />
       </TabLayer>
       <TabLayer visible={activeKind === "agentlytics"} padded={false}>
         <AnalyticsStack tabs={tabs} activeId={activeId} />
+      </TabLayer>
+      <TabLayer visible={activeKind === "otel"} padded={false}>
+        <OtelStack tabs={tabs} activeId={activeId} />
+      </TabLayer>
+      <TabLayer visible={activeKind === "data-grid-master"} padded={false}>
+        <DataGridMasterStack tabs={tabs} activeId={activeId} />
       </TabLayer>
       <TabLayer visible={activeKind === "ccusage"} padded={false}>
         <CcusageStack tabs={tabs} activeId={activeId} />

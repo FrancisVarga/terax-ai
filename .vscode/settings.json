@@ -1,0 +1,24 @@
+{
+  "rust-analyzer.linkedProjects": [
+    "src-tauri/Cargo.toml"
+  ],
+  "rust-analyzer.lru.capacity": 48,
+  "rust-analyzer.cachePriming.enable": false,
+  "rust-analyzer.numThreads": 4,
+  "rust-analyzer.checkOnSave": true,
+  "rust-analyzer.check.command": "check",
+  "rust-analyzer.check.extraArgs": [
+    "--profile",
+    "dev"
+  ],
+  "rust-analyzer.cargo.extraEnv": {
+    "CARGO_BUILD_JOBS": "4"
+  },
+  "rust-analyzer.cargo.targetDir": ".rust-analyzer-target",
+  "rust-analyzer.files.excludeDirs": [
+    "node_modules",
+    "dist",
+    "target",
+    ".next"
+  ]
+}

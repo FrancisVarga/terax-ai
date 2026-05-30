@@ -21,6 +21,7 @@ import {
   TERMINAL_FONT_SIZES,
   TERMINAL_SCROLLBACK_PRESETS,
   setAgentNotifications,
+  setNotificationSound,
   setAutostart,
   setEditorAutoSave,
   setEditorAutoSaveDelay,
@@ -96,6 +97,7 @@ export function GeneralSection() {
   );
   const zoomLevel = usePreferencesStore((s) => s.zoomLevel);
   const agentNotifications = usePreferencesStore((s) => s.agentNotifications);
+  const notificationSound = usePreferencesStore((s) => s.notificationSound);
 
   useEffect(() => {
     let alive = true;
@@ -372,11 +374,20 @@ export function GeneralSection() {
         <Label>Agents</Label>
         <SettingRow
           title="Coding agent notifications"
-          description="Alert when Claude Code or Codex running in a terminal needs your input or finishes. Desktop notification when Terax is unfocused, in-app otherwise."
+          description="Alert when an agent in a terminal, or a GitHub Actions workflow run, needs your input or finishes. Desktop notification when Terax is unfocused, in-app otherwise."
         >
           <Switch
             checked={agentNotifications}
             onCheckedChange={(v) => void setAgentNotifications(v)}
+          />
+        </SettingRow>
+        <SettingRow
+          title="Notification sound"
+          description="Play a short chime when an agent or workflow run finishes."
+        >
+          <Switch
+            checked={notificationSound}
+            onCheckedChange={(v) => void setNotificationSound(v)}
           />
         </SettingRow>
       </div>

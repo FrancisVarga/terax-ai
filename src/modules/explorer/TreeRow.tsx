@@ -82,11 +82,13 @@ function EntryRowImpl(props: EntryRowProps) {
 
   const [isConfirming, setIsConfirming] = useState(false);
   const iconUrl = isDir ? folderIconUrl(name, isExpanded) : fileIconUrl(name);
-  // Files render in a 20px glyph column; folders render slightly larger (26px)
-  // for emphasis. The glyph span is overflow-visible so the folder art can
-  // extend past the 32px row instead of clipping, and the img keeps
-  // object-contain so the SVG scales without distortion.
+  // Glyph column: folders render slightly larger for emphasis; the span is
+  // overflow-visible so the folder art can extend past the row instead of
+  // clipping. The inner img sizes via `glyphSize` (folders 24px; file-type
+  // glyphs 17px so they read as secondary) and keeps object-contain so the SVG
+  // scales without distortion.
   const iconSize = isDir ? "size-[26px]" : "size-5";
+  const glyphSize = isDir ? "size-6" : "size-[17px]";
   const createTarget = isDir ? path : path.slice(0, path.lastIndexOf("/")) || rootPath;
   const paddingLeft = 6 + depth * 12;
 
@@ -108,10 +110,10 @@ function EntryRowImpl(props: EntryRowProps) {
             <span className="size-4 shrink-0" />
             {iconUrl ? (
               <span className={cn(iconSize, "flex shrink-0 items-center justify-center overflow-visible")}>
-                <img src={iconUrl} alt="" className="size-full object-contain" />
+                <img src={iconUrl} alt="" className={cn(glyphSize, "object-contain")} />
               </span>
             ) : (
-              <span className="size-5 shrink-0" />
+              <span className="size-6 shrink-0" />
             )}
             <InlineInput
               initial={name}
@@ -148,7 +150,7 @@ function EntryRowImpl(props: EntryRowProps) {
             </span>
             <span className={cn(iconSize, "flex shrink-0 items-center justify-center overflow-visible")}>
               {iconUrl ? (
-                <img src={iconUrl} alt="" className="size-full object-contain" />
+                <img src={iconUrl} alt="" className={cn(glyphSize, "object-contain")} />
               ) : null}
             </span>
             <span
@@ -251,6 +253,21 @@ function EntryRowImpl(props: EntryRowProps) {
         <ContextMenuSeparator />
         <ContextMenuItem
           className={COMPACT_ITEM}
+          onSelect={() => tree.copyPath(path)}
+        >
+          Copy
+        </ContextMenuItem>
+        {tree.copySource && (
+          <ContextMenuItem
+            className={COMPACT_ITEM}
+            onSelect={() => void tree.pasteInto(createTarget)}
+          >
+            Paste
+          </ContextMenuItem>
+        )}
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          className={COMPACT_ITEM}
           onSelect={() => void copyToClipboard(path)}
         >
           Copy Path
@@ -304,15 +321,19 @@ export function PendingRow({ depth, kind, onCommit, onCancel }: PendingRowProps)
       className="flex h-8 w-full min-w-0 items-center gap-2 px-1.5 text-[13px]"
       style={{ paddingLeft: 6 + depth * 12 }}
     >
-      <span className="size-5 shrink-0" />
-      <img
-        src={kind === "dir" ? folderIconUrl("", false) : fileIconUrl("untitled")}
-        alt=""
+      <span className="size-4 shrink-0" />
+      <span
         className={cn(
-          "shrink-0 object-contain opacity-70",
+          "flex shrink-0 items-center justify-center overflow-visible",
           kind === "dir" ? "size-[26px]" : "size-5",
         )}
-      />
+      >
+        <img
+          src={kind === "dir" ? folderIconUrl("", false) : fileIconUrl("untitled")}
+          alt=""
+          className={cn(kind === "dir" ? "size-6" : "size-[17px]", "object-contain opacity-70")}
+        />
+      </span>
       <InlineInput
         initial=""
         placeholder={kind === "dir" ? "New folder" : "New file"}

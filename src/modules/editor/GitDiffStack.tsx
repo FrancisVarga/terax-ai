@@ -1,21 +1,21 @@
+import { memo } from "react";
 import type {
   GitCommitFileDiffTab,
   GitDiffTab,
-  Tab,
 } from "@/modules/tabs";
 import { GitDiffPane } from "./GitDiffPane";
 
 type Props = {
-  tabs: Tab[];
+  /** Pre-filtered, referentially-stable slice of both git-diff kinds. */
+  gitDiffs: (GitDiffTab | GitCommitFileDiffTab)[];
   activeId: number;
 };
 
-export function GitDiffStack({ tabs, activeId }: Props) {
-  const active = tabs.find(
-    (t): t is GitDiffTab | GitCommitFileDiffTab =>
-      (t.kind === "git-diff" || t.kind === "git-commit-file") &&
-      t.id === activeId,
-  );
+export const GitDiffStack = memo(function GitDiffStack({
+  gitDiffs,
+  activeId,
+}: Props) {
+  const active = gitDiffs.find((t) => t.id === activeId);
   if (!active) return null;
   if (active.kind === "git-diff") {
     return (
@@ -50,4 +50,4 @@ export function GitDiffStack({ tabs, activeId }: Props) {
       />
     </div>
   );
-}
+});

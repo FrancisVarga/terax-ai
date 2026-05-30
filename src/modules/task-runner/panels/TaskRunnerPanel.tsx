@@ -2,24 +2,20 @@ import { cn } from "@/lib/utils";
 import { useChatStore } from "@/modules/ai/store/chatStore";
 import { useWorkspaceEnvStore } from "@/modules/workspace";
 import {
+  ArrowExpand01Icon,
   ArrowRight01Icon,
+  ArrowShrink01Icon,
   Cancel01Icon,
   PlayIcon,
   RefreshIcon,
   StopIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnsiLog } from "../components/AnsiLog";
-import { buildTree, scanManifests } from "../lib/scan";
+import { buildTree } from "../lib/scan";
 import type { PackageManifest, TaskScript, TreeNode } from "../lib/types";
 import { useTaskRunnerStore } from "../store/taskRunnerStore";
-
-type ScanState =
-  | { status: "loading" }
-  | { status: "ready"; tree: TreeNode[]; count: number }
-  | { status: "empty" }
-  | { status: "error"; message: string };
 
 const PM_BADGE: Record<string, string> = {
   npm: "text-red-500",
@@ -29,7 +25,6 @@ const PM_BADGE: Record<string, string> = {
 };
 
 export function TaskRunnerPanel() {
-  const [scan, setScan] = useState<ScanState>({ status: "loading" });
   // Re-scan whenever the active workspace env changes (e.g. switching to WSL).
   const workspaceEnv = useWorkspaceEnvStore((s) => s.env);
   // The project root the rest of the app uses (active terminal cwd → explorer
@@ -37,46 +32,84 @@ export function TaskRunnerPanel() {
   // re-runs the scan when the user changes folders / terminal cwd. See
   // chatStore.live.getWorkspaceRoot in App.tsx.
   const live = useChatStore((s) => s.live);
+  const root = live.getWorkspaceRoot();
 
   const tasks = useTaskRunnerStore((s) => s.tasks);
   const selectedId = useTaskRunnerStore((s) => s.selectedId);
   const run = useTaskRunnerStore((s) => s.run);
   const stop = useTaskRunnerStore((s) => s.stop);
   const remove = useTaskRunnerStore((s) => s.remove);
+  const clearOutput = useTaskRunnerStore((s) => s.clearOutput);
   const select = useTaskRunnerStore((s) => s.select);
   const findRunning = useTaskRunnerStore((s) => s.findRunning);
   const setManifests = useTaskRunnerStore((s) => s.setManifests);
+  const loadScan = useTaskRunnerStore((s) => s.loadScan);
+  // Subscribe to the SWR scan cache for this root. The store serves the
+  // last-known manifests instantly and only re-walks the filesystem when the
+  // entry is stale, so re-opening the Tasks tab never re-flashes the spinner.
+  const scan = useTaskRunnerStore((s) => (root ? s.scanCache[root] : undefined));
 
-  const rescan = useCallback(async () => {
-    setScan({ status: "loading" });
-    try {
-      const root = live.getWorkspaceRoot();
-      if (!root) {
-        setManifests([]);
-        setScan({ status: "empty" });
-        return;
-      }
-      const manifests = await scanManifests(root);
-      // Publish to the store so the command palette can list the same scripts.
-      setManifests(manifests);
-      if (manifests.length === 0) {
-        setScan({ status: "empty" });
-        return;
-      }
-      setScan({
-        status: "ready",
-        tree: buildTree(manifests),
-        count: manifests.length,
-      });
-    } catch (e) {
-      setManifests([]);
-      setScan({ status: "error", message: String(e) });
-    }
-  }, [live, setManifests]);
-
+  // SWR: ensure the scan is warm on mount / root / env change. The store no-ops
+  // when the cache is still fresh, so rapid sidebar toggles don't re-walk.
   useEffect(() => {
-    void rescan();
-  }, [rescan, workspaceEnv]);
+    if (root) void loadScan(root);
+  }, [root, workspaceEnv, loadScan]);
+
+  // The rescan button bypasses the TTL and forces a fresh filesystem walk.
+  const rescan = useCallback(() => {
+    if (root) void loadScan(root, true);
+  }, [root, loadScan]);
+
+  // Build the display tree only when the manifests reference actually changes
+  // (the store keeps it stable across unchanged revalidations), so an identical
+  // re-scan does not rebuild the tree or re-render the rows.
+  const manifests = scan?.manifests;
+  const tree = useMemo(() => (manifests ? buildTree(manifests) : []), [manifests]);
+
+  // Publish the scanned manifests to the store's flat `manifests` field so the
+  // command palette can list the same runnable scripts without re-scanning.
+  // Keyed off the (referentially-stable) scan manifests, so it only fires when
+  // a scan actually produces new data.
+  useEffect(() => {
+    setManifests(manifests ?? []);
+  }, [manifests, setManifests]);
+
+  // Derive the view status from the cache. Spinner shows only on the first scan
+  // (no cache entry yet); a stale revalidation keeps the previous tree visible.
+  const status: "loading" | "ready" | "empty" | "error" = !root
+    ? "empty"
+    : !scan || (scan.status === "loading" && scan.fetchedAt === 0)
+      ? "loading"
+      : scan.status;
+
+  // Output detail pane sizing. `maximized` makes it fill the panel (hiding the
+  // tree); otherwise `outputHeight` is a draggable pixel height. The drag
+  // handle on the section's top border sets it live.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [outputHeight, setOutputHeight] = useState(224); // ~ old h-56
+  const [maximized, setMaximized] = useState(false);
+
+  const startResize = useCallback(
+    (e: React.PointerEvent) => {
+      e.preventDefault();
+      const root = rootRef.current;
+      if (!root) return;
+      const rootBottom = root.getBoundingClientRect().bottom;
+      const onMove = (ev: PointerEvent) => {
+        // Height = distance from pointer to the panel bottom, clamped so the
+        // tree keeps a usable sliver and the pane can't underflow its toolbar.
+        const next = rootBottom - ev.clientY;
+        setOutputHeight(Math.max(120, Math.min(next, root.clientHeight - 80)));
+      };
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+    },
+    [],
+  );
 
   const selected = selectedId ? tasks[selectedId] : null;
   const runningCount = useMemo(
@@ -92,7 +125,7 @@ export function TaskRunnerPanel() {
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div ref={rootRef} className="flex h-full min-h-0 flex-col">
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border/60 px-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
         <span className="flex-1">Tasks</span>
         {runningCount > 0 ? (
@@ -111,24 +144,24 @@ export function TaskRunnerPanel() {
         </button>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {scan.status === "loading" ? (
+      <div className={cn("min-h-0 flex-1 overflow-y-auto", maximized && "hidden")}>
+        {status === "loading" ? (
           <div className="px-3 py-5 text-center text-xs text-muted-foreground">
             Scanning for package.json…
           </div>
-        ) : scan.status === "error" ? (
+        ) : status === "error" ? (
           <div className="px-3 py-5 text-center text-xs leading-relaxed text-destructive">
             Scan failed.
             <br />
-            <span className="text-muted-foreground">{scan.message}</span>
+            <span className="text-muted-foreground">{scan?.error}</span>
           </div>
-        ) : scan.status === "empty" ? (
+        ) : status === "empty" ? (
           <div className="px-3 py-5 text-center text-xs leading-relaxed text-muted-foreground">
             No package.json with scripts found in this workspace.
           </div>
         ) : (
           <div className="p-1">
-            {scan.tree.map((node, i) => (
+            {tree.map((node, i) => (
               <TreeNodeRow
                 key={i}
                 node={node}
@@ -143,7 +176,23 @@ export function TaskRunnerPanel() {
 
       {/* Running tasks + live output detail */}
       {Object.keys(tasks).length > 0 ? (
-        <div className="flex min-h-0 shrink-0 flex-col border-t border-border/60">
+        <div
+          className={cn(
+            "flex min-h-0 flex-col border-t border-border/60",
+            maximized ? "flex-1" : "shrink-0",
+          )}
+        >
+          {/* Drag handle to resize the output pane (hidden when maximized). */}
+          {selected && !maximized ? (
+            <div
+              onPointerDown={startResize}
+              role="separator"
+              aria-label="Resize output"
+              className="group h-1 shrink-0 cursor-row-resize"
+            >
+              <div className="mx-auto mt-px h-0.5 w-8 rounded-full bg-border transition-colors group-hover:bg-foreground/40" />
+            </div>
+          ) : null}
           <div className="flex shrink-0 items-center gap-1 overflow-x-auto px-1.5 py-1.5">
             {Object.values(tasks)
               .sort((a, b) => b.startedAt - a.startedAt)
@@ -218,9 +267,29 @@ export function TaskRunnerPanel() {
                     exit {selected.exitCode ?? "?"}
                   </span>
                 )}
+                <button
+                  type="button"
+                  onClick={() => setMaximized((v) => !v)}
+                  title={maximized ? "Restore" : "Expand output"}
+                  aria-label={maximized ? "Restore output" : "Expand output"}
+                  aria-pressed={maximized}
+                  className="flex size-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                >
+                  <HugeiconsIcon
+                    icon={maximized ? ArrowShrink01Icon : ArrowExpand01Icon}
+                    size={12}
+                    strokeWidth={1.75}
+                  />
+                </button>
               </div>
-              <div className="h-48 min-h-0">
-                <AnsiLog text={selected.output} />
+              <div
+                className="min-h-0 flex-1"
+                style={maximized ? undefined : { height: outputHeight }}
+              >
+                <AnsiLog
+                  text={selected.output}
+                  onClear={() => clearOutput(selected.id)}
+                />
               </div>
             </>
           ) : null}

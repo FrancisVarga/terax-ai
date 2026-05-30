@@ -26,7 +26,14 @@ import { compactModelMessagesDetailed } from "./compact";
 import type { ProviderKeys } from "./keyring";
 import { createProxyFetch } from "./proxyFetch";
 
+// Local providers (lmstudio/mlx/ollama/openai-compatible) hit 127.0.0.1 / LAN,
+// so they need the private-network allowance. Cloud providers hit public hosts
+// only — give them a proxyFetch that keeps the SSRF guard tight (private nets
+// refused). Both route through the Rust `ai_http_stream` command instead of the
+// webview's global fetch, which is blocked by CORS from the tauri:// origin and
+// is the cause of the "Failed to fetch" chat error.
 const localProxyFetch = createProxyFetch({ allowPrivateNetwork: true });
+const cloudProxyFetch = createProxyFetch({ allowPrivateNetwork: false });
 
 const TOOL_LABELS: Record<string, (input: Record<string, unknown>) => string> =
   {
@@ -95,27 +102,37 @@ export async function buildLanguageModel(
   switch (provider) {
     case "openai": {
       const { createOpenAI } = await import("@ai-sdk/openai");
-      built = createOpenAI({ apiKey: key })(resolvedModelId);
+      built = createOpenAI({ apiKey: key, fetch: cloudProxyFetch })(
+        resolvedModelId,
+      );
       break;
     }
     case "anthropic": {
       const { createAnthropic } = await import("@ai-sdk/anthropic");
-      built = createAnthropic({ apiKey: key })(resolvedModelId);
+      built = createAnthropic({ apiKey: key, fetch: cloudProxyFetch })(
+        resolvedModelId,
+      );
       break;
     }
     case "google": {
       const { createGoogleGenerativeAI } = await import("@ai-sdk/google");
-      built = createGoogleGenerativeAI({ apiKey: key })(resolvedModelId);
+      built = createGoogleGenerativeAI({ apiKey: key, fetch: cloudProxyFetch })(
+        resolvedModelId,
+      );
       break;
     }
     case "xai": {
       const { createXai } = await import("@ai-sdk/xai");
-      built = createXai({ apiKey: key })(resolvedModelId);
+      built = createXai({ apiKey: key, fetch: cloudProxyFetch })(
+        resolvedModelId,
+      );
       break;
     }
     case "cerebras": {
       const { createCerebras } = await import("@ai-sdk/cerebras");
-      built = createCerebras({ apiKey: key })(resolvedModelId);
+      built = createCerebras({ apiKey: key, fetch: cloudProxyFetch })(
+        resolvedModelId,
+      );
       break;
     }
     case "deepseek": {
@@ -125,6 +142,7 @@ export async function buildLanguageModel(
         name: "deepseek",
         baseURL: "https://api.deepseek.com",
         apiKey: key,
+        fetch: cloudProxyFetch,
       })(resolvedModelId);
       break;
     }
@@ -135,12 +153,15 @@ export async function buildLanguageModel(
         name: "mistral",
         baseURL: "https://api.mistral.ai/v1",
         apiKey: key,
+        fetch: cloudProxyFetch,
       })(resolvedModelId);
       break;
     }
     case "groq": {
       const { createGroq } = await import("@ai-sdk/groq");
-      built = createGroq({ apiKey: key })(resolvedModelId);
+      built = createGroq({ apiKey: key, fetch: cloudProxyFetch })(
+        resolvedModelId,
+      );
       break;
     }
     case "openrouter": {
@@ -150,6 +171,7 @@ export async function buildLanguageModel(
         name: "openrouter",
         baseURL: "https://openrouter.ai/api/v1",
         apiKey: key,
+        fetch: cloudProxyFetch,
         headers: {
           "HTTP-Referer": "https://terax.ai",
           "X-Title": "Terax",

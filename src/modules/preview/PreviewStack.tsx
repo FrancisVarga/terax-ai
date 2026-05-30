@@ -1,22 +1,22 @@
 import { cn } from "@/lib/utils";
-import type { PreviewTab, Tab } from "@/modules/tabs";
-import { useEffect, useRef } from "react";
+import type { PreviewTab } from "@/modules/tabs";
+import { memo, useEffect, useRef } from "react";
 import { PreviewPane, type PreviewPaneHandle } from "./PreviewPane";
 
 type Props = {
-  tabs: Tab[];
+  /** Pre-filtered, referentially-stable slice (see `useStableTabSlice`). */
+  previews: PreviewTab[];
   activeId: number;
   onUrlChange: (id: number, url: string) => void;
   registerHandle: (id: number, handle: PreviewPaneHandle | null) => void;
 };
 
-export function PreviewStack({
-  tabs,
+export const PreviewStack = memo(function PreviewStack({
+  previews,
   activeId,
   onUrlChange,
   registerHandle,
 }: Props) {
-  const previews = tabs.filter((t): t is PreviewTab => t.kind === "preview");
 
   const registerRef = useRef(registerHandle);
   const urlChangeRef = useRef(onUrlChange);
@@ -84,4 +84,4 @@ export function PreviewStack({
       })}
     </div>
   );
-}
+});

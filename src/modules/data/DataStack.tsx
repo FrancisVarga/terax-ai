@@ -1,5 +1,6 @@
+import { memo } from "react";
 import { cn } from "@/lib/utils";
-import type { DataTab, Tab } from "@/modules/tabs";
+import type { DataTab } from "@/modules/tabs";
 import { lazy, Suspense } from "react";
 
 // Lazy so the AG Grid bundle code-splits out of the startup chunk and loads
@@ -9,7 +10,8 @@ const DataPane = lazy(() =>
 );
 
 type Props = {
-  tabs: Tab[];
+  /** Pre-filtered, referentially-stable slice (see `useStableTabSlice`). */
+  data: DataTab[];
   activeId: number;
 };
 
@@ -19,8 +21,7 @@ type Props = {
  * state, so unmounting on tab switch would discard the user's place in a large
  * table — visibility-only switching preserves it.
  */
-export function DataStack({ tabs, activeId }: Props) {
-  const data = tabs.filter((t): t is DataTab => t.kind === "data");
+export const DataStack = memo(function DataStack({ data, activeId }: Props) {
   if (data.length === 0) return null;
   return (
     <div className="relative h-full w-full">
@@ -43,4 +44,4 @@ export function DataStack({ tabs, activeId }: Props) {
       })}
     </div>
   );
-}
+});

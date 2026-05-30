@@ -1,4 +1,4 @@
-import { redo, undo } from "@codemirror/commands";
+import { indentSelection, redo, undo } from "@codemirror/commands";
 import {
   findNext,
   findPrevious,
@@ -27,6 +27,7 @@ import { initVimGlobals, vimHandlersExtension } from "./lib/vim";
 
 initVimGlobals();
 import { resolveLanguage } from "./lib/languageResolver";
+import { formatWithPrettier } from "./lib/format";
 import { useDocument } from "./lib/useDocument";
 import { inlineCompletion } from "./lib/autocomplete/inlineExtension";
 import { getKey } from "@/modules/ai/lib/keyring";
@@ -45,7 +46,17 @@ export type EditorPaneHandle = {
   /** Apply CodeMirror's undo/redo commands. */
   undo: () => void;
   redo: () => void;
+  /**
+   * Reformat the whole document. Uses Prettier for supported languages and
+   * falls back to CodeMirror's reindent for the rest. Resolves to a status so
+   * the caller can surface success/failure; never throws.
+   */
+  format: () => Promise<FormatResult>;
 };
+
+export type FormatResult =
+  | { ok: true; engine: "prettier" | "reindent" }
+  | { ok: false; message: string };
 
 type Props = {
   path: string;
@@ -262,6 +273,57 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         redo: () => {
           const view = cmRef.current?.view;
           if (view) redo(view);
+        },
+        format: async (): Promise<FormatResult> => {
+          const view = cmRef.current?.view;
+          if (!view) return { ok: false, message: "Editor not ready" };
+
+          const source = view.state.doc.toString();
+          let formatted: string | null;
+          try {
+            formatted = await formatWithPrettier(path, source);
+          } catch (e) {
+            // Prettier throws on syntax errors — surface, don't clobber.
+            return {
+              ok: false,
+              message: e instanceof Error ? e.message : String(e),
+            };
+          }
+
+          // The async import may outlive this pane; re-read the live view and
+          // bail if the buffer changed underneath us (avoid a stale overwrite).
+          const live = cmRef.current?.view;
+          if (!live) return { ok: false, message: "Editor not ready" };
+
+          if (formatted == null) {
+            // No Prettier parser for this language — reindent in place.
+            indentSelection({ state: live.state, dispatch: live.dispatch });
+            return { ok: true, engine: "reindent" };
+          }
+
+          if (live.state.doc.toString() !== source) {
+            return { ok: false, message: "Document changed during format" };
+          }
+          if (formatted === source) {
+            // Already formatted — no transaction, no dirty flag.
+            return { ok: true, engine: "prettier" };
+          }
+
+          // Replace the whole doc in one transaction. This fires CodeMirror's
+          // onChange → useDocument marks the buffer dirty (and autosaves if on).
+          live.dispatch({
+            changes: { from: 0, to: live.state.doc.length, insert: formatted },
+            // Keep the cursor in range; mapping a full-doc replace is lossy, so
+            // clamp to the new end rather than tracking the old offset.
+            selection: {
+              anchor: Math.min(
+                live.state.selection.main.anchor,
+                formatted.length,
+              ),
+            },
+            scrollIntoView: true,
+          });
+          return { ok: true, engine: "prettier" };
         },
       }),
       [path],
