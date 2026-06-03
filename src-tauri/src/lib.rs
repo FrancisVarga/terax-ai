@@ -493,14 +493,15 @@ pub fn run() {
             // bunqueue is disabled.
             bunqueue::start_watchdog(app.handle().clone());
 
-            // Open the OTEL store under the app data dir, then start the local
-            // OTLP/HTTP ingest server (loopback) so apps can export
-            // traces/logs/metrics to the in-app observability dashboard.
-            // Non-fatal: store open falls back to memory; an ingest bind failure
-            // is logged and the dashboard still serves whatever is stored.
+            // Start the local OTEL collector so apps can export
+            // traces/logs/metrics to the in-app observability dashboard. In a
+            // packaged build this spawns the `otel-collector` sidecar (which
+            // owns the SQLite store + OTLP ingest + a query HTTP API) and the
+            // `otel_*` commands proxy to it; in dev (no sidecar staged) it falls
+            // back to an in-process store + ingest server. Non-fatal: any
+            // failure degrades to an in-memory in-process store.
             let otel_state = app.state::<otel::OtelState>();
-            otel_state.init(otel::db_path(app.handle()));
-            otel::start_ingest(app.handle(), &otel_state);
+            otel::start(app.handle(), &otel_state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -653,6 +654,9 @@ pub fn run() {
                 // launch restores the same set of project windows.
                 persist_window_session(app);
                 bunqueue::shutdown(&app.state::<bunqueue::BunqueueState>());
+                // Reap the otel-collector sidecar so it doesn't outlive the app
+                // and keep its loopback ports bound. No-op in in-process mode.
+                app.state::<otel::OtelState>().shutdown();
             }
         });
 }

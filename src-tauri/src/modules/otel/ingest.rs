@@ -29,7 +29,6 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use tauri::{AppHandle, Emitter};
 use tokio::net::TcpListener;
 
 use opentelemetry_proto::tonic::collector::logs::v1::{
@@ -49,22 +48,38 @@ use super::store::OtelStore;
 /// the read limit). OTLP batches are small; 16 MiB is generous for local dev.
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
-/// Event emitted after a batch lands so the dashboard can refresh. Kept tiny:
-/// the frontend re-queries the slice it cares about rather than receiving rows.
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct IngestEvent {
-    /// "traces" | "logs" | "metrics".
-    signal: &'static str,
-    /// Number of rows added by this batch.
-    count: usize,
+/// Notified after each non-empty batch lands so an observer (the in-process
+/// Tauri bridge, or the sidecar's SSE broadcaster) can signal the dashboard.
+/// Decouples ingest from Tauri so the same `serve` runs in the standalone
+/// `otel-collector` sidecar binary, which has no `AppHandle` to `emit` on.
+/// `signal` is "traces" | "logs" | "metrics"; `count` is rows added.
+pub trait IngestSink: Send + Sync + 'static {
+    fn notify(&self, signal: &'static str, count: usize);
+}
+
+/// A closure sink, so callers can pass `|signal, count| { ... }` directly.
+impl<F: Fn(&'static str, usize) + Send + Sync + 'static> IngestSink for F {
+    fn notify(&self, signal: &'static str, count: usize) {
+        self(signal, count);
+    }
 }
 
 /// Shared context handed to every connection handler.
-#[derive(Clone)]
 struct Ctx {
     store: Arc<OtelStore>,
-    app: AppHandle,
+    sink: Arc<dyn IngestSink>,
+}
+
+// Manual Clone: `#[derive(Clone)]` would demand `Arc<dyn IngestSink>: Clone`
+// spelled on the trait object, which it already is, but deriving also bounds
+// the struct on it redundantly; an explicit impl keeps the field cheap-clone.
+impl Clone for Ctx {
+    fn clone(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+            sink: self.sink.clone(),
+        }
+    }
 }
 
 /// Wall-clock now in ms since epoch, monotonic-enough for retention ordering.
@@ -78,7 +93,7 @@ fn now_ms() -> i64 {
 /// Start the ingest server on `addr`. Runs until the process exits. Errors
 /// (e.g. port already bound) are logged and the task ends gracefully so the rest
 /// of the app keeps working without a collector.
-pub async fn serve(addr: SocketAddr, store: Arc<OtelStore>, app: AppHandle) {
+pub async fn serve(addr: SocketAddr, store: Arc<OtelStore>, sink: Arc<dyn IngestSink>) {
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -88,7 +103,7 @@ pub async fn serve(addr: SocketAddr, store: Arc<OtelStore>, app: AppHandle) {
     };
     log::info!(target: "otel", "OTLP/HTTP ingest listening on http://{addr}");
 
-    let ctx = Ctx { store, app };
+    let ctx = Ctx { store, sink };
     loop {
         let (stream, _peer) = match listener.accept().await {
             Ok(v) => v,
@@ -192,7 +207,7 @@ fn emit(ctx: &Ctx, signal: &'static str, count: usize) {
     if count == 0 {
         return;
     }
-    let _ = ctx.app.emit("terax:otel-ingest", IngestEvent { signal, count });
+    ctx.sink.notify(signal, count);
 }
 
 /// A 200 with the matching-encoding empty `Export*ServiceResponse` body, which

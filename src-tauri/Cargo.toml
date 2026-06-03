@@ -30,6 +30,14 @@ path = "src/main.rs"
 name = "terax-dbg"
 path = "src/bin/terax-dbg.rs"
 
+# OTEL collector sidecar. A standalone OTLP ingest + query HTTP API + SSE server
+# bundled as a Tauri `externalBin` (see tauri.conf.json). Shares the collector
+# core with the in-process path via `terax_lib::modules::otel::collector`. Built
+# per target by `scripts/build-otel-sidecar.mjs` and staged into `binaries/`.
+[[bin]]
+name = "otel-collector"
+path = "src/bin/otel-collector.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -108,6 +116,9 @@ tauri-plugin-dialog = "2"
 reqwest = { version = "0.12", default-features = false, features = [
 	"rustls-tls",
 	"stream",
+	# `json` powers the otel sidecar query proxy (POST a QueryRequest, parse the
+	# JSON response); `stream` (already present) drives the `/events` SSE bridge.
+	"json",
 ] }
 bytes = "1"
 futures-util = "0.3"
@@ -119,6 +130,9 @@ tokio = { version = "1", default-features = false, features = [
 	"time",
 	"macros",
 	"process",
+	# `sync` provides the broadcast channel the otel-collector sidecar uses to
+	# fan ingest notifications out to its `/events` SSE subscribers.
+	"sync",
 ] }
 tempfile = "3"
 notify = "8.2.0"

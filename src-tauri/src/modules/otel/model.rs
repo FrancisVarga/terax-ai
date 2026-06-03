@@ -96,7 +96,8 @@ pub struct MetricRow {
 }
 
 /// Summary row for the traces list: one entry per trace id, aggregated.
-#[derive(Debug, Clone, Serialize)]
+/// `Deserialize` too so the sidecar proxy can parse the query response back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TraceSummary {
     pub trace_id: String,
@@ -113,7 +114,7 @@ pub struct TraceSummary {
 }
 
 /// Counts shown in the dashboard header / used to drive empty states.
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct OtelCounts {
     pub traces: i64,
@@ -125,7 +126,8 @@ pub struct OtelCounts {
 }
 
 /// Filter args for the logs query. All optional; absent = no constraint.
-#[derive(Debug, Clone, Deserialize, Default)]
+/// `Serialize` too: the sidecar proxy re-serializes it onto the query HTTP body.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LogQuery {
     pub service: Option<String>,
@@ -143,7 +145,7 @@ pub struct LogQuery {
 }
 
 /// Sort order for the traces list.
-#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum TraceSort {
     /// Newest first (by start time). Default.
@@ -154,7 +156,7 @@ pub enum TraceSort {
 }
 
 /// Filter args for the traces query.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TraceQuery {
     pub service: Option<String>,
@@ -175,7 +177,7 @@ pub struct TraceQuery {
 
 /// One directed edge of the service dependency graph: calls from one service to
 /// another, derived from cross-service parent/child span links.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceEdge {
     pub from: String,
@@ -190,7 +192,7 @@ pub struct ServiceEdge {
 }
 
 /// One node of the service graph: a service plus its own call/error totals.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceNode {
     pub service: String,
@@ -199,7 +201,7 @@ pub struct ServiceNode {
 }
 
 /// The service dependency graph for the mesh view.
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceMap {
     pub nodes: Vec<ServiceNode>,
@@ -208,7 +210,7 @@ pub struct ServiceMap {
 
 /// One aggregated group for the attribute-breakdown ("user / tenant") dashboard.
 /// Spans are grouped by the value of a chosen attribute key (e.g. `tenant.id`).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttrGroup {
     /// The attribute value this group represents (e.g. a tenant id).
@@ -226,7 +228,7 @@ pub struct AttrGroup {
 
 /// One aggregated database statement for the DB dashboard. Rows are grouped by
 /// the normalized `db.statement` (or span name when absent) of `db.system` spans.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DbStatement {
     pub statement: String,

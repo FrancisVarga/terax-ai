@@ -19,7 +19,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::modules::sync::MutexExt;
 
@@ -775,7 +775,7 @@ impl OtelStore {
 
 /// Result of a user query: column headers + JSON-typed cells, plus whether the
 /// row cap clipped the result.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryResult {
     pub columns: Vec<String>,
