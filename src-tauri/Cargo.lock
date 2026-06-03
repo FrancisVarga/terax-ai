@@ -4982,7 +4982,7 @@ dependencies = [
 
 [[package]]
 name = "otel-collector"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -7755,7 +7755,7 @@ dependencies = [
 
 [[package]]
 name = "terax"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "arrow 53.4.1",
  "async-trait",
