@@ -29,7 +29,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-
+sast-rnd
 *.tsbuildinfo
 .env
 
@@ -44,3 +44,7 @@ src-tauri/binaries/*
 # Must NOT be committed: its hardcoded VS BuildTools paths break CI's native
 # compiler detection (cc-rs cannot parse the space in "C:\Program Files").
 src-tauri/.cargo/
+
+# Compiled Vite config artifacts (source is vite.config.ts)
+vite.config.js
+vite.config.d.ts

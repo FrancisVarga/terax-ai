@@ -1,8 +1,6 @@
 import { cn } from "@/lib/utils";
 import {
   BotIcon,
-  Clock01Icon,
-  EyeIcon,
   GithubIcon,
   PlaySquareIcon,
   SparklesIcon,
@@ -30,8 +28,6 @@ export function RightSidebarRail({ activeView, onSelectView }: Props) {
     { id: "agents", label: "Agents", icon: BotIcon },
     { id: "tasks", label: "Tasks", icon: PlaySquareIcon },
     { id: "actions", label: "Actions", icon: GithubIcon },
-    { id: "history", label: "History", icon: Clock01Icon },
-    { id: "preview", label: "Preview", icon: EyeIcon },
   ];
 
   return (
