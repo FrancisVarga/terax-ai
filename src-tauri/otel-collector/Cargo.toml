@@ -1,0 +1,30 @@
+[package]
+name = "otel-collector"
+version = "0.21.0"
+description = "Standalone OTEL collector sidecar for Terax"
+authors = ["crynta"]
+license = "Apache-2.0"
+edition = "2021"
+
+[[bin]]
+name = "otel-collector"
+path = "src/main.rs"
+
+[dependencies]
+# The shared collector core lives in the `terax` package's library target,
+# whose lib name is `terax_lib`. `package = "terax"` points at the crate; the
+# code refers to it by its lib name (`terax_lib::...`).
+terax_lib = { path = "..", package = "terax" }
+serde_json = "1"
+bytes = "1"
+futures-util = "0.3"
+tokio = { version = "1", default-features = false, features = [
+	"rt-multi-thread",
+	"net",
+	"macros",
+	# Broadcast channel fanning ingest notifications to `/events` subscribers.
+	"sync",
+] }
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"

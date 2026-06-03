@@ -4981,6 +4981,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "otel-collector"
+version = "0.21.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body-util",
+ "hyper 1.10.0",
+ "hyper-util",
+ "serde_json",
+ "terax",
+ "tokio",
+]
+
+[[package]]
 name = "outref"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

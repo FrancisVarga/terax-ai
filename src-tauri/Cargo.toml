@@ -1,3 +1,13 @@
+# The `otel-collector` sidecar is a separate workspace member (not a `[[bin]]` of
+# `terax`) so the WiX MSI bundler harvests it only once — as the Tauri
+# `externalBin` — instead of also seeing a crate-bin twin under
+# `target/release/`, which tripped ICE30 ("installed by two different
+# components"). NSIS was unaffected; MSI `light.exe` ICE validation was the only
+# failure. The member shares the collector core via a path dep on `terax_lib`.
+[workspace]
+members = [".", "otel-collector"]
+resolver = "2"
+
 [package]
 name = "terax"
 version = "0.21.0"
@@ -29,14 +39,6 @@ path = "src/main.rs"
 [[bin]]
 name = "terax-dbg"
 path = "src/bin/terax-dbg.rs"
-
-# OTEL collector sidecar. A standalone OTLP ingest + query HTTP API + SSE server
-# bundled as a Tauri `externalBin` (see tauri.conf.json). Shares the collector
-# core with the in-process path via `terax_lib::modules::otel::collector`. Built
-# per target by `scripts/build-otel-sidecar.mjs` and staged into `binaries/`.
-[[bin]]
-name = "otel-collector"
-path = "src/bin/otel-collector.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

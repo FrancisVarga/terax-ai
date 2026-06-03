@@ -8,11 +8,13 @@
  * bundler strips the triple at install and the app resolves the bare name
  * (`otel-collector`) next to its own executable.
  *
- * The sidecar is a `[[bin]]` in the same `src-tauri` crate (it links `terax_lib`
- * for the shared collector core). It is built with DEFAULT features only — NOT
- * `--features sql` — so the DuckDB C++ amalgamation (the ~1h build hot path, see
- * Cargo.toml + issue #72) is never pulled into the sidecar. The sidecar only
- * needs rusqlite + hyper + opentelemetry-proto, all in the default build.
+ * The sidecar is its OWN workspace-member crate (`src-tauri/otel-collector/`)
+ * that path-depends on `terax_lib` for the shared collector core. It is built
+ * with `terax_lib`'s DEFAULT features only — NOT `--features sql` — so the
+ * DuckDB C++ amalgamation (the ~1h build hot path, see Cargo.toml + issue #72)
+ * is never pulled into the sidecar. The sidecar only needs rusqlite + hyper +
+ * opentelemetry-proto, all in the default build. The workspace shares one
+ * `target/` dir, so the output path is unchanged.
  *
  * Run via: `pnpm build:otel-sidecar` (called from `pretauri`). Run BEFORE
  * `pnpm tauri build`. Cross-compile by passing --target=<triple>; defaults to
@@ -20,7 +22,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -56,23 +58,17 @@ console.log(`Building ${BIN_NAME} sidecar for ${triple}`);
 
 const staged = join(OUT_DIR, `${BIN_NAME}-${triple}${EXE}`);
 
-// Chicken-and-egg: `otel-collector` is itself a `[[bin]]` of the `src-tauri`
-// crate AND listed in `tauri.conf.json` `externalBin`. `tauri-build`'s build.rs
-// asserts every externalBin file exists at compile time — for ANY target in the
-// crate, including this bin — so the bin cannot bootstrap itself. Stage a
-// placeholder so build.rs passes, then overwrite it with the real output below.
-// (The bun sidecars in build-sidecars.mjs avoid this because they are compiled
-// by `bun`, not `cargo`, and never run the crate's build.rs.)
-if (!existsSync(staged)) {
-  writeFileSync(staged, "");
-}
-
+// `otel-collector` is now a separate workspace-member crate, so it no longer
+// runs `terax`'s `build.rs` (which asserts every externalBin exists). No
+// placeholder bootstrap is needed: just build the member package and stage it.
+//
 // Default features only (no `sql`/DuckDB). `--target` makes the output path
-// deterministic across host and cross builds.
+// deterministic across host and cross builds. Run from `src-tauri` so the
+// workspace is found; `-p otel-collector` selects the member package.
 const buildArgs = [
   "build",
   "--release",
-  "--bin",
+  "-p",
   BIN_NAME,
   "--target",
   triple,
