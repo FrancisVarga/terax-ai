@@ -1879,21 +1879,26 @@ pub async fn ssh_git_resolve_repo(
     if repo_root.is_empty() {
         return Ok(None);
     }
-    let branch_out = remote_git(
-        &state,
-        &alias,
-        &repo_root,
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-    )
-    .await?;
+    // The branch and upstream lookups are independent once the root is known, so
+    // run them concurrently — their SSH round-trips overlap on the multiplexed
+    // transport (wall-clock ≈ one RTT instead of two).
+    let (branch_out, upstream_out) = tokio::join!(
+        remote_git(
+            &state,
+            &alias,
+            &repo_root,
+            &["rev-parse", "--abbrev-ref", "HEAD"],
+        ),
+        remote_git(
+            &state,
+            &alias,
+            &repo_root,
+            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        ),
+    );
+    let branch_out = branch_out?;
+    let upstream_out = upstream_out?;
     let branch = branch_out.stdout_string().trim().to_string();
-    let upstream_out = remote_git(
-        &state,
-        &alias,
-        &repo_root,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-    )
-    .await?;
     let upstream = if upstream_out.ok() {
         let u = upstream_out.stdout_string().trim().to_string();
         if u.is_empty() {
@@ -2096,11 +2101,14 @@ pub async fn ssh_fs_grep(
             let root_trim = root.trim_end_matches('/');
             format!("{root_trim}/{}", rel.replace('\\', "/"))
         };
-        files.insert(abs.clone());
+        // Cap first: past the limit we stop counting/cloning entirely, so
+        // `files_scanned` reflects the streamed prefix we actually kept rather
+        // than every line we'd otherwise allocate a `HashSet` entry for.
         if hits.len() >= cap {
             truncated = true;
             break;
         }
+        files.insert(abs.clone());
         let rel = remote_rel(&root, &abs);
         hits.push(GrepHit {
             path: abs,
