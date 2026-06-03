@@ -24,8 +24,11 @@ jobs:
           # `--features sql` compiles DuckDB into the release (CSV/Parquet SQL
           # editor). DuckDB is OFF by default so `tauri dev` skips its bundled
           # C++ amalgamation (issue #72); release builds opt back in here.
+          # --verbose un-suppresses WiX light.exe output so a bundle-stage
+          # failure surfaces its real LGHT/ICE error instead of the generic
+          # "failed to run light.exe" wrapper (diagnosing #90).
           - platform: windows-latest
-            args: "--features sql"
+            args: "--features sql --verbose"
             rust-target: ""
 
     runs-on: ${{ matrix.platform }}
