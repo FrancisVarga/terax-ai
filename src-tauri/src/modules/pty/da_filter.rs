@@ -29,13 +29,26 @@ impl DaFilter {
         }
     }
 
+    /// True when the filter holds no partial sequence, so a chunk known to be
+    /// ESC-free can bypass it entirely (the reader appends straight to its send
+    /// buffer). Once a CSI is split across reads it lives in `hold`, so this
+    /// returns false and the slow path must run.
+    #[inline]
+    pub fn is_idle(&self) -> bool {
+        matches!(self.state, State::Idle) && self.hold.is_empty()
+    }
+
+    /// `has_esc` is the caller's single precomputed `input.contains(&ESC)` so the
+    /// reader doesn't scan the same buffer here and in the agent detector. When
+    /// idle and ESC-free there is nothing to parse — straight memcpy.
     pub fn process<F: FnMut(&[u8])>(
         &mut self,
         input: &[u8],
+        has_esc: bool,
         out: &mut Vec<u8>,
         mut respond: F,
     ) {
-        if matches!(self.state, State::Idle) && !input.contains(&ESC) {
+        if matches!(self.state, State::Idle) && !has_esc {
             out.extend_from_slice(input);
             return;
         }
@@ -107,7 +120,8 @@ mod tests {
     fn run(filter: &mut DaFilter, input: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
         let mut out = Vec::new();
         let mut replies = Vec::new();
-        filter.process(input, &mut out, |r| replies.push(r.to_vec()));
+        let has_esc = input.contains(&ESC);
+        filter.process(input, has_esc, &mut out, |r| replies.push(r.to_vec()));
         (out, replies)
     }
 
@@ -216,6 +230,21 @@ mod tests {
         let (out, replies) = run(&mut f, b"\x1b[?6c");
         assert_eq!(out, b"\x1b[?6c");
         assert!(replies.is_empty());
+    }
+
+    #[test]
+    fn is_idle_tracks_partial_csi_across_chunks() {
+        let mut f = DaFilter::new();
+        assert!(f.is_idle(), "fresh filter is idle");
+        // Feed a bare ESC — filter now holds a partial sequence and must NOT be
+        // bypassed on the next read, or the held ESC would be dropped.
+        run(&mut f, b"\x1b");
+        assert!(!f.is_idle(), "holding partial sequence: not bypassable");
+        run(&mut f, b"[");
+        assert!(!f.is_idle(), "inside CSI: not bypassable");
+        let (_, replies) = run(&mut f, b"c");
+        assert_eq!(replies, vec![DA1_REPLY.to_vec()]);
+        assert!(f.is_idle(), "sequence complete: idle again");
     }
 
     #[test]

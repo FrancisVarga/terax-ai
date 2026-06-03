@@ -16,6 +16,10 @@ use crate::modules::workspace::WorkspaceEnv;
 
 const AGENT_EVENT: &str = "terax:agent-signal";
 
+// ESC (0x1b) introduces every escape/CSI/OSC sequence. The reader scans each
+// read for it once and hands the result to both filters (see the read loop).
+const ESC: u8 = 0x1b;
+
 // The reader coalesces a short window for bursts so we send chunks, not single
 // bytes (see the inline `flush` closure in `spawn`).
 const FLUSH_COALESCE: Duration = Duration::from_millis(4);
@@ -178,15 +182,23 @@ pub fn spawn(
             let mut dropped_bytes: u64 = 0;
             let mut logged_first = false;
 
-            // Send whatever is buffered, applying the same latency-vs-throughput
-            // policy the old flusher used: a small payload (interactive echo) is
-            // sent immediately so keypress→glyph isn't padded; a burst pays the
-            // coalesce window to batch more output into one Channel send.
+            // Send whatever is buffered with a latency-vs-throughput policy:
+            //   • tiny payload (≤ echo threshold): interactive echo — send now,
+            //     so keypress→glyph isn't padded by the coalesce window.
+            //   • mid-size payload (echo threshold < n < a full read): a few
+            //     small writes arrived close together — pay the coalesce window
+            //     once to batch the likely follow-up into one Channel send.
+            //   • already large (≥ READ_BUF): a sustained burst already filled a
+            //     full read worth of bytes. It's a fat IPC payload as-is; do NOT
+            //     sleep. Sleeping here would block the read loop for 4ms before
+            //     the next `reader.read()`, capping per-shell throughput at
+            //     READ_BUF/FLUSH_COALESCE. Send immediately and let the pipe,
+            //     not the timer, set the rate.
             let flush = |pending: &mut Vec<u8>| -> bool {
                 if pending.is_empty() {
                     return true;
                 }
-                if pending.len() > FLUSH_ECHO_THRESHOLD {
+                if pending.len() > FLUSH_ECHO_THRESHOLD && pending.len() < READ_BUF {
                     thread::sleep(FLUSH_COALESCE);
                 }
                 let chunk = std::mem::take(pending);
@@ -197,6 +209,19 @@ pub fn spawn(
                         false
                     }
                 }
+            };
+
+            // Append `bytes` to `pending`, enforcing the backpressure cap. On
+            // overflow the whole pending buffer is replaced by an SGR-reset
+            // notice — slicing a partial prefix would cut a CSI sequence in half
+            // and corrupt xterm's screen state.
+            let push_pending = |pending: &mut Vec<u8>, bytes: &[u8], dropped: &mut u64| {
+                if pending.len() + bytes.len() > MAX_PENDING {
+                    *dropped += pending.len() as u64;
+                    pending.clear();
+                    pending.extend_from_slice(OVERFLOW_NOTICE);
+                }
+                pending.extend_from_slice(bytes);
             };
 
             loop {
@@ -211,24 +236,33 @@ pub fn spawn(
                             // diagnosing slow terminal opens.
                             log::info!("pty first byte after {}ms", spawn_at.elapsed().as_millis());
                         }
-                        agent_detect.process(&buf[..n], |t| {
+                        // Single ESC scan for this read, shared by both the agent
+                        // detector and the DA filter so the hot path walks the
+                        // buffer once instead of three times.
+                        let chunk = &buf[..n];
+                        let has_esc = chunk.contains(&ESC);
+                        agent_detect.process(chunk, has_esc, |t| {
                             let _ = app_reader.emit(AGENT_EVENT, t.into_signal(id));
                         });
-                        filtered.clear();
-                        da_filter.process(&buf[..n], &mut filtered, |reply| {
-                            if let Ok(mut w) = writer_for_da.lock() {
-                                let _ = w.write_all(reply);
+                        // Fast path: no ESC and the DA filter holds no partial
+                        // sequence, so there's nothing to parse or strip. Append
+                        // the raw read straight to `pending` — one copy, skipping
+                        // the intermediate `filtered` buffer entirely (this is the
+                        // dominant case for bulk program output: logs, `cat`, etc).
+                        if !has_esc && da_filter.is_idle() {
+                            push_pending(&mut pending, chunk, &mut dropped_bytes);
+                        } else {
+                            filtered.clear();
+                            da_filter.process(chunk, has_esc, &mut filtered, |reply| {
+                                if let Ok(mut w) = writer_for_da.lock() {
+                                    let _ = w.write_all(reply);
+                                }
+                            });
+                            if filtered.is_empty() {
+                                continue;
                             }
-                        });
-                        if filtered.is_empty() {
-                            continue;
+                            push_pending(&mut pending, &filtered, &mut dropped_bytes);
                         }
-                        if pending.len() + filtered.len() > MAX_PENDING {
-                            dropped_bytes += pending.len() as u64;
-                            pending.clear();
-                            pending.extend_from_slice(OVERFLOW_NOTICE);
-                        }
-                        pending.extend_from_slice(&filtered);
                         if !flush(&mut pending) {
                             break;
                         }

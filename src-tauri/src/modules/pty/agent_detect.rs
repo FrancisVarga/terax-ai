@@ -80,8 +80,11 @@ impl AgentDetector {
     /// Feed a chunk of raw PTY output. Transitions come only from OSC sequences
     /// (`133` prompt boundaries, our `777` hook marker), never from raw output,
     /// so a TUI agent that repaints continuously never flaps working/waiting.
-    pub fn process<F: FnMut(Transition)>(&mut self, input: &[u8], mut emit: F) {
-        if self.state == State::Ground && !input.contains(&ESC) {
+    ///
+    /// `has_esc` is the caller's single precomputed `input.contains(&ESC)`,
+    /// shared with the DA filter so the hot read path scans the buffer once.
+    pub fn process<F: FnMut(Transition)>(&mut self, input: &[u8], has_esc: bool, mut emit: F) {
+        if self.state == State::Ground && !has_esc {
             return;
         }
 
@@ -252,7 +255,8 @@ mod tests {
 
     fn run(d: &mut AgentDetector, input: &[u8]) -> Vec<Transition> {
         let mut out = Vec::new();
-        d.process(input, |t| out.push(t));
+        let has_esc = input.contains(&ESC);
+        d.process(input, has_esc, |t| out.push(t));
         out
     }
 
