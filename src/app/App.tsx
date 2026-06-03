@@ -346,14 +346,21 @@ export default function App() {
   // the code editor. Saving it re-ingests into the runtime store + applies live.
   useThemeIngest({ tabsRef, openFileTab });
 
-  // Project windows (opened via `?dir=`) pin the explorer to the project root
-  // so a `cd` inside a shell no longer drags the file tree off the project.
-  // A `ssh://…` launch dir is remote — the local explorer can't pin to it.
-  const pinnedExplorerRoot = useMemo<string | null>(() => {
-    if (!hasExplicitLaunchDir()) return null;
-    const dir = getLaunchDir();
-    return dir && !isRemote(dir) ? dir : null;
-  }, []);
+  // A window is "pinned to a project" when the explorer root is locked to a
+  // chosen folder and a `cd` inside a shell no longer drags the file tree off
+  // it. Two ways this gets set:
+  //   1. Launch-time: a project window opened via `?dir=` (seeded below).
+  //   2. Runtime: opening a project in THIS window (see `openProject`), which
+  //      previously only `cd`-ed a terminal and let the tree mirror the cwd.
+  // A `ssh://…` dir is remote — the local explorer can't pin to it, so it
+  // never becomes a pin. The pin is `/`-normalized to match launchDir.ts.
+  const [pinnedExplorerRoot, setPinnedExplorerRoot] = useState<string | null>(
+    () => {
+      if (!hasExplicitLaunchDir()) return null;
+      const dir = getLaunchDir();
+      return dir && !isRemote(dir) ? dir : null;
+    },
+  );
 
   const { explorerRoot, inheritedCwdForNewTab } = useWorkspaceCwd(
     activeTab,
@@ -361,6 +368,10 @@ export default function App() {
     launchCwd ?? home,
     pinnedExplorerRoot,
   );
+
+  // True when this window is dedicated to a project (explorer root pinned to a
+  // local folder). Drives the "Files" rail highlight and the fixed file tree.
+  const isProjectWindow = pinnedExplorerRoot !== null;
 
   // Reflect the active project (the explorer root's folder name) in the OS
   // window title so taskbar/alt-tab entries are distinguishable per project.
@@ -537,12 +548,16 @@ export default function App() {
     [newTab],
   );
 
-  // Open a project in the current window: spawn a terminal tab rooted at the
-  // project folder and `cd` into it. The explorer root is derived from the
-  // active terminal's cwd (see useWorkspaceCwd), so the file tree repoints to
-  // the project automatically — no separate root setter needed.
+  // Open a project in the current window: pin the explorer to the project
+  // folder (so the file tree stays put even when a shell `cd`s elsewhere) and
+  // spawn a terminal tab rooted there. The pin — not the active terminal's cwd
+  // — now governs the explorer root (see useWorkspaceCwd), which is what keeps
+  // the left sidebar fixed on the project.
   const openProject = useCallback(
     (project: Project) => {
+      if (!isRemote(project.path)) {
+        setPinnedExplorerRoot(project.path.replace(/\\/g, "/"));
+      }
       cdInNewTab(project.path);
     },
     [cdInNewTab],
@@ -1045,6 +1060,7 @@ export default function App() {
                 view={sidebarView}
                 onSelectView={persistSidebarView}
                 explorerRef={explorerRef}
+                isProject={isProjectWindow}
                 rootPath={remoteRoot ?? explorerRoot}
                 remoteActive={remoteRoot !== null}
                 remoteAlias={remoteAlias}

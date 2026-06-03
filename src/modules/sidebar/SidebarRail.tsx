@@ -23,9 +23,19 @@ type Props = {
   activeView: SidebarViewId;
   onSelectView: (view: SidebarViewId) => void;
   changedCount: number;
+  /**
+   * True when this window is pinned to a project. Marks the "Files" rail item
+   * with an accent so the window reads as project-scoped at a glance.
+   */
+  isProject: boolean;
 };
 
-export function SidebarRail({ activeView, onSelectView, changedCount }: Props) {
+export function SidebarRail({
+  activeView,
+  onSelectView,
+  changedCount,
+  isProject,
+}: Props) {
   const items: RailItem[] = [
     { id: "explorer", label: "Files", icon: FolderTreeIcon },
     {
@@ -48,6 +58,10 @@ export function SidebarRail({ activeView, onSelectView, changedCount }: Props) {
       {items.map((item) => {
         const isActive = item.id === activeView;
         const showBadge = !!item.badge && item.badge > 0;
+        // The Files item gets a primary accent in a project window so the rail
+        // signals "this window is a project" — strongest when Files is the
+        // active view, a softer tint when it's not.
+        const isProjectFiles = isProject && item.id === "explorer";
         return (
           <button
             key={item.id}
@@ -61,15 +75,25 @@ export function SidebarRail({ activeView, onSelectView, changedCount }: Props) {
               isActive
                 ? "bg-foreground/[0.07] text-foreground dark:bg-foreground/[0.09]"
                 : "text-muted-foreground hover:bg-foreground/[0.045] hover:text-foreground",
+              isProjectFiles &&
+                (isActive
+                  ? "bg-primary/15 text-primary ring-1 ring-inset ring-primary/30 dark:bg-primary/20"
+                  : "text-primary/90 hover:bg-primary/10 hover:text-primary"),
             )}
           >
             <HugeiconsIcon
               icon={item.icon}
               size={14}
-              strokeWidth={isActive ? 2 : 1.75}
+              strokeWidth={isActive || isProjectFiles ? 2 : 1.75}
               className="shrink-0 transition-[stroke-width] duration-150"
             />
             <span>{item.label}</span>
+            {isProjectFiles ? (
+              <span
+                className="absolute right-1 top-1 size-1.5 rounded-full bg-primary"
+                aria-hidden
+              />
+            ) : null}
             {showBadge ? (
               <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-border/60 bg-card px-1 text-[9px] font-semibold leading-none tabular-nums text-muted-foreground/95">
                 {item.badge! > 99 ? "99+" : item.badge}

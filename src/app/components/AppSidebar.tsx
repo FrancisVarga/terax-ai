@@ -19,6 +19,8 @@ type AppSidebarProps = {
   view: SidebarViewId;
   onSelectView: (view: SidebarViewId) => void;
   explorerRef: RefObject<FileExplorerHandle | null>;
+  /** True when this window is pinned to a project; highlights the Files rail. */
+  isProject: boolean;
   /** Explorer root — remote SFTP root when browsing remotely, else local. */
   rootPath: string | null;
   /** Truthy while a remote browse is active (enables the exit-remote affordance). */
@@ -53,6 +55,7 @@ export function AppSidebar({
   view,
   onSelectView,
   explorerRef,
+  isProject,
   rootPath,
   remoteActive,
   remoteAlias,
@@ -111,6 +114,7 @@ export function AppSidebar({
         activeView={view}
         onSelectView={onSelectView}
         changedCount={sourceControl.changedCount}
+        isProject={isProject}
       />
     </div>
   );
