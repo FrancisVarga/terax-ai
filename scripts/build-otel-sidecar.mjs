@@ -22,7 +22,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -58,10 +58,19 @@ console.log(`Building ${BIN_NAME} sidecar for ${triple}`);
 
 const staged = join(OUT_DIR, `${BIN_NAME}-${triple}${EXE}`);
 
-// `otel-collector` is now a separate workspace-member crate, so it no longer
-// runs `terax`'s `build.rs` (which asserts every externalBin exists). No
-// placeholder bootstrap is needed: just build the member package and stage it.
-//
+// Bootstrap: `otel-collector` is its own crate, but it path-depends on
+// `terax_lib`. Building `-p otel-collector` therefore compiles the `terax`
+// package, whose `tauri-build` build.rs asserts EVERY `externalBin` file
+// exists — including `otel-collector` itself. So the staged sidecar must be
+// present before this build, even though this build is what produces it.
+// Stage a zero-byte placeholder so build.rs passes, then overwrite it with the
+// real output below. (Extracting to a separate crate fixed the WiX MSI ICE30
+// duplicate-component error, but the build-time externalBin assertion is a
+// separate concern and still needs this placeholder.)
+if (!existsSync(staged)) {
+  writeFileSync(staged, "");
+}
+
 // Default features only (no `sql`/DuckDB). `--target` makes the output path
 // deterministic across host and cross builds. Run from `src-tauri` so the
 // workspace is found; `-p otel-collector` selects the member package.
