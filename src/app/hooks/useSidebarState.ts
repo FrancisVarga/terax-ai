@@ -74,9 +74,9 @@ function readRightSidebarView(): RightSidebarViewId {
     const stored = window.localStorage.getItem(RIGHT_SIDEBAR_VIEW_STORAGE_KEY);
     if (
       stored === "ai" ||
-      stored === "agents" ||
       stored === "tasks" ||
-      stored === "actions"
+      stored === "actions" ||
+      stored === "issues"
     )
       return stored;
   } catch {

@@ -1,6 +1,1 @@
-export type RightSidebarViewId =
-  | "ai"
-  | "agents"
-  | "tasks"
-  | "actions"
-  | "issues";
+export type RightSidebarViewId = "ai" | "tasks" | "actions" | "issues";

@@ -1099,8 +1099,6 @@ export default function App() {
                 view={rightSidebarView}
                 onSelectView={selectRightSidebarView}
                 hasComposer={hasComposer}
-                onActivateAgent={onActivateAgent}
-                onActivateLocalAgent={onActivateLocalAgent}
               />
             }
           />

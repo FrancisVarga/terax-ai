@@ -1,6 +1,5 @@
 import { cn } from "@/lib/utils";
 import {
-  BotIcon,
   GithubIcon,
   PlaySquareIcon,
   RecordIcon,
@@ -26,7 +25,6 @@ type Props = {
 export function RightSidebarRail({ activeView, onSelectView }: Props) {
   const items: RailItem[] = [
     { id: "ai", label: "AI", icon: SparklesIcon },
-    { id: "agents", label: "Agents", icon: BotIcon },
     { id: "tasks", label: "Tasks", icon: PlaySquareIcon },
     { id: "actions", label: "Actions", icon: GithubIcon },
     { id: "issues", label: "Issues", icon: RecordIcon },

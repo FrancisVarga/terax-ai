@@ -1,5 +1,4 @@
 import {
-  AgentsPanel,
   AiPanel,
   RightSidebarRail,
   type RightSidebarViewId,
@@ -13,8 +12,6 @@ type AppRightSidebarProps = {
   view: RightSidebarViewId;
   onSelectView: (view: RightSidebarViewId) => void;
   hasComposer: boolean;
-  onActivateAgent: (tabId: number, leafId: number) => void;
-  onActivateLocalAgent: () => void;
 };
 
 /**
@@ -26,18 +23,11 @@ export function AppRightSidebar({
   view,
   onSelectView,
   hasComposer,
-  onActivateAgent,
-  onActivateLocalAgent,
 }: AppRightSidebarProps) {
   return (
     <div className="flex h-full min-h-0 flex-col border-l border-border/60 bg-card">
       <div className="min-h-0 flex-1">
-        {view === "agents" ? (
-          <AgentsPanel
-            onActivate={onActivateAgent}
-            onActivateLocal={onActivateLocalAgent}
-          />
-        ) : view === "tasks" ? (
+        {view === "tasks" ? (
           <TaskRunnerPanel />
         ) : view === "actions" ? (
           <GitHubActionsPanel />
