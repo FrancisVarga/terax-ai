@@ -24,10 +24,11 @@ import {
   vimCompartment,
 } from "./lib/extensions";
 import { initVimGlobals, vimHandlersExtension } from "./lib/vim";
+import { vscodeKeymap } from "./lib/vscodeKeymap";
 
 initVimGlobals();
 import { resolveLanguage } from "./lib/languageResolver";
-import { formatWithPrettier } from "./lib/format";
+import { formatWithPrettierAsync } from "./lib/formatAsync";
 import { useDocument } from "./lib/useDocument";
 import { inlineCompletion } from "./lib/autocomplete/inlineExtension";
 import { getKey } from "@/modules/ai/lib/keyring";
@@ -141,6 +142,11 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
           close: () => onCloseRef.current?.(),
         })),
         ...buildSharedExtensions(),
+        // VSCode-default key bindings. Mounted at Prec.high so they win over
+        // basicSetup's emacs-flavored defaultKeymap (e.g. Ctrl+D → select next
+        // occurrence, not deleteCharForward) but still sit below vim, which is
+        // elevated to Prec.highest above when vim mode is on.
+        Prec.high(keymap.of([...vscodeKeymap])),
         languageCompartment.of([]),
         inlineCompletion({
           getPrefs: () => {
@@ -281,7 +287,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
           const source = view.state.doc.toString();
           let formatted: string | null;
           try {
-            formatted = await formatWithPrettier(path, source);
+            formatted = await formatWithPrettierAsync(path, source);
           } catch (e) {
             // Prettier throws on syntax errors — surface, don't clobber.
             return {

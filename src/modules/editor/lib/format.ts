@@ -34,7 +34,7 @@ const yaml: PluginLoader = () =>
 const graphql: PluginLoader = () =>
   import("prettier/plugins/graphql").then((m) => m.default as Plugin);
 
-type PrettierSpec = {
+export type PrettierSpec = {
   /** Prettier parser name (the `parser` option). */
   parser: string;
   /** Plugin loaders required for this parser. */
@@ -84,27 +84,27 @@ function extOf(path: string): string | null {
   return base.slice(dot + 1);
 }
 
+/** Look up the Prettier spec for a path, or null if unsupported. */
+export function prettierSpecFor(path: string): PrettierSpec | null {
+  const ext = extOf(path);
+  return (ext ? PRETTIER_BY_EXT[ext] : undefined) ?? null;
+}
+
 /** True when `path` has a Prettier-backed formatter (used to gate the UI). */
 export function canPrettierFormat(path: string): boolean {
-  const ext = extOf(path);
-  return ext != null && ext in PRETTIER_BY_EXT;
+  return prettierSpecFor(path) != null;
 }
 
 /**
- * Format `source` with Prettier if the file extension is supported, else
- * return `null` to signal the caller should fall back to CodeMirror reindent.
+ * Run Prettier for a resolved spec. Shared by the main-thread path and the Web
+ * Worker — keep it free of DOM/window references so it runs in both contexts.
  *
- * Throws if Prettier itself fails (e.g. a syntax error in the source) — the
- * caller surfaces this rather than silently leaving the buffer unchanged.
+ * Throws if Prettier itself fails (e.g. a syntax error in the source).
  */
-export async function formatWithPrettier(
-  path: string,
+export async function runPrettier(
+  spec: PrettierSpec,
   source: string,
-): Promise<string | null> {
-  const ext = extOf(path);
-  const spec = ext ? PRETTIER_BY_EXT[ext] : undefined;
-  if (!spec) return null;
-
+): Promise<string> {
   const [{ format }, ...plugins] = await Promise.all([
     import("prettier/standalone"),
     ...spec.plugins.map((load) => load()),
@@ -119,4 +119,24 @@ export async function formatWithPrettier(
   };
 
   return format(source, options);
+}
+
+/**
+ * Format `source` with Prettier if the file extension is supported, else
+ * return `null` to signal the caller should fall back to CodeMirror reindent.
+ *
+ * Throws if Prettier itself fails (e.g. a syntax error in the source) — the
+ * caller surfaces this rather than silently leaving the buffer unchanged.
+ *
+ * NOTE: runs Prettier on the calling thread. For potentially large documents,
+ * prefer `formatWithPrettierAsync` which offloads big files to a Web Worker so
+ * the parse/print never blocks the UI.
+ */
+export async function formatWithPrettier(
+  path: string,
+  source: string,
+): Promise<string | null> {
+  const spec = prettierSpecFor(path);
+  if (!spec) return null;
+  return runPrettier(spec, source);
 }

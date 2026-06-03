@@ -3,6 +3,12 @@ import type { Extension } from "@codemirror/state";
 type LoaderResult = Extension | { token: unknown };
 type LanguageLoader = () => Promise<LoaderResult>;
 
+/** Comment delimiters CodeMirror's `toggleComment` reads from language data. */
+type CommentTokens = {
+  line?: string;
+  block?: { open: string; close: string };
+};
+
 const rubyLoader: LanguageLoader = () =>
   import("@codemirror/legacy-modes/mode/ruby").then((m) => m.ruby);
 
@@ -28,6 +34,53 @@ const mssqlLoader: LanguageLoader = () =>
   import("@codemirror/legacy-modes/mode/sql").then((m) => m.msSQL);
 const plsqlLoader: LanguageLoader = () =>
   import("@codemirror/legacy-modes/mode/sql").then((m) => m.plSQL);
+
+// PowerShell ships a legacy mode with `#` / `<# #>` comment tokens baked in.
+const powershellLoader: LanguageLoader = () =>
+  import("@codemirror/legacy-modes/mode/powershell").then((m) => m.powerShell);
+
+const propertiesLoader: LanguageLoader = () =>
+  import("@codemirror/legacy-modes/mode/properties").then((m) => m.properties);
+
+// Windows batch has no legacy mode in @codemirror/legacy-modes. This minimal
+// StreamParser highlights REM/:: comments, @-prefixed lines, %VARS%, labels and
+// strings — enough for readable .bat/.cmd files. It declares languageData so
+// Ctrl+/ toggles `REM ` line comments.
+const batchParser = {
+  startState: () => ({}),
+  token(stream: {
+    sol: () => boolean;
+    eatSpace: () => boolean;
+    match: (re: RegExp | string, consume?: boolean) => unknown;
+    next: () => string | void;
+    skipToEnd: () => void;
+  }): string | null {
+    if (stream.eatSpace()) return null;
+    if (stream.sol() && stream.match(/^\s*(?:rem\b|::)/i)) {
+      stream.skipToEnd();
+      return "comment";
+    }
+    if (stream.sol() && stream.match(/^@/)) return "operator";
+    if (stream.match(/^:[A-Za-z0-9_]+/)) return "labelName"; // :label
+    if (stream.match(/^%[^%\r\n]*%/)) return "variableName"; // %VAR%
+    if (stream.match(/^%%?~?[A-Za-z0-9]/)) return "variableName"; // %%i / %~dp0
+    if (stream.match(/^"(?:[^"\r\n])*"?/)) return "string";
+    if (
+      stream.match(
+        /^\b(?:if|else|for|in|do|goto|call|set|echo|exit|setlocal|endlocal|pause|cd|copy|del|move|md|rd|start|shift|not|exist|defined|errorlevel)\b/i,
+      )
+    ) {
+      return "keyword";
+    }
+    stream.next();
+    return null;
+  },
+  languageData: { commentTokens: { line: "REM " } },
+};
+const batchLoader: LanguageLoader = () => Promise.resolve(batchParser);
+
+const iniLoader: LanguageLoader = () =>
+  import("@codemirror/legacy-modes/mode/properties").then((m) => m.properties);
 
 /**
  * Extension → loader. Each loader is a dynamic import so language packs
@@ -104,11 +157,61 @@ const loaders: Record<string, LanguageLoader> = {
   // C#
   cs: () => import("@codemirror/legacy-modes/mode/clike").then((m) => m.csharp),
 
+  // Other clike-family languages (all ship // and /* */ comment tokens)
+  dart: () => import("@codemirror/legacy-modes/mode/clike").then((m) => m.dart),
+  kt: () =>
+    import("@codemirror/legacy-modes/mode/clike").then((m) => m.kotlin),
+  kts: () =>
+    import("@codemirror/legacy-modes/mode/clike").then((m) => m.kotlin),
+  scala: () =>
+    import("@codemirror/legacy-modes/mode/clike").then((m) => m.scala),
+  sc: () => import("@codemirror/legacy-modes/mode/clike").then((m) => m.scala),
+  m: () =>
+    import("@codemirror/legacy-modes/mode/clike").then((m) => m.objectiveC),
+  mm: () =>
+    import("@codemirror/legacy-modes/mode/clike").then(
+      (m) => m.objectiveCpp,
+    ),
+
   // Legacy-modes: loaders return the raw StreamParser; wrapped below.
   sh: () => import("@codemirror/legacy-modes/mode/shell").then((m) => m.shell),
   bash: () =>
     import("@codemirror/legacy-modes/mode/shell").then((m) => m.shell),
   zsh: () => import("@codemirror/legacy-modes/mode/shell").then((m) => m.shell),
+
+  // PowerShell
+  ps1: powershellLoader,
+  psm1: powershellLoader,
+  psd1: powershellLoader,
+
+  // Windows batch
+  bat: batchLoader,
+  cmd: batchLoader,
+
+  // INI / config / dotenv-style key=value with `#` or `;` comments
+  ini: iniLoader,
+  cfg: iniLoader,
+  conf: iniLoader,
+  properties: propertiesLoader,
+  editorconfig: propertiesLoader,
+  gitconfig: propertiesLoader,
+
+  // Misc legacy modes
+  lua: () => import("@codemirror/legacy-modes/mode/lua").then((m) => m.lua),
+  pl: () => import("@codemirror/legacy-modes/mode/perl").then((m) => m.perl),
+  pm: () => import("@codemirror/legacy-modes/mode/perl").then((m) => m.perl),
+  r: () => import("@codemirror/legacy-modes/mode/r").then((m) => m.r),
+  swift: () =>
+    import("@codemirror/legacy-modes/mode/swift").then((m) => m.swift),
+  cmake: () =>
+    import("@codemirror/legacy-modes/mode/cmake").then((m) => m.cmake),
+  diff: () => import("@codemirror/legacy-modes/mode/diff").then((m) => m.diff),
+  patch: () => import("@codemirror/legacy-modes/mode/diff").then((m) => m.diff),
+  nginx: () =>
+    import("@codemirror/legacy-modes/mode/nginx").then((m) => m.nginx),
+  vb: () => import("@codemirror/legacy-modes/mode/vb").then((m) => m.vb),
+  vbs: () =>
+    import("@codemirror/legacy-modes/mode/vbscript").then((m) => m.vbScript),
   toml: () => import("@codemirror/legacy-modes/mode/toml").then((m) => m.toml),
   yaml: () => import("@codemirror/legacy-modes/mode/yaml").then((m) => m.yaml),
   yml: () => import("@codemirror/legacy-modes/mode/yaml").then((m) => m.yaml),
@@ -134,7 +237,51 @@ const filenameOverrides: Record<string, LanguageLoader> = {
   fastfile: rubyLoader,
   guardfile: rubyLoader,
   brewfile: rubyLoader,
+  makefile: () =>
+    Promise.resolve({
+      startState: () => ({}),
+      token(stream: { match: (re: RegExp) => unknown; next: () => unknown }) {
+        if (stream.match(/^#.*/)) return "comment";
+        stream.next();
+        return null;
+      },
+      languageData: { commentTokens: { line: "#" } },
+    }),
 };
+
+/**
+ * Comment tokens by extension, used in two places:
+ *  1. Injected into a StreamLanguage when its legacy mode declares no
+ *     `languageData.commentTokens` (e.g. properties/INI), so Ctrl+/ works.
+ *  2. The generic fallback for files with no registered mode picks a default
+ *     here (keyed by extension) so Ctrl+/ still toggles a sensible comment.
+ *
+ * Modes that already ship correct comment tokens (powershell, shell, yaml,
+ * toml, the lang-* packages) are intentionally absent — we never override a
+ * mode that knows its own delimiters.
+ */
+const COMMENT_TOKENS: Record<string, CommentTokens> = {
+  // hash-comment config families
+  env: { line: "#" },
+  ini: { line: "#" },
+  cfg: { line: "#" },
+  conf: { line: "#" },
+  properties: { line: "#" },
+  editorconfig: { line: "#" },
+  gitconfig: { line: "#" },
+  toml: { line: "#" },
+  r: { line: "#" },
+  cmake: { line: "#" },
+  nginx: { line: "#" },
+  // C-style
+  vbs: { line: "'" },
+  vb: { line: "'" },
+};
+
+// Default for any text file with no registered mode: `#` is the most common
+// line-comment token across config/script files, so Ctrl+/ does something
+// useful even on an unknown extension. This is the "all regular files" floor.
+const FALLBACK_COMMENT: CommentTokens = { line: "#" };
 
 function extOf(name: string): string | null {
   const lower = name.toLowerCase();
@@ -159,50 +306,85 @@ function isEnvFile(base: string): boolean {
   return base === ".env" || base.startsWith(".env.");
 }
 
-function cacheKey(filename: string): string | null {
+// Every filename now resolves to a key — including unknown extensions and
+// extension-less files — so the generic fallback language gets cached too.
+function cacheKey(filename: string): string {
   const lower = filename.toLowerCase();
   const base = lower.split("/").pop() ?? lower;
   if (isEnvFile(base)) return "name:.env";
   if (filenameOverrides[base]) return `name:${base}`;
   const ext = extOf(base);
-  return ext ? `ext:${ext}` : null;
+  return ext ? `ext:${ext}` : "fallback";
+}
+
+/**
+ * Inject `languageData.commentTokens` into a stream parser when it declares
+ * none of its own. CodeMirror's `toggleComment` reads comment delimiters from
+ * language data; legacy modes like `properties` ship without them, so Ctrl+/
+ * would no-op without this. Modes that already declare commentTokens (e.g.
+ * powershell, shell, yaml) are left untouched.
+ */
+function withCommentTokens(
+  parser: Record<string, unknown>,
+  tokens: CommentTokens | undefined,
+): Record<string, unknown> {
+  const existing = (parser as { languageData?: { commentTokens?: unknown } })
+    .languageData?.commentTokens;
+  if (existing || !tokens) return parser;
+  const prev = (parser as { languageData?: object }).languageData ?? {};
+  return { ...parser, languageData: { ...prev, commentTokens: tokens } };
 }
 
 export function resolveLanguageSync(filename: string): Extension | null {
-  const key = cacheKey(filename);
-  return key ? (cache.get(key) ?? null) : null;
+  return cache.get(cacheKey(filename)) ?? null;
 }
 
 export async function resolveLanguage(
   filename: string,
 ): Promise<Extension | null> {
   const key = cacheKey(filename);
-  if (!key) return null;
   const cached = cache.get(key);
   if (cached !== undefined) return cached;
 
   const lower = filename.toLowerCase();
   const base = lower.split("/").pop() ?? lower;
+  const ext = extOf(base) ?? "";
   const loader = isEnvFile(base)
     ? envLoader
-    : (filenameOverrides[base] ?? loaders[extOf(base) ?? ""]);
+    : (filenameOverrides[base] ?? loaders[ext]);
+
+  const { StreamLanguage } = await import("@codemirror/language");
+
+  // No registered mode → generic fallback: a no-highlight StreamLanguage that
+  // still carries comment tokens so Ctrl+/ works on ANY text file. This is the
+  // "all regular files" floor.
   if (!loader) {
-    cache.set(key, null);
-    return null;
+    const tokens = COMMENT_TOKENS[ext] ?? FALLBACK_COMMENT;
+    const fallback = StreamLanguage.define({
+      token: (stream) => {
+        stream.skipToEnd();
+        return null;
+      },
+      languageData: { commentTokens: tokens },
+    });
+    cache.set(key, fallback);
+    return fallback;
   }
 
   const result = await loader();
-  let ext: Extension;
+  let extension: Extension;
   if (isStreamParser(result)) {
-    const { StreamLanguage } = await import("@codemirror/language");
-    ext = StreamLanguage.define(
-      result as Parameters<typeof StreamLanguage.define>[0],
+    extension = StreamLanguage.define(
+      withCommentTokens(
+        result as Record<string, unknown>,
+        COMMENT_TOKENS[ext],
+      ) as unknown as Parameters<typeof StreamLanguage.define>[0],
     );
   } else {
-    ext = result as Extension;
+    extension = result as Extension;
   }
-  cache.set(key, ext);
-  return ext;
+  cache.set(key, extension);
+  return extension;
 }
 
 export function preloadLanguages(filenames: string[]): void {

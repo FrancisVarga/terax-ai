@@ -20,6 +20,13 @@ export default defineConfig(async ({ mode }) => ({
         ? ["console.debug", "console.info", "console.trace"]
         : [],
   },
+  // ES-module workers so a worker can code-split via dynamic import() — the
+  // format worker (src/modules/editor/lib/format.worker.ts) lazy-loads Prettier
+  // plugins, which the default "iife" worker format forbids. Targets
+  // (chrome120 / es2022) both support module workers.
+  worker: {
+    format: "es" as const,
+  },
   build: {
     target:
       process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome120" : "es2022",
