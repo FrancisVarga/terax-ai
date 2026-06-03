@@ -3,6 +3,7 @@ import {
   BotIcon,
   GithubIcon,
   PlaySquareIcon,
+  RecordIcon,
   SparklesIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -28,6 +29,7 @@ export function RightSidebarRail({ activeView, onSelectView }: Props) {
     { id: "agents", label: "Agents", icon: BotIcon },
     { id: "tasks", label: "Tasks", icon: PlaySquareIcon },
     { id: "actions", label: "Actions", icon: GithubIcon },
+    { id: "issues", label: "Issues", icon: RecordIcon },
   ];
 
   return (

@@ -6,6 +6,7 @@ import {
 } from "@/modules/right-sidebar";
 import { TaskRunnerPanel } from "@/modules/task-runner";
 import { GitHubActionsPanel } from "@/modules/github-actions";
+import { GitHubIssuesPanel } from "@/modules/github-issues";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 
 type AppRightSidebarProps = {
@@ -40,6 +41,8 @@ export function AppRightSidebar({
           <TaskRunnerPanel />
         ) : view === "actions" ? (
           <GitHubActionsPanel />
+        ) : view === "issues" ? (
+          <GitHubIssuesPanel />
         ) : (
           <AiPanel
             hasComposer={hasComposer}
