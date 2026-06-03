@@ -40,9 +40,10 @@ impl BoundedRingBuffer {
         }
         let overflow = (self.buf.len() + data.len()).saturating_sub(self.cap);
         if overflow > 0 {
-            for _ in 0..overflow {
-                self.buf.pop_front();
-            }
+            // Bulk drop in one memmove rather than `overflow` single-byte
+            // `pop_front`s — under a chatty dev server this runs on every push
+            // and the per-element loop dominated the hot path.
+            self.buf.drain(..overflow);
             self.dropped = self.dropped.saturating_add(overflow as u64);
         }
         self.buf.extend(data);

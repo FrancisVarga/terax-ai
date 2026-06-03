@@ -9,6 +9,7 @@ use serde::Serialize;
 use shared_child::SharedChild;
 
 use super::ringbuffer::BoundedRingBuffer;
+use crate::modules::proc::ProcGroup;
 use crate::modules::sync::MutexExt;
 use crate::modules::workspace::{resolve_path, WorkspaceEnv};
 
@@ -19,6 +20,10 @@ pub struct BackgroundProc {
     pub cwd: Option<String>,
     pub started_at_ms: u64,
     pub child: Arc<SharedChild>,
+    /// OS process group rooted at `child`, used to kill the whole tree (e.g.
+    /// `bun ▶ turbo ▶ node` dev servers). `None` if grouping failed at spawn, in
+    /// which case `kill` falls back to killing only the root process.
+    pub group: Option<ProcGroup>,
     pub buffer: Mutex<BoundedRingBuffer>,
     pub exited: AtomicBool,
     pub exit_code: AtomicI32,
@@ -63,7 +68,14 @@ impl BackgroundProc {
     }
 
     pub fn kill(&self) {
-        let _ = self.child.kill();
+        // Kill the whole process tree via the group when we have one; the root
+        // `child.kill()` alone would orphan descendants (turbo + node servers).
+        match &self.group {
+            Some(group) => group.kill(),
+            None => {
+                let _ = self.child.kill();
+            }
+        }
     }
 
     pub fn info(&self, handle: u32) -> BackgroundProcInfo {
@@ -113,10 +125,19 @@ pub fn spawn(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::modules::proc::hide_console(&mut cmd);
+    // Make the child lead its own OS process group so `kill` can take down the
+    // entire tree (shell ▶ bun ▶ turbo ▶ node …), not just the root process.
+    crate::modules::proc::group_on_spawn(&mut cmd);
 
     let shared = Arc::new(SharedChild::spawn(&mut cmd).map_err(|e| e.to_string())?);
-    let kill_on_fail = || {
-        let _ = shared.kill();
+    let group = make_group(&shared);
+    // On an early-exit failure, take down the whole group when we have one so a
+    // child that already forked descendants is not orphaned; else kill the root.
+    let kill_on_fail = || match &group {
+        Some(g) => g.kill(),
+        None => {
+            let _ = shared.kill();
+        }
     };
     let stdout_pipe = shared.take_stdout().ok_or_else(|| {
         kill_on_fail();
@@ -138,6 +159,7 @@ pub fn spawn(
         cwd,
         started_at_ms,
         child,
+        group,
         buffer: Mutex::new(BoundedRingBuffer::new(RING_CAP)),
         exited: AtomicBool::new(false),
         exit_code: AtomicI32::new(0),
@@ -188,4 +210,19 @@ pub fn spawn(
     }
 
     Ok(proc)
+}
+
+/// Build the process group for a freshly spawned child. On Unix the child is
+/// already a group leader (via `group_on_spawn`), so we just record its pid; on
+/// Windows we assign its process handle to a kill-on-close Job Object.
+#[cfg(unix)]
+fn make_group(child: &SharedChild) -> Option<ProcGroup> {
+    Some(ProcGroup::for_child(child.id()))
+}
+
+#[cfg(windows)]
+fn make_group(child: &SharedChild) -> Option<ProcGroup> {
+    // `SharedChild` exposes no raw handle, so the Job Object opens the process
+    // itself from the pid.
+    ProcGroup::for_child(child.id())
 }
