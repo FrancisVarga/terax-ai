@@ -13,6 +13,8 @@ import {
   resolveRepo,
   runWorkflow,
   type RepoInfo,
+  type RunConclusion,
+  type RunStatus,
   type WorkflowDef,
   type WorkflowRun,
 } from "../lib/gh";
@@ -43,6 +45,41 @@ const EMPTY_RUNS: RunsCache = { runs: [], fetchedAt: 0, loading: false };
 let trackSeq = 0;
 /** Poll timers keyed by tracked-run client id, kept outside zustand state. */
 const pollers = new Map<string, ReturnType<typeof setInterval>>();
+
+/**
+ * How often the background watcher polls a repo's recent runs for *any* run
+ * (push, PR, manual on github.com, …), not just runs this app dispatched. Slower
+ * than the per-run dispatch poll because it watches the whole repo passively.
+ */
+const WATCH_INTERVAL_MS = 15_000;
+
+/** A run's last-seen lifecycle state, for diffing successive watch snapshots. */
+type SeenRun = { status: RunStatus; conclusion: RunConclusion };
+
+/**
+ * Per-cwd watcher state, kept outside zustand (like {@link pollers}) — it is
+ * bookkeeping, not reactive UI state.
+ *  - `timer`: the poll interval for this cwd.
+ *  - `seen`: runId → last-known status/conclusion, used to fire a notification
+ *    only on a *transition* (new run appears → "started"; run reaches a failing
+ *    conclusion → "error"), never twice for the same edge.
+ *  - `primed`: false until the first snapshot has seeded `seen`. The first poll
+ *    seeds silently so we don't announce every already-in-flight run as if it
+ *    had just started the moment the watcher attaches.
+ */
+type Watcher = {
+  timer: ReturnType<typeof setInterval>;
+  seen: Map<number, SeenRun>;
+  primed: boolean;
+};
+const watchers = new Map<string, Watcher>();
+
+/** Conclusions we treat as an "error" worth notifying about. */
+const FAILED_CONCLUSIONS = new Set<RunConclusion>([
+  "failure",
+  "timed_out",
+  "startup_failure",
+]);
 
 /**
  * Whether two workflow lists are identical (same ids/name/path/state in order).
@@ -154,21 +191,38 @@ type ActionsState = {
   }) => Promise<void>;
   /** Stop watching a tracked run (does not cancel it on GitHub). */
   forget: (id: string) => void;
+  /**
+   * Start a background watcher for `cwd` that polls *all* recent workflow runs
+   * (not just app-dispatched ones) and fires a notification when a run starts
+   * or fails. Idempotent per cwd, and a no-op for remote / empty roots. Returns
+   * a disposer that stops the watcher; calling {@link watchActions} again for
+   * the same cwd reuses the existing watcher and returns a disposer for it.
+   */
+  watchActions: (cwd: string) => () => void;
 };
 
 /**
- * Route a completion notification through the same focus-aware path the agent
- * notifications use (OS notification when unfocused, in-app toast otherwise),
- * gated by the user's `agentNotifications` pref, plus an optional chime gated
- * by `notificationSound`. Centralized so the policy can't drift.
+ * Route one GitHub-Actions notification through the same focus-aware path the
+ * agent notifications use (OS notification when unfocused, in-app toast
+ * otherwise), gated by the user's `agentNotifications` pref, plus an optional
+ * chime gated by `notificationSound`. Centralized so every event — completion,
+ * start, error — shares one policy that can't drift.
+ *
+ * `tone` controls the chime contour: ascending for good, descending for bad,
+ * none to stay silent (a "started" event has no outcome yet, so it doesn't
+ * chime even when sound is on).
  */
-function notifyCompletion(run: TrackedRun): void {
+function notify(opts: {
+  title: string;
+  body?: string;
+  url?: string | null;
+  tone: "good" | "bad" | "none";
+}): void {
   const prefs = usePreferencesStore.getState();
-  const ok = run.conclusion === "success";
-  const title = `${run.workflowName} ${ok ? "succeeded" : run.conclusion ?? "finished"}`;
-  const body = run.url ?? undefined;
 
-  if (prefs.notificationSound) playCompletionSound(ok);
+  if (prefs.notificationSound && opts.tone !== "none") {
+    playCompletionSound(opts.tone === "good");
+  }
 
   if (!prefs.agentNotifications) return;
   // In a non-React (store) context we read focus synchronously; the route is
@@ -177,15 +231,26 @@ function notifyCompletion(run: TrackedRun): void {
   if (focused) {
     showAgentToast({
       agent: "GitHub Actions",
-      title,
-      body,
+      title: opts.title,
+      body: opts.body,
       onActivate: () => {
-        if (run.url) void openUrl(run.url).catch(() => {});
+        if (opts.url) void openUrl(opts.url).catch(() => {});
       },
     });
   } else {
-    void osNotify(title, body ?? run.workflowName);
+    void osNotify(opts.title, opts.body ?? opts.title);
   }
+}
+
+/** A dispatched run reached a terminal state — announce success/failure. */
+function notifyCompletion(run: TrackedRun): void {
+  const ok = run.conclusion === "success";
+  notify({
+    title: `${run.workflowName} ${ok ? "succeeded" : run.conclusion ?? "finished"}`,
+    body: run.url ?? undefined,
+    url: run.url,
+    tone: ok ? "good" : "bad",
+  });
 }
 
 export const useActionsStore = create<ActionsState>((set, get) => {
@@ -254,6 +319,14 @@ export const useActionsStore = create<ActionsState>((set, get) => {
     }
   };
 
+  const stopWatcher = (cwd: string) => {
+    const w = watchers.get(cwd);
+    if (w) {
+      clearInterval(w.timer);
+      watchers.delete(cwd);
+    }
+  };
+
   const finalize = (id: string) => {
     stopPoller(id);
     const run = get().tracked[id];
@@ -261,6 +334,77 @@ export const useActionsStore = create<ActionsState>((set, get) => {
     // A dispatched run just reached a terminal state; refresh the history list
     // so the Runs view reflects it without waiting for the next TTL window.
     void get().loadRuns(get().tracked[id]?.cwd ?? "", true).catch(() => {});
+  };
+
+  /**
+   * One watch cycle for `cwd`: fetch recent runs and diff them against the last
+   * snapshot in `w.seen`.
+   *  - First cycle (`!w.primed`): seed `seen` silently and prime — we are
+   *    attaching mid-stream, so pre-existing runs are not "new starts".
+   *  - A run id absent from `seen`, not already completed → just started.
+   *  - A run that crosses into a failing conclusion → errored. We key the
+   *    "did we already notify this failure" decision on the stored conclusion
+   *    so a run that was already failing when we attached never double-fires.
+   * The watcher only *reads* gh; it never mutates the SWR caches the panel owns.
+   */
+  const watchTick = async (cwd: string) => {
+    const w = watchers.get(cwd);
+    if (!w) return;
+    let runs: WorkflowRun[];
+    try {
+      runs = await listRuns(cwd, RUNS_LIMIT);
+    } catch {
+      // Transient (network/rate-limit) or terminal (auth/repo). Either way keep
+      // the watcher alive and retry next cycle; the panel surfaces hard errors.
+      return;
+    }
+
+    const prevSeen = w.seen;
+    const nextSeen = new Map<number, SeenRun>();
+    for (const r of runs) {
+      nextSeen.set(r.databaseId, {
+        status: r.status,
+        conclusion: r.conclusion,
+      });
+
+      if (!w.primed) continue; // first snapshot: seed only, announce nothing.
+
+      const before = prevSeen.get(r.databaseId);
+      const failing =
+        r.status === "completed" && FAILED_CONCLUSIONS.has(r.conclusion);
+
+      if (!before) {
+        // A run id we have never seen. If it is already finished it completed
+        // between two polls — only announce the failing case (a missed error),
+        // not a success we never watched start.
+        if (r.status !== "completed") {
+          notify({
+            title: `${r.workflowName} started`,
+            body: `${r.headBranch} · ${r.displayTitle}`,
+            url: r.url,
+            tone: "none",
+          });
+        } else if (failing) {
+          notify({
+            title: `${r.workflowName} ${r.conclusion ?? "failed"}`,
+            body: `${r.headBranch} · ${r.displayTitle}`,
+            url: r.url,
+            tone: "bad",
+          });
+        }
+      } else if (failing && !FAILED_CONCLUSIONS.has(before.conclusion)) {
+        // Known run that just transitioned into a failing conclusion.
+        notify({
+          title: `${r.workflowName} ${r.conclusion ?? "failed"}`,
+          body: `${r.headBranch} · ${r.displayTitle}`,
+          url: r.url,
+          tone: "bad",
+        });
+      }
+    }
+
+    w.seen = nextSeen;
+    w.primed = true;
   };
 
   const patchMeta = (cwd: string, p: Partial<MetaCache>) =>
@@ -437,6 +581,27 @@ export const useActionsStore = create<ActionsState>((set, get) => {
         const { [id]: _drop, ...rest } = s.tracked;
         return { tracked: rest };
       });
+    },
+
+    watchActions: (cwd) => {
+      // Remote / empty roots have no local gh context to watch.
+      if (!cwd || isRemote(cwd)) return () => {};
+
+      const existing = watchers.get(cwd);
+      if (existing) {
+        // Already watching this cwd — hand back a disposer for the live watcher
+        // rather than spinning up a second timer.
+        return () => stopWatcher(cwd);
+      }
+
+      const w: Watcher = {
+        timer: setInterval(() => void watchTick(cwd), WATCH_INTERVAL_MS),
+        seen: new Map(),
+        primed: false,
+      };
+      watchers.set(cwd, w);
+      void watchTick(cwd); // seed the baseline immediately (primes silently).
+      return () => stopWatcher(cwd);
     },
   };
 });

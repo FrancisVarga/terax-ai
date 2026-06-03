@@ -41,6 +41,7 @@ import {
   type SearchTarget,
 } from "@/modules/header";
 import { type PreviewPaneHandle } from "@/modules/preview";
+import { useActionsStore } from "@/modules/github-actions";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { onKeysChanged } from "@/modules/settings/store";
@@ -395,6 +396,16 @@ export default function App() {
       label: getCurrentWebviewWindow().label,
       dir,
     }).catch(() => {});
+  }, [explorerRoot]);
+
+  // Watch GitHub Actions for the active project repo in the background, so a run
+  // started by a push/PR (or that fails) notifies even when the Actions sidebar
+  // tab is closed. Mounted here rather than in the panel because the panel only
+  // renders while its tab is active. The disposer stops the old watcher when the
+  // project root changes; the store no-ops for remote/empty roots.
+  useEffect(() => {
+    if (!explorerRoot || isRemote(explorerRoot)) return;
+    return useActionsStore.getState().watchActions(explorerRoot);
   }, [explorerRoot]);
 
   useEffect(() => {
