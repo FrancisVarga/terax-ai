@@ -76,8 +76,7 @@ function readRightSidebarView(): RightSidebarViewId {
       stored === "ai" ||
       stored === "agents" ||
       stored === "tasks" ||
-      stored === "history" ||
-      stored === "preview"
+      stored === "actions"
     )
       return stored;
   } catch {

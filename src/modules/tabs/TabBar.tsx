@@ -30,7 +30,6 @@ import {
   PlusSignIcon,
   SatelliteIcon,
   SparklesIcon,
-  Table01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -75,7 +74,6 @@ type Props = {
   onOpenBunqueue: () => void;
   onOpenAnalytics: () => void;
   onOpenOtel: () => void;
-  onOpenDataGridMaster: () => void;
   onOpenCcusage: () => void;
   onClose: (id: number) => void;
   /** Pin (promote) a preview tab to persistent on double-click. */
@@ -99,7 +97,6 @@ export function TabBar({
   onOpenBunqueue,
   onOpenAnalytics,
   onOpenOtel,
-  onOpenDataGridMaster,
   onOpenCcusage,
   onClose,
   onPin,
@@ -361,10 +358,6 @@ export function TabBar({
               <HugeiconsIcon icon={SatelliteIcon} size={14} strokeWidth={1.75} />
               <span className="flex-1">Observability</span>
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => onOpenDataGridMaster()}>
-              <HugeiconsIcon icon={Table01Icon} size={14} strokeWidth={1.75} />
-              <span className="flex-1">Data Grid</span>
-            </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => onOpenCcusage()}>
               <HugeiconsIcon icon={Coins01Icon} size={14} strokeWidth={1.75} />
               <span className="flex-1">ccusage</span>
@@ -506,16 +499,6 @@ function TabIcon({ tab }: { tab: Tab }) {
       />
     );
   }
-  if (tab.kind === "data-grid-master") {
-    return (
-      <HugeiconsIcon
-        icon={Table01Icon}
-        size={14}
-        strokeWidth={2}
-        className="shrink-0"
-      />
-    );
-  }
   if (tab.kind === "projects" || tab.kind === "project-detail") {
     return (
       <HugeiconsIcon
@@ -550,7 +533,6 @@ function labelFor(t: Tab): string {
   if (t.kind === "docker-detail") return t.title;
   if (t.kind === "agentlytics") return t.title;
   if (t.kind === "otel") return t.title;
-  if (t.kind === "data-grid-master") return t.title;
   if (t.kind === "ccusage") return t.title;
   if (t.kind === "projects") return t.title;
   if (t.kind === "project-detail") return t.title;

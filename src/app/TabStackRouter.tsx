@@ -23,7 +23,6 @@ import { BunqueueStack } from "@/modules/bunqueue";
 import { DockerDetailStack } from "@/modules/docker";
 import { AnalyticsStack } from "@/modules/agentlytics";
 import { OtelStack } from "@/modules/otel";
-import { DataGridMasterStack } from "@/modules/data-grid-master";
 import { CcusageStack } from "@/modules/ccusage";
 import { ProjectsDashboard, ProjectDetailStack } from "@/modules/projects";
 import type { SearchAddon } from "@xterm/addon-search";
@@ -228,9 +227,6 @@ export function TabStackRouter({
       </TabLayer>
       <TabLayer visible={activeKind === "otel"} padded={false}>
         <OtelStack tabs={tabs} activeId={activeId} />
-      </TabLayer>
-      <TabLayer visible={activeKind === "data-grid-master"} padded={false}>
-        <DataGridMasterStack tabs={tabs} activeId={activeId} />
       </TabLayer>
       <TabLayer visible={activeKind === "ccusage"} padded={false}>
         <CcusageStack tabs={tabs} activeId={activeId} />

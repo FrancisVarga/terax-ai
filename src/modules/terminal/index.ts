@@ -3,6 +3,7 @@ export { TerminalStack } from "./TerminalStack";
 export {
   clearFocusedTerminal,
   disposeSession,
+  injectCommand,
   leafIdForPty,
   respawnSession,
   whenSessionReady,

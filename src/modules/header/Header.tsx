@@ -21,7 +21,6 @@ import {
   Coins01Icon,
   SatelliteIcon,
   GridViewIcon,
-  Table01Icon,
   LayoutTwoColumnIcon,
   LayoutTwoRowIcon,
   Settings01Icon,
@@ -50,7 +49,6 @@ type Props = {
   onOpenBunqueue: () => void;
   onOpenAnalytics: () => void;
   onOpenOtel: () => void;
-  onOpenDataGridMaster: () => void;
   onOpenCcusage: () => void;
   onClose: (id: number) => void;
   /** Promote a preview (transient) tab to persistent. */
@@ -85,7 +83,6 @@ export function Header({
   onOpenBunqueue,
   onOpenAnalytics,
   onOpenOtel,
-  onOpenDataGridMaster,
   onOpenCcusage,
   onClose,
   onPin,
@@ -171,18 +168,6 @@ export function Header({
       title="Observability — local OpenTelemetry dashboard"
     >
       <HugeiconsIcon icon={SatelliteIcon} size={16} strokeWidth={1.75} />
-    </Button>
-  );
-
-  const dataGridButton = (
-    <Button
-      variant="ghost"
-      size="icon"
-      className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-      onClick={onOpenDataGridMaster}
-      title="Data Grid — AG Grid feature showcase"
-    >
-      <HugeiconsIcon icon={Table01Icon} size={16} strokeWidth={1.75} />
     </Button>
   );
 
@@ -287,7 +272,6 @@ export function Header({
           onOpenBunqueue={onOpenBunqueue}
           onOpenAnalytics={onOpenAnalytics}
           onOpenOtel={onOpenOtel}
-          onOpenDataGridMaster={onOpenDataGridMaster}
           onOpenCcusage={onOpenCcusage}
           onClose={onClose}
           onPin={onPin}
@@ -307,7 +291,6 @@ export function Header({
           />
           {analyticsButton}
           {otelButton}
-          {dataGridButton}
           {ccusageButton}
           {rightSidebarButton}
           {settingsButton}
@@ -318,7 +301,6 @@ export function Header({
         <>
           {analyticsButton}
           {otelButton}
-          {dataGridButton}
           {ccusageButton}
           {rightSidebarButton}
           {settingsButton}

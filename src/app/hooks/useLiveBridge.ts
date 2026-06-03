@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Tab } from "@/modules/tabs";
 import {
   findLeafCwd,
-  whenSessionReady,
+  injectCommand,
   writeToSession,
   type TerminalPaneHandle,
 } from "@/modules/terminal";
@@ -127,8 +127,11 @@ export function useLiveBridge({
           .register({ leafId, tabId, sessionId, task: oneLine, cwd });
         const hooksReady = invoke("agent_enable_claude_hooks").catch(() => {});
         void (async () => {
-          await Promise.all([whenSessionReady(leafId), hooksReady]);
-          if (!writeToSession(leafId, "claude\r")) {
+          await hooksReady;
+          // injectCommand sends a throwaway Enter + pause before `claude` so the
+          // cold-shell first-byte drop (claude -> laude) can't eat the leading
+          // `c` on a freshly spawned panel. See injectCommand.
+          if (!(await injectCommand(leafId, "claude"))) {
             useManagedAgentsStore.getState().remove(leafId);
             return;
           }

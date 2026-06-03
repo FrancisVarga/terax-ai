@@ -19,7 +19,6 @@ export {
   type DockerDetailTab,
   type AnalyticsTab,
   type OtelTab,
-  type DataGridMasterTab,
   type CcusageTab,
   type ProjectsTab,
   type ProjectDetailTab,

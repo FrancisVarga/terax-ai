@@ -86,9 +86,17 @@ function markSessionReady(leafId: number): void {
   }
 }
 
-export function whenSessionReady(leafId: number, timeoutMs = 4000): Promise<void> {
+// Resolve once `markSessionReady` has fired for this leaf (OSC 133;B — prompt
+// drawn) or after timeoutMs as a fallback for shells with no OSC 133. NOTE:
+// 133;B means the prompt *string* is rendered, NOT that the shell's line editor
+// is yet draining stdin — see injectCommand for why a programmatic command
+// still needs a settle on top of this.
+export function whenSessionReady(
+  leafId: number,
+  { timeoutMs = 4000 }: { timeoutMs?: number } = {},
+): Promise<void> {
   if (readyLeaves.has(leafId)) return Promise.resolve();
-  return new Promise((resolve) => {
+  return new Promise<void>((resolve) => {
     const timer = setTimeout(() => {
       const arr = readyWaiters.get(leafId);
       const i = arr?.findIndex((w) => w.timer === timer) ?? -1;
@@ -125,6 +133,31 @@ export function writeToSession(leafId: number, data: string): boolean {
   const s = sessions.get(leafId);
   if (!s) return false;
   return writeOrQueue(s, data);
+}
+
+/**
+ * Type a command into a leaf's shell, robust against the cold-shell first-byte
+ * drop. On a freshly spawned PTY (notably Windows PowerShell + PSReadLine) the
+ * shell's line editor finishes its async init AFTER the prompt — and its OSC
+ * 133;B marker — is already drawn, so the FIRST byte written can be swallowed,
+ * turning `claude` into `laude` (or `ssh` into `sh`). A frame-settle is too
+ * short for that wall-clock-bound init; a throwaway Enter + a real pause forces
+ * the shell through one full read/submit/render cycle, guaranteeing its ReadKey
+ * loop is the live stdin consumer before the real command's first byte lands.
+ *
+ * Returns false only when the session is gone / its shell already exited.
+ */
+export async function injectCommand(
+  leafId: number,
+  command: string,
+  { readyTimeoutMs = 4000, settleMs = 250 }: { readyTimeoutMs?: number; settleMs?: number } = {},
+): Promise<boolean> {
+  await whenSessionReady(leafId, { timeoutMs: readyTimeoutMs });
+  // Throwaway Enter through the (possibly still-initializing) editor. If this is
+  // the byte that gets eaten, no harm done — it was empty.
+  if (!writeToSession(leafId, "\r")) return false;
+  await new Promise((r) => setTimeout(r, settleMs));
+  return writeToSession(leafId, `${command}\r`);
 }
 
 /**

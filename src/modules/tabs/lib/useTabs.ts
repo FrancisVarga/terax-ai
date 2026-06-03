@@ -151,13 +151,6 @@ export type OtelTab = {
   title: string;
 };
 
-/** AG Grid Community feature showcase — a singleton main-content tab. */
-export type DataGridMasterTab = {
-  id: number;
-  kind: "data-grid-master";
-  title: string;
-};
-
 export type CcusageTab = {
   id: number;
   kind: "ccusage";
@@ -207,7 +200,6 @@ export type Tab =
   | DockerDetailTab
   | AnalyticsTab
   | OtelTab
-  | DataGridMasterTab
   | CcusageTab
   | ProjectsTab
   | ProjectDetailTab;
@@ -766,26 +758,6 @@ export function useTabs(
     return targetId;
   }, []);
 
-  /** Open (or focus) the singleton AG Grid feature-showcase tab. */
-  const openDataGridMasterTab = useCallback(() => {
-    let targetId: number | null = null;
-    setTabs((curr) => {
-      const existing = curr.find((t) => t.kind === "data-grid-master");
-      if (existing) {
-        targetId = existing.id;
-        return curr;
-      }
-      const id = nextIdRef.current++;
-      targetId = id;
-      return [
-        ...curr,
-        { id, kind: "data-grid-master", title: "Data Grid" },
-      ];
-    });
-    if (targetId !== null) setActiveId(targetId);
-    return targetId;
-  }, []);
-
   /** Open (or focus) the singleton ccusage token/cost dashboard tab. */
   const openCcusageTab = useCallback(() => {
     let targetId: number | null = null;
@@ -1318,7 +1290,6 @@ export function useTabs(
     openProjectDetailTab,
     openAnalyticsTab,
     openOtelTab,
-    openDataGridMasterTab,
     openCcusageTab,
     openDockerDetailTab,
     openAiDiffTab,
