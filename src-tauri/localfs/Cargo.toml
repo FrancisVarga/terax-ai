@@ -1,6 +1,6 @@
 [package]
 name = "localfs"
-version = "0.26.0"
+version = "0.27.0"
 description = "Local-only, 100% S3-compatible object-storage sidecar for Terax (a smaller RustFS)"
 authors = ["crynta"]
 license = "Apache-2.0"
