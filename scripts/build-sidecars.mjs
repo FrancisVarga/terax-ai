@@ -18,7 +18,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -124,6 +124,34 @@ const TARGETS = [
 ];
 
 if (!existsSync(OUT_DIR)) mkdirSync(OUT_DIR, { recursive: true });
+
+/**
+ * Stage zero-byte placeholders for the Rust-sidecar externalBin entries that
+ * the dedicated per-sidecar scripts build LATER in the chain (otel-collector,
+ * kv-server, localfs). Why here, before anything else:
+ *
+ * `terax`'s `tauri-build` build.rs asserts EVERY externalBin entry in
+ * tauri.conf.json exists on disk. Any crate that path-depends on `terax_lib`
+ * (e.g. `otel-collector`, `kv-server`) triggers that build.rs when compiled.
+ * The per-sidecar scripts each stage only their OWN placeholder, so on a clean
+ * checkout (binaries/ is gitignored) the FIRST terax-dependent cargo build in
+ * the chain fails on the sidecars staged AFTER it — e.g. otel-collector (built
+ * 3rd) aborts because kv-server (4th) and localfs (5th) aren't staged yet.
+ *
+ * `build-sidecars.mjs` runs FIRST in both `build:sidecars` and `pretauri`, and
+ * builds bunqueue with the bun bundler (no cargo, no build.rs), so staging all
+ * placeholders here guarantees the full externalBin set is present before any
+ * cargo build runs — order-independent and robust to future reordering. Each
+ * per-sidecar script still overwrites its placeholder with the real binary.
+ */
+const RUST_SIDECAR_BASES = ["otel-collector", "kv-server", "localfs"];
+for (const base of RUST_SIDECAR_BASES) {
+  const placeholder = join(OUT_DIR, `${base}-${triple}${EXE}`);
+  if (!existsSync(placeholder)) {
+    writeFileSync(placeholder, "");
+    console.log(`Staged placeholder: ${placeholder}`);
+  }
+}
 
 console.log(`Building bunqueue sidecars for ${triple} (${bunTarget})`);
 

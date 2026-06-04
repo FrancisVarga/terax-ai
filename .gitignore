@@ -43,6 +43,10 @@ src-tauri/gen/
 # Bun incremental build artifacts (e.g. .<hash>-00000000.bun-build)
 *.bun-build
 
+# Bun is used only as a JS runtime for the sidecar bundler; pnpm is the package
+# manager (pnpm-lock.yaml is the tracked lockfile). bun.lock is a stray artifact.
+bun.lock
+
 # Embedded key-value server (Valkey/Redis-compatible) per-project data dir.
 # Holds the persisted cache snapshot (dump.kv); machine-local, never committed.
 .t-camelot/
