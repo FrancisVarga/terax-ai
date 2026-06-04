@@ -8,6 +8,14 @@ mod session;
 pub(crate) mod shell_init;
 mod sink;
 
+// Daemon-facing API (#110). The out-of-process rmux daemon links terax_lib and
+// reuses the exact shell-spawn + reader code via these. Kept to the minimal
+// surface: the spawn entry point, the session handle, the output sink trait,
+// and the agent signal type.
+pub use agent_detect::AgentSignal;
+pub use session::{spawn as spawn_session, Session};
+pub use sink::PtyOutputSink;
+
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -19,7 +27,7 @@ use tauri::ipc::{Channel, Response};
 
 use crate::modules::sync::{MutexExt, RwLockExt};
 use crate::modules::workspace::{authorize_user_spawn_cwd, WorkspaceEnv, WorkspaceRegistry};
-use session::Session;
+// `Session` is in scope via the `pub use session::{..., Session}` re-export above.
 
 pub struct PtyState {
     sessions: RwLock<HashMap<u32, Arc<Session>>>,
