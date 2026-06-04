@@ -25,8 +25,6 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine as _;
 use serde_json::Value;
 use shared_child::SharedChild;
 use tauri::ipc::{Channel, Response};
@@ -135,7 +133,7 @@ pub async fn open_forwarded(
     let terax_id = pty_state.next_id();
     rmux_state.panes.lock_safe().insert(terax_id, pane_id);
 
-    let events_url = format!("{base_url}/pane/{pane_id}/events");
+    let events_url = format!("{base_url}/pane/{pane_id}/attach");
     let app = app.clone();
     // The bridge owns the id-map entry's removal on exit. It needs the managed
     // RmuxState, but Tauri State is borrow-scoped to the command; resolve the
@@ -394,11 +392,19 @@ async fn open_pane(
         .ok_or_else(|| "rmux daemon open response missing pane_id".to_string())
 }
 
-/// Connect to a pane's `/events` SSE stream and bridge each frame back onto the
-/// in-process transport: `data` -> `on_data`, `agent` -> the `terax:agent-signal`
-/// event, `exit` -> `on_exit`. Reuses the line-buffered reconnect-with-backoff
-/// loop from `otel::run_event_bridge`. Ends (removing the id mapping) once an
-/// `exit` frame is seen — the pane is gone, so reconnecting would loop forever.
+/// Frame kinds on the daemon's binary attach stream (must match the daemon's
+/// `encode_frame`): `[u8 kind][u32 LE len][payload]`.
+const FRAME_DATA: u8 = 0;
+const FRAME_AGENT: u8 = 1;
+const FRAME_EXIT: u8 = 2;
+const FRAME_HEADER_LEN: usize = 5;
+
+/// Connect to a pane's `/attach` binary stream and bridge each frame back onto
+/// the in-process transport: `data` -> `on_data` (raw bytes, no base64), `agent`
+/// -> the `terax:agent-signal` event, `exit` -> `on_exit`. The daemon replays the
+/// pane's scrollback ring before the live tail, so a single attach restores
+/// context with no subscribe-race. Ends (removing the id mapping) once an `exit`
+/// frame or the stream end is seen.
 async fn run_event_bridge(
     app: AppHandle,
     url: String,
@@ -407,37 +413,55 @@ async fn run_event_bridge(
     on_exit: Channel<i32>,
 ) {
     let client = reqwest::Client::new();
-    let mut backoff = Duration::from_millis(200);
-    loop {
-        match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                backoff = Duration::from_millis(200);
-                let mut stream = resp.bytes_stream();
-                let mut buf = String::new();
-                use futures_util::StreamExt;
-                while let Some(chunk) = stream.next().await {
-                    let Ok(bytes) = chunk else { break };
-                    buf.push_str(&String::from_utf8_lossy(&bytes));
-                    // SSE frames are separated by a blank line; drain complete
-                    // ones from the buffer.
-                    while let Some(idx) = buf.find("\n\n") {
-                        let frame = buf[..idx].to_string();
-                        buf.drain(..idx + 2);
-                        if dispatch_frame(&app, &frame, &on_data, &on_exit) == FrameOutcome::Exit {
-                            tauri::async_runtime::spawn_blocking({
-                                let app = app.clone();
-                                move || forget_pane(&app, terax_id)
-                            });
-                            return;
-                        }
-                    }
-                }
-            }
-            _ => {}
+    let resp = match client.get(&url).send().await {
+        Ok(r) if r.status().is_success() => r,
+        other => {
+            log::debug!(target: "rmux", "attach failed: {other:?}");
+            spawn_forget(&app, terax_id);
+            return;
         }
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(Duration::from_secs(5));
+    };
+
+    use futures_util::StreamExt;
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+    while let Some(chunk) = stream.next().await {
+        let Ok(bytes) = chunk else { break };
+        buf.extend_from_slice(&bytes);
+        // Drain every complete frame currently buffered; a partial tail stays in
+        // `buf` for the next chunk.
+        while let Some((kind, payload)) = take_frame(&mut buf) {
+            if dispatch_frame(&app, kind, payload, &on_data, &on_exit) == FrameOutcome::Exit {
+                spawn_forget(&app, terax_id);
+                return;
+            }
+        }
     }
+    // Stream ended without an explicit exit (pane closed / daemon gone): forget.
+    spawn_forget(&app, terax_id);
+}
+
+/// Pull one complete `[u8 kind][u32 LE len][payload]` frame off the front of
+/// `buf`, draining its bytes. Returns `None` (leaving `buf` intact) when a full
+/// frame is not yet buffered.
+fn take_frame(buf: &mut Vec<u8>) -> Option<(u8, Vec<u8>)> {
+    if buf.len() < FRAME_HEADER_LEN {
+        return None;
+    }
+    let len = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+    let total = FRAME_HEADER_LEN + len;
+    if buf.len() < total {
+        return None;
+    }
+    let kind = buf[0];
+    let payload = buf[FRAME_HEADER_LEN..total].to_vec();
+    buf.drain(..total);
+    Some((kind, payload))
+}
+
+fn spawn_forget(app: &AppHandle, terax_id: u32) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || forget_pane(&app, terax_id));
 }
 
 /// Whether a dispatched frame ended the pane.
@@ -447,32 +471,32 @@ enum FrameOutcome {
     Exit,
 }
 
-/// Route one parsed SSE frame to the in-process transport. Returns `Exit` for an
+/// Route one binary frame to the in-process transport. Returns `Exit` for an
 /// `exit` frame so the bridge can stop and forget the pane.
 fn dispatch_frame(
     app: &AppHandle,
-    frame: &str,
+    kind: u8,
+    payload: Vec<u8>,
     on_data: &Channel<Response>,
     on_exit: &Channel<i32>,
 ) -> FrameOutcome {
-    let Some((event, data)) = parse_sse_frame(frame) else {
-        return FrameOutcome::Continue;
-    };
-    match event {
-        "data" => {
-            if let Ok(bytes) = BASE64.decode(data) {
-                if let Err(e) = on_data.send(Response::new(bytes)) {
-                    log::debug!(target: "rmux", "data channel closed: {e}");
-                }
+    match kind {
+        FRAME_DATA => {
+            if let Err(e) = on_data.send(Response::new(payload)) {
+                log::debug!(target: "rmux", "data channel closed: {e}");
             }
         }
-        "agent" => {
-            if let Ok(v) = serde_json::from_str::<Value>(data) {
+        FRAME_AGENT => {
+            if let Ok(v) = serde_json::from_slice::<Value>(&payload) {
                 let _ = app.emit("terax:agent-signal", v);
             }
         }
-        "exit" => {
-            let code = data.trim().parse::<i32>().unwrap_or(-1);
+        FRAME_EXIT => {
+            let code = if payload.len() == 4 {
+                i32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]])
+            } else {
+                -1
+            };
             if let Err(e) = on_exit.send(code) {
                 log::debug!(target: "rmux", "exit channel closed: {e}");
             }
@@ -489,28 +513,17 @@ fn forget_pane(app: &AppHandle, terax_id: u32) {
     app.state::<RmuxState>().panes.lock_safe().remove(&terax_id);
 }
 
-/// Extract `(event, data)` from one SSE frame. The daemon emits exactly one
-/// `event:` and one `data:` line per frame (see `rmux-daemon` `encode_frame`).
-/// Missing `event:` defaults to "message" per the SSE spec but the daemon always
-/// names its events, so a frame without one is ignored.
-fn parse_sse_frame(frame: &str) -> Option<(&str, &str)> {
-    let mut event = None;
-    let mut data = None;
-    for line in frame.lines() {
-        if let Some(rest) = line.strip_prefix("event:") {
-            event = Some(rest.trim());
-        } else if let Some(rest) = line.strip_prefix("data:") {
-            // Per SSE, a single leading space after the colon is stripped; the
-            // daemon writes `data: <payload>`, so trim_start one space.
-            data = Some(rest.strip_prefix(' ').unwrap_or(rest));
-        }
-    }
-    Some((event?, data?))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build one wire frame the way the daemon's `encode_frame` does.
+    fn frame(kind: u8, payload: &[u8]) -> Vec<u8> {
+        let mut v = vec![kind];
+        v.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        v.extend_from_slice(payload);
+        v
+    }
 
     #[test]
     fn parses_listening_port() {
@@ -524,42 +537,59 @@ mod tests {
     }
 
     #[test]
-    fn parses_sse_frames() {
-        let data = "event: data\ndata: aGVsbG8=";
-        assert_eq!(parse_sse_frame(data), Some(("data", "aGVsbG8=")));
+    fn take_frame_extracts_one_complete_frame() {
+        let mut buf = frame(FRAME_DATA, b"hello world");
+        let (kind, payload) = take_frame(&mut buf).expect("one frame");
+        assert_eq!(kind, FRAME_DATA);
+        assert_eq!(payload, b"hello world");
+        assert!(buf.is_empty(), "buffer fully drained");
+    }
 
-        let agent = "event: agent\ndata: {\"id\":1,\"kind\":\"working\"}";
+    #[test]
+    fn take_frame_waits_for_full_payload() {
+        // Header says 5 bytes but only 2 are present: must return None and keep
+        // the bytes for the next chunk.
+        let mut buf = vec![FRAME_DATA];
+        buf.extend_from_slice(&5u32.to_le_bytes());
+        buf.extend_from_slice(b"ab");
+        let before = buf.clone();
+        assert!(take_frame(&mut buf).is_none());
+        assert_eq!(buf, before, "partial frame left intact");
+    }
+
+    #[test]
+    fn take_frame_splits_back_to_back_frames() {
+        // Two frames concatenated (the chunked-stream case): both extract in order.
+        let mut buf = frame(FRAME_DATA, b"one");
+        buf.extend(frame(FRAME_EXIT, &137i32.to_le_bytes()));
+        let (k1, p1) = take_frame(&mut buf).unwrap();
+        assert_eq!((k1, p1.as_slice()), (FRAME_DATA, b"one".as_slice()));
+        let (k2, p2) = take_frame(&mut buf).unwrap();
+        assert_eq!(k2, FRAME_EXIT);
+        assert_eq!(i32::from_le_bytes([p2[0], p2[1], p2[2], p2[3]]), 137);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn data_frame_carries_raw_bytes_unchanged() {
+        // Non-UTF-8 bytes (an SGR sequence + a raw 0xFF) survive verbatim: this is
+        // exactly why the wire format dropped base64 and text framing.
+        let raw = vec![0x1b, b'[', b'3', b'1', b'm', 0xFF, b'x'];
+        let mut buf = frame(FRAME_DATA, &raw);
+        let (kind, payload) = take_frame(&mut buf).unwrap();
+        assert_eq!(kind, FRAME_DATA);
+        assert_eq!(payload, raw);
+    }
+
+    #[test]
+    fn exit_frame_decodes_le_i32() {
+        let mut buf = frame(FRAME_EXIT, &137i32.to_le_bytes());
+        let (kind, payload) = take_frame(&mut buf).unwrap();
+        assert_eq!(kind, FRAME_EXIT);
         assert_eq!(
-            parse_sse_frame(agent),
-            Some(("agent", "{\"id\":1,\"kind\":\"working\"}"))
+            i32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
+            137
         );
-
-        let exit = "event: exit\ndata: 0";
-        assert_eq!(parse_sse_frame(exit), Some(("exit", "0")));
-
-        assert_eq!(parse_sse_frame("data: orphan"), None);
-    }
-
-    #[test]
-    fn decodes_base64_data_payload() {
-        // The exact transform the data branch of `dispatch_frame` applies: the
-        // daemon base64-encodes raw PTY bytes, and the bridge decodes them back.
-        let (event, data) = parse_sse_frame("event: data\ndata: aGVsbG8gd29ybGQ=").unwrap();
-        assert_eq!(event, "data");
-        let bytes = BASE64.decode(data).expect("valid base64");
-        assert_eq!(bytes, b"hello world");
-    }
-
-    #[test]
-    fn parses_exit_code_from_frame() {
-        let (event, data) = parse_sse_frame("event: exit\ndata: 137").unwrap();
-        assert_eq!(event, "exit");
-        assert_eq!(data.trim().parse::<i32>().unwrap(), 137);
-
-        // A malformed exit code degrades to -1 (unknowable), matching the in-
-        // process waiter's convention.
-        let (_, bad) = parse_sse_frame("event: exit\ndata: x").unwrap();
-        assert_eq!(bad.trim().parse::<i32>().unwrap_or(-1), -1);
     }
 
     // True end-to-end against a live daemon. Spawns the real `rmux-daemon` binary
@@ -595,32 +625,27 @@ mod tests {
             .expect("open pane");
         assert!(pane >= 1, "pane id should be monotonic from 1");
 
-        // Subscribe to /events BEFORE writing: the daemon's broadcast only
-        // delivers to live subscribers, so the echo of our write would be missed
-        // if we connected after. The reader runs as a spawned task collecting
-        // base64-decoded `data` frames exactly as `dispatch_frame` does.
-        let events_url = format!("{base_url}/pane/{pane}/events");
+        // Attach to /attach BEFORE writing and parse the BINARY frame stream
+        // (`[u8 kind][u32 LE len][payload]`) exactly as `take_frame` /
+        // `dispatch_frame` do, collecting raw `data` payloads (no base64).
+        let events_url = format!("{base_url}/pane/{pane}/attach");
         let reader = rt.spawn(async move {
             let client = reqwest::Client::new();
-            let resp = client.get(&events_url).send().await.expect("connect events");
+            let resp = client.get(&events_url).send().await.expect("connect attach");
             assert!(resp.status().is_success());
             use futures_util::StreamExt;
             let mut stream = resp.bytes_stream();
-            let mut buf = String::new();
+            let mut buf: Vec<u8> = Vec::new();
             let deadline = Instant::now() + Duration::from_secs(10);
             while Instant::now() < deadline {
                 let Some(chunk) = stream.next().await else { break };
                 let Ok(bytes) = chunk else { break };
-                buf.push_str(&String::from_utf8_lossy(&bytes));
-                while let Some(idx) = buf.find("\n\n") {
-                    let frame = buf[..idx].to_string();
-                    buf.drain(..idx + 2);
-                    if let Some(("data", data)) = parse_sse_frame(&frame) {
-                        if let Ok(decoded) = BASE64.decode(data) {
-                            if String::from_utf8_lossy(&decoded).contains("RMUX_E2E_MARKER") {
-                                return true;
-                            }
-                        }
+                buf.extend_from_slice(&bytes);
+                while let Some((kind, payload)) = take_frame(&mut buf) {
+                    if kind == FRAME_DATA
+                        && String::from_utf8_lossy(&payload).contains("RMUX_E2E_MARKER")
+                    {
+                        return true;
                     }
                 }
             }
@@ -659,9 +684,84 @@ mod tests {
         post_data(format!("echo {marker}\r"));
 
         let seen = rt.block_on(reader).expect("events reader task");
-        assert!(seen, "did not observe the echoed marker on the /events stream");
+        assert!(seen, "did not observe the echoed marker on the /attach stream");
 
         // The test owns this child (not the survival path), so reap it.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    // Ring-replay: the Phase 2 fix for the Phase 1 subscribe-race. Write a marker
+    // FIRST, give the shell time to echo it into the pane (and thus the ring),
+    // and only THEN attach. The marker must come back from the replayed
+    // scrollback even though no subscriber was connected when it was produced.
+    #[test]
+    #[ignore = "requires a built rmux-daemon binary via RMUX_DAEMON_E2E"]
+    fn end_to_end_ring_replay_on_late_attach() {
+        let exe = match std::env::var("RMUX_DAEMON_E2E") {
+            Ok(p) => std::path::PathBuf::from(p),
+            Err(_) => return,
+        };
+        assert!(exe.is_file(), "RMUX_DAEMON_E2E does not point at a file: {}", exe.display());
+
+        let (child, port) = spawn_daemon(&exe).expect("spawn daemon + read port");
+        let base_url = format!("http://127.0.0.1:{port}");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let marker = "RMUX_RING_MARKER";
+
+        let pane = rt.block_on(open_pane(&base_url, 80, 24, None)).expect("open pane");
+
+        // Write WITHOUT any attached subscriber. CPR reply unblocks PSReadLine,
+        // then the marker echo lands only in the ring (nobody is streaming).
+        let write_url = format!("{base_url}/pane/{pane}/write");
+        let post_data = |payload: String| {
+            let url = write_url.clone();
+            rt.block_on(async move {
+                reqwest::Client::new()
+                    .post(&url)
+                    .json(&serde_json::json!({ "data": payload }))
+                    .send()
+                    .await
+                    .expect("write")
+                    .error_for_status()
+                    .expect("write status");
+            });
+        };
+        post_data("\x1b[1;1R".to_string());
+        std::thread::sleep(Duration::from_millis(200));
+        post_data(format!("echo {marker}\r"));
+
+        // Let the shell finish echoing into the ring BEFORE attaching.
+        std::thread::sleep(Duration::from_millis(800));
+
+        // Attach LATE. The marker must arrive from the replayed ring.
+        let attach_url = format!("{base_url}/pane/{pane}/attach");
+        let seen = rt.block_on(async move {
+            let resp = reqwest::Client::new().get(&attach_url).send().await.expect("attach");
+            assert!(resp.status().is_success());
+            use futures_util::StreamExt;
+            let mut stream = resp.bytes_stream();
+            let mut buf: Vec<u8> = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                let Some(chunk) = stream.next().await else { break };
+                let Ok(bytes) = chunk else { break };
+                buf.extend_from_slice(&bytes);
+                while let Some((kind, payload)) = take_frame(&mut buf) {
+                    if kind == FRAME_DATA
+                        && String::from_utf8_lossy(&payload).contains("RMUX_RING_MARKER")
+                    {
+                        return true;
+                    }
+                }
+            }
+            false
+        });
+        assert!(seen, "late attach did not replay the marker from the ring");
+
         let _ = child.kill();
         let _ = child.wait();
     }

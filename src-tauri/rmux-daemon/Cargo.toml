@@ -27,9 +27,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bytes = "1"
 futures-util = "0.3"
-# Shell output bytes are not UTF-8 safe; base64-encode them onto the SSE stream.
-# 0.22 is already resolved in the parent lock, so no new transitive crate.
-base64 = "0.22"
 tokio = { version = "1", default-features = false, features = [
 	"rt-multi-thread",
 	"net",

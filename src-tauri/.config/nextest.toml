@@ -1,0 +1,40 @@
+# cargo-nextest configuration. nextest runs each test in its own process with a
+# parallel pool, which is faster than `cargo test`'s single-binary in-process
+# threads for this workspace (many crates, PTY/daemon integration tests).
+#
+# Run with:  cargo nextest run --profile perf
+# Ignored (daemon e2e) tests need their env + the staged externalBin placeholders,
+# same as cargo test:  RMUX_DAEMON_E2E=<path> cargo nextest run --profile perf --run-ignored all
+
+[profile.default]
+# Show output for failures only; keep the summary tight.
+failure-output = "immediate"
+success-output = "never"
+# Do not stop at the first failure: surface every failing test in one run.
+fail-fast = false
+
+[profile.perf]
+# High-throughput local profile. 16-core dev box -> let nextest use all of them.
+# "num-cpus" expands to the detected core count; raise the cap explicitly so a
+# future bigger machine is not left on the table.
+test-threads = "num-cpus"
+fail-fast = false
+failure-output = "immediate-final"
+success-output = "never"
+# PTY/ConPTY spawn + the daemon e2e (10s internal deadline) are legitimately
+# slow; warn rather than kill so a real integration test is never failed for
+# taking its time. A hard terminate only after a generous window catches true
+# hangs.
+slow-timeout = { period = "30s", terminate-after = 4 }
+# A leaked child (orphan daemon/shell) should not wedge the run; reap-wait window.
+leak-timeout = "2s"
+
+# The PTY/ConPTY tests touch process-global Windows state (SPAWN_LOCK,
+# CONPTY_LIFECYCLE_LOCK, the multimedia timer). Running many real-shell spawns in
+# separate processes concurrently is the case those locks were hardened for, but
+# keep an override hook here if first-tab ConPTY stalls reappear under nextest's
+# parallelism: set a lower thread count or serialize the group.
+[[profile.perf.overrides]]
+filter = "test(/pty::/)"
+# PTY spawn is I/O + lock bound, not CPU bound; do not over-subscribe it. Leaving
+# threads at the profile default for now; tighten here if flakiness appears.

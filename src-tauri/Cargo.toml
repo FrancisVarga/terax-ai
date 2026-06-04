@@ -146,10 +146,6 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 bytes = "1"
 futures-util = "0.3"
-# Decodes the rmux daemon's base64-encoded `data` SSE frames back into raw PTY
-# output bytes (the daemon emits non-UTF-8-safe shell output as base64). Same
-# crate + major the daemon encodes with, so the two cannot drift.
-base64 = "0.22"
 tokio = { version = "1", default-features = false, features = [
 	"rt",
 	"rt-multi-thread",
