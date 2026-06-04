@@ -71,7 +71,9 @@ FROM parquet_scan('s3://lake/data/sample.parquet');
 
 try {
   Write-Host "== DuckDB COPY TO + parquet_scan over httpfs =="
-  $out = $sql | duckdb -csv
+  # Join to one string so the match runs against the whole output, not per-line
+  # array elements ($out is a string[] from the CLI).
+  $out = ($sql | duckdb -csv) -join "`n"
   Write-Host $out
 
   # Expected: 50000 rows; sum(i*2) for i in [0,50000) = 2 * (49999*50000/2) = 2499950000.
