@@ -49,6 +49,7 @@ type Props = {
   onOpenBunqueue: () => void;
   onOpenAnalytics: () => void;
   onOpenOtel: () => void;
+  onOpenKv: () => void;
   onOpenCcusage: () => void;
   onClose: (id: number) => void;
   /** Promote a preview (transient) tab to persistent. */
@@ -83,6 +84,7 @@ export function Header({
   onOpenBunqueue,
   onOpenAnalytics,
   onOpenOtel,
+  onOpenKv,
   onOpenCcusage,
   onClose,
   onPin,
@@ -272,6 +274,7 @@ export function Header({
           onOpenBunqueue={onOpenBunqueue}
           onOpenAnalytics={onOpenAnalytics}
           onOpenOtel={onOpenOtel}
+          onOpenKv={onOpenKv}
           onOpenCcusage={onOpenCcusage}
           onClose={onClose}
           onPin={onPin}

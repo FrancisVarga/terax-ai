@@ -107,6 +107,7 @@ export default function App() {
     openBunqueueTab,
     openAnalyticsTab,
     openOtelTab,
+    openKvTab,
     openCcusageTab,
     openProjectDetailTab,
     openDockerDetailTab,
@@ -1040,6 +1041,7 @@ export default function App() {
             onOpenBunqueue={() => openBunqueueTab()}
             onOpenAnalytics={() => openAnalyticsTab()}
             onOpenOtel={() => openOtelTab()}
+            onOpenKv={() => openKvTab()}
             onOpenCcusage={() => openCcusageTab()}
             onClose={handleClose}
             onPin={pinTab}

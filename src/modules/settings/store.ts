@@ -92,6 +92,12 @@ export type Preferences = {
   editorAutoSaveDelay: number;
   /** Run the embedded bunqueue job-queue server. Off by default — opt in. */
   bunqueueEnabled: boolean;
+  /** Run the embedded Redis-compatible KV server. Off by default (opt in). */
+  kvEnabled: boolean;
+  /** Listen port for the KV server (>= 1024). Applied at boot. */
+  kvPort: number;
+  /** Optional KV server password (requirepass). Empty = no auth. Applied at boot. */
+  kvRequirePass: string;
 };
 
 const STORE_PATH = "terax-settings.json";
@@ -140,6 +146,15 @@ const KEY_EDITOR_AUTO_SAVE_DELAY = "editorAutoSaveDelay";
 // Mirrored in Rust (src-tauri/src/modules/bunqueue.rs `read_enabled_pref`).
 // Keep this string in sync — the backend reads the same persisted key at boot.
 const KEY_BUNQUEUE_ENABLED = "bunqueueEnabled";
+// Mirrored in Rust (src-tauri/src/modules/kv/lifecycle.rs + lib.rs). Keep these
+// strings in sync; the backend reads the same persisted keys at boot.
+const KEY_KV_ENABLED = "kvEnabled";
+const KEY_KV_PORT = "kvPort";
+const KEY_KV_REQUIRE_PASS = "kvRequirePass";
+
+export const KV_PORT_DEFAULT = 6379;
+export const KV_PORT_MIN = 1024;
+export const KV_PORT_MAX = 65535;
 
 export const TERMINAL_FONT_SIZE_DEFAULT = 14;
 export const TERMINAL_FONT_SIZE_MIN = 8;
@@ -199,6 +214,9 @@ export const DEFAULT_PREFERENCES: Preferences = {
   editorAutoSave: false,
   editorAutoSaveDelay: 1000,
   bunqueueEnabled: false,
+  kvEnabled: false,
+  kvPort: KV_PORT_DEFAULT,
+  kvRequirePass: "",
 };
 
 const store = new LazyStore(STORE_PATH, { defaults: {}, autoSave: 200 });
@@ -337,7 +355,19 @@ export async function loadPreferences(): Promise<Preferences> {
     bunqueueEnabled:
       get<boolean>(KEY_BUNQUEUE_ENABLED) ??
       DEFAULT_PREFERENCES.bunqueueEnabled,
+    kvEnabled:
+      get<boolean>(KEY_KV_ENABLED) ?? DEFAULT_PREFERENCES.kvEnabled,
+    kvPort: clampKvPort(
+      get<number>(KEY_KV_PORT) ?? DEFAULT_PREFERENCES.kvPort,
+    ),
+    kvRequirePass:
+      get<string>(KEY_KV_REQUIRE_PASS) ?? DEFAULT_PREFERENCES.kvRequirePass,
   };
+}
+
+export function clampKvPort(v: number): number {
+  if (!Number.isFinite(v)) return KV_PORT_DEFAULT;
+  return Math.min(KV_PORT_MAX, Math.max(KV_PORT_MIN, Math.round(v)));
 }
 
 export async function setTheme(value: ThemePref): Promise<void> {
@@ -542,6 +572,18 @@ export async function setBunqueueEnabled(value: boolean): Promise<void> {
   await writePref(KEY_BUNQUEUE_ENABLED, value);
 }
 
+export async function setKvEnabled(value: boolean): Promise<void> {
+  await writePref(KEY_KV_ENABLED, value);
+}
+
+export async function setKvPort(value: number): Promise<void> {
+  await writePref(KEY_KV_PORT, clampKvPort(value));
+}
+
+export async function setKvRequirePass(value: string): Promise<void> {
+  await writePref(KEY_KV_REQUIRE_PASS, value);
+}
+
 export async function setNotificationSound(value: boolean): Promise<void> {
   await writePref(KEY_NOTIFICATION_SOUND, value);
 }
@@ -605,6 +647,9 @@ export async function onPreferencesChange(
     [KEY_EDITOR_AUTO_SAVE]: "editorAutoSave",
     [KEY_EDITOR_AUTO_SAVE_DELAY]: "editorAutoSaveDelay",
     [KEY_BUNQUEUE_ENABLED]: "bunqueueEnabled",
+    [KEY_KV_ENABLED]: "kvEnabled",
+    [KEY_KV_PORT]: "kvPort",
+    [KEY_KV_REQUIRE_PASS]: "kvRequirePass",
   };
   // Same-process writes still fire onChange immediately; cross-window writes
   // arrive via the Tauri event emitted by writePref().

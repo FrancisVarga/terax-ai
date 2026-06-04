@@ -151,6 +151,13 @@ export type OtelTab = {
   title: string;
 };
 
+/** Embedded Redis-compatible key-value store dashboard (a singleton tab). */
+export type KvTab = {
+  id: number;
+  kind: "kv";
+  title: string;
+};
+
 export type CcusageTab = {
   id: number;
   kind: "ccusage";
@@ -200,6 +207,7 @@ export type Tab =
   | DockerDetailTab
   | AnalyticsTab
   | OtelTab
+  | KvTab
   | CcusageTab
   | ProjectsTab
   | ProjectDetailTab;
@@ -758,6 +766,23 @@ export function useTabs(
     return targetId;
   }, []);
 
+  /** Open (or focus) the singleton embedded key-value store dashboard tab. */
+  const openKvTab = useCallback(() => {
+    let targetId: number | null = null;
+    setTabs((curr) => {
+      const existing = curr.find((t) => t.kind === "kv");
+      if (existing) {
+        targetId = existing.id;
+        return curr;
+      }
+      const id = nextIdRef.current++;
+      targetId = id;
+      return [...curr, { id, kind: "kv", title: "Key-Value Store" }];
+    });
+    if (targetId !== null) setActiveId(targetId);
+    return targetId;
+  }, []);
+
   /** Open (or focus) the singleton ccusage token/cost dashboard tab. */
   const openCcusageTab = useCallback(() => {
     let targetId: number | null = null;
@@ -1290,6 +1315,7 @@ export function useTabs(
     openProjectDetailTab,
     openAnalyticsTab,
     openOtelTab,
+    openKvTab,
     openCcusageTab,
     openDockerDetailTab,
     openAiDiffTab,

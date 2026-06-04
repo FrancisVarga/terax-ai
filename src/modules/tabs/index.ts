@@ -19,6 +19,7 @@ export {
   type DockerDetailTab,
   type AnalyticsTab,
   type OtelTab,
+  type KvTab,
   type CcusageTab,
   type ProjectsTab,
   type ProjectDetailTab,

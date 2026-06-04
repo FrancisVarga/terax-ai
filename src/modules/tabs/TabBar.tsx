@@ -21,6 +21,7 @@ import {
   ContainerIcon,
   CloudIcon,
   Database02Icon,
+  DatabaseIcon,
   FolderLibraryIcon,
   GitBranchIcon,
   GitCompareIcon,
@@ -74,6 +75,7 @@ type Props = {
   onOpenBunqueue: () => void;
   onOpenAnalytics: () => void;
   onOpenOtel: () => void;
+  onOpenKv: () => void;
   onOpenCcusage: () => void;
   onClose: (id: number) => void;
   /** Pin (promote) a preview tab to persistent on double-click. */
@@ -97,6 +99,7 @@ export function TabBar({
   onOpenBunqueue,
   onOpenAnalytics,
   onOpenOtel,
+  onOpenKv,
   onOpenCcusage,
   onClose,
   onPin,
@@ -358,6 +361,10 @@ export function TabBar({
               <HugeiconsIcon icon={SatelliteIcon} size={14} strokeWidth={1.75} />
               <span className="flex-1">Observability</span>
             </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onOpenKv()}>
+              <HugeiconsIcon icon={DatabaseIcon} size={14} strokeWidth={1.75} />
+              <span className="flex-1">Key-Value Store</span>
+            </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => onOpenCcusage()}>
               <HugeiconsIcon icon={Coins01Icon} size={14} strokeWidth={1.75} />
               <span className="flex-1">ccusage</span>
@@ -533,6 +540,7 @@ function labelFor(t: Tab): string {
   if (t.kind === "docker-detail") return t.title;
   if (t.kind === "agentlytics") return t.title;
   if (t.kind === "otel") return t.title;
+  if (t.kind === "kv") return t.title;
   if (t.kind === "ccusage") return t.title;
   if (t.kind === "projects") return t.title;
   if (t.kind === "project-detail") return t.title;
