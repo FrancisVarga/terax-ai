@@ -394,7 +394,8 @@ fn project_label(root: &str) -> String {
 
 /// Ensure the server for `projectDir` is up, then seed (or refresh) a browser
 /// connection pointing at it. Each project root gets its own `is_local`
-/// connection so the S3 tab shows the store for the active project.
+/// connection so the S3 tab shows the store for the active project. Returns the
+/// seeded connection's id so the frontend can auto-select it in the picker.
 #[tauri::command]
 pub async fn s3local_seed_connection(
     app: AppHandle,
@@ -402,12 +403,13 @@ pub async fn s3local_seed_connection(
     s3_state: State<'_, crate::modules::s3::S3State>,
     secrets: State<'_, crate::modules::secrets::SecretsState>,
     project_dir: String,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let info = state.ensure(&app, std::path::Path::new(&project_dir))?;
     let creds = state.creds(&app);
+    let id = local_conn_id(&info.root);
 
     let conn = crate::modules::s3::S3Connection {
-        id: local_conn_id(&info.root),
+        id: id.clone(),
         name: project_label(&info.root),
         region: "us-east-1".to_string(),
         endpoint: Some(info.endpoint),
@@ -424,7 +426,8 @@ pub async fn s3local_seed_connection(
         creds.access_key_id,
         creds.secret_access_key,
     )
-    .await
+    .await?;
+    Ok(id)
 }
 
 // ---------------------------------------------------------------------------

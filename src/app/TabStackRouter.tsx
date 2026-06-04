@@ -92,6 +92,9 @@ export type TabStackRouterProps = {
    * server (`<projectDir>/.t-camelot/s3-local`). Threaded to the S3 tab so its
    * bucket/object mutations target the right server. */
   projectDir: string | null;
+  /** Id of this project's seeded local S3 connection — the S3 tab auto-selects
+   * it so the picker always lands on the current project. `null` until seeded. */
+  s3LocalConnId: string | null;
   /** SSH alias for a remote Docker daemon; `null` lists the local daemon. */
   dockerHost: string | null;
   /** Open a container's deep-detail tab from the Docker list tab. */
@@ -144,6 +147,7 @@ export function TabStackRouter({
   gitHistoryTabs,
   dockerDetailTabs,
   projectDir,
+  s3LocalConnId,
   dockerHost,
   onOpenContainer,
   onConnectSsh,
@@ -211,7 +215,12 @@ export function TabStackRouter({
         <DataStack data={dataTabs} activeId={activeId} />
       </TabLayer>
       <TabLayer visible={activeKind === "s3"} padded>
-        <S3Stack tabs={tabs} activeId={activeId} projectDir={projectDir} />
+        <S3Stack
+          tabs={tabs}
+          activeId={activeId}
+          projectDir={projectDir}
+          preferredConnId={s3LocalConnId}
+        />
       </TabLayer>
       <TabLayer visible={activeKind === "docker"} padded={false}>
         <DockerStack

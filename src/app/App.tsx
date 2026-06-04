@@ -379,15 +379,26 @@ export default function App() {
   // lazily spawns (or reuses) a localfs server rooted at
   // `<explorerRoot>/.t-camelot/s3-local` and seeds a connection keyed by that
   // root. Re-runs when the project root changes so switching projects points the
-  // tab at the right store. Best-effort.
+  // tab at the right store. The returned connection id is the one the S3 tab
+  // auto-selects so the picker always lands on the current project. Best-effort.
+  const [s3LocalConnId, setS3LocalConnId] = useState<string | null>(null);
   useEffect(() => {
-    if (!explorerRoot) return;
-    void invoke("s3local_seed_connection", { projectDir: explorerRoot }).catch(
-      () => {
+    if (!explorerRoot) {
+      setS3LocalConnId(null);
+      return;
+    }
+    let cancelled = false;
+    void invoke<string>("s3local_seed_connection", { projectDir: explorerRoot })
+      .then((id) => {
+        if (!cancelled) setS3LocalConnId(id);
+      })
+      .catch(() => {
         // Server may be disabled or still starting; the S3 tab still works for
         // any manually-added connections.
-      },
-    );
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [explorerRoot]);
 
   // True when this window is dedicated to a project (explorer root pinned to a
@@ -997,6 +1008,7 @@ export default function App() {
       gitHistoryTabs={gitHistoryTabs}
       dockerDetailTabs={dockerDetailTabs}
       projectDir={explorerRoot}
+      s3LocalConnId={s3LocalConnId}
       dockerHost={remoteAlias}
       onOpenContainer={openDockerDetailTab}
       onConnectSsh={connectSsh}

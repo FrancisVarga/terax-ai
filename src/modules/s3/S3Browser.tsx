@@ -20,6 +20,10 @@ type Props = {
   /** This window's project root — threaded to the tree so its (local-only)
    * mutations target this project's localfs server. `null` when no project. */
   projectDir: string | null;
+  /** This project's local connection id — auto-selected so the picker always
+   * lands on the current project's store, not the alphabetical first. `null`
+   * until seeded. */
+  preferredConnId: string | null;
 };
 
 /** The object the user has selected in the tree, with the connection context
@@ -37,25 +41,51 @@ type Selection = {
  * `S3ConnectionsDialog`. When several connections exist, the first is the
  * default active one; a small picker lets the user switch.
  */
-export function S3Browser({ visible, projectDir }: Props) {
+export function S3Browser({ visible, projectDir, preferredConnId }: Props) {
   const { connections, loading, error } = useS3Connections();
   const [activeId, setActiveId] = useState<string | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  // Tracks whether the user has manually picked a connection this session, so an
+  // explicit choice isn't overridden when the project's connection (re)seeds.
+  const [userPicked, setUserPicked] = useState(false);
 
-  // Default the active connection to the first one, and keep it valid as the
-  // list changes (e.g. after a delete in the dialog).
+  // Default the active connection to THIS PROJECT's local connection
+  // (`preferredConnId`) so the S3 tab always opens on the current project's
+  // store. Fall back to the first connection only when the project's connection
+  // isn't available (e.g. the local server is off, or a no-project window). A
+  // manual pick (`userPicked`) is respected; the preferred connection still
+  // wins on a project switch because `preferredConnId` changing re-runs this.
   useEffect(() => {
     if (connections.length === 0) {
       setActiveId(null);
       return;
     }
-    setActiveId((prev) =>
-      prev && connections.some((c) => c.id === prev)
-        ? prev
-        : connections[0].id,
-    );
-  }, [connections]);
+    const preferred =
+      preferredConnId &&
+      connections.some((c) => c.id === preferredConnId)
+        ? preferredConnId
+        : null;
+    setActiveId((prev) => {
+      // Project's connection exists and the user hasn't overridden -> select it.
+      if (preferred && !userPicked) return preferred;
+      // Keep a still-valid current selection.
+      if (prev && connections.some((c) => c.id === prev)) return prev;
+      // Otherwise prefer the project's connection, else the first.
+      return preferred ?? connections[0].id;
+    });
+  }, [connections, preferredConnId, userPicked]);
+
+  // When the project (and thus its preferred connection) changes, drop any prior
+  // manual override so the new project's store is auto-selected.
+  useEffect(() => {
+    setUserPicked(false);
+  }, [preferredConnId]);
+
+  const selectConnection = (id: string) => {
+    setUserPicked(true);
+    setActiveId(id);
+  };
 
   // A selection only makes sense for the active connection.
   useEffect(() => {
@@ -77,7 +107,7 @@ export function S3Browser({ visible, projectDir }: Props) {
           className="shrink-0 text-muted-foreground"
         />
         {connections.length > 1 ? (
-          <Select value={activeId ?? ""} onValueChange={setActiveId}>
+          <Select value={activeId ?? ""} onValueChange={selectConnection}>
             <SelectTrigger
               size="sm"
               className="h-6 w-auto gap-1.5 px-1.5 text-[12px] font-medium text-foreground"

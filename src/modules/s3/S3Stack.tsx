@@ -18,6 +18,9 @@ type Props = {
    * server. Passed through to the browser so its mutations target the right
    * server. `null` when no project is open. */
   projectDir: string | null;
+  /** Id of this project's local connection — the browser auto-selects it so the
+   * picker lands on the current project. `null` until seeded. */
+  preferredConnId: string | null;
 };
 
 /**
@@ -32,7 +35,7 @@ type Props = {
  * and map the survivors to `S3Tab`, which compiles now and keeps working once
  * `"s3"` lands in the union.
  */
-export function S3Stack({ tabs, activeId, projectDir }: Props) {
+export function S3Stack({ tabs, activeId, projectDir, preferredConnId }: Props) {
   const s3 = tabs.filter(
     (t) => (t as { kind: string }).kind === "s3",
   ) as unknown as S3Tab[];
@@ -50,7 +53,11 @@ export function S3Stack({ tabs, activeId, projectDir }: Props) {
             )}
             aria-hidden={!visible}
           >
-            <S3Browser visible={visible} projectDir={projectDir} />
+            <S3Browser
+              visible={visible}
+              projectDir={projectDir}
+              preferredConnId={preferredConnId}
+            />
           </div>
         );
       })}
