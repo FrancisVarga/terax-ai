@@ -8,6 +8,7 @@ pub mod docker;
 pub mod fs;
 pub mod git;
 pub mod gpu;
+pub mod kv;
 pub mod net;
 pub mod otel;
 pub mod proc;

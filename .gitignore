@@ -40,6 +40,10 @@ src-tauri/binaries/*
 # Bun incremental build artifacts (e.g. .<hash>-00000000.bun-build)
 *.bun-build
 
+# Embedded key-value server (Valkey/Redis-compatible) per-project data dir.
+# Holds the persisted cache snapshot (dump.kv); machine-local, never committed.
+.t-camelot/
+
 # Machine-specific local-dev cargo build shim (MSVC toolchain pin).
 # Must NOT be committed: its hardcoded VS BuildTools paths break CI's native
 # compiler detection (cc-rs cannot parse the space in "C:\Program Files").

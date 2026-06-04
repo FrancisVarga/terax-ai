@@ -164,9 +164,23 @@ hyper = { version = "1", default-features = false, features = ["server", "http1"
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 http-body-util = "0.1"
 flate2 = "1"
+# Embedded Redis/Valkey-protocol KV server (`modules/kv`). `redis-protocol` is
+# the RESP2/RESP3 frame codec (encode + decode, server-capable, zero-copy over
+# `bytes::Bytes`); we do not hand-roll the wire format. `dashmap` is the
+# concurrent map backing the store so per-connection tasks share it without a
+# single global lock. See issue #94.
+# Keep default features (`std` map/set types + the nom config the crate's own
+# decoder needs) AND add `bytes`, which is NOT in the default set but gates the
+# zero-copy `BytesFrame` types and the `decode_bytes_mut`/`extend_encode` server
+# entry points we build the codec on.
+redis-protocol = { version = "6", features = ["bytes"] }
+dashmap = "6"
 
 [dev-dependencies]
 proptest = "1"
+# Real Redis client used by the kv acceptance test to drive a genuine handshake
+# + command round-trip against `kv_core::serve` (issue #100).
+redis = { version = "0.27", default-features = false, features = ["tokio-comp"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
