@@ -1,0 +1,43 @@
+[package]
+name = "localfs"
+version = "0.24.0"
+description = "Local-only, 100% S3-compatible object-storage sidecar for Terax (a smaller RustFS)"
+authors = ["crynta"]
+license = "Apache-2.0"
+edition = "2021"
+
+[[bin]]
+name = "localfs"
+path = "src/main.rs"
+
+[dependencies]
+# The complete, conformance-tested S3-over-filesystem implementation. `s3s`
+# (pulled transitively) owns the wire protocol — SigV4 verification, XML
+# (un)marshalling, request routing — while `s3s_fs::FileSystem` is the storage
+# trait impl that makes this 100% S3-compatible without us reimplementing it.
+s3s = "0.13"
+s3s-fs = "0.13"
+
+# Async runtime. s3s-fs's lib target only enables tokio `fs`/`io-util`; the serve
+# loop additionally needs the runtime, listener, signal handling and timers.
+# Cargo unions these features with s3s-fs's across the dependency graph.
+tokio = { version = "1", features = [
+	"rt-multi-thread",
+	"net",
+	"macros",
+	"signal",
+	"time",
+	"io-util",
+] }
+
+# HTTP/1+2 server plumbing. Versions match what s3s 0.13 expects (hyper ^1.8,
+# hyper-util ^0.1.20) and what the existing otel-collector sidecar already uses,
+# so the workspace lockfile unifies cleanly.
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = [
+	"server-auto",
+	"server-graceful",
+	"http1",
+	"http2",
+	"tokio",
+] }

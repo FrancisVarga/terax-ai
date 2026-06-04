@@ -4,8 +4,13 @@
 # `target/release/`, which tripped ICE30 ("installed by two different
 # components"). NSIS was unaffected; MSI `light.exe` ICE validation was the only
 # failure. The member shares the collector core via a path dep on `terax_lib`.
+#
+# `localfs` (the local-only S3 server sidecar) is a separate member for the same
+# ICE30 reason. Unlike otel-collector it has NO path dep on `terax_lib` — it is a
+# standalone crate over the published `s3s-fs` library, so it never drags the app
+# crate into the sidecar build.
 [workspace]
-members = [".", "otel-collector"]
+members = [".", "otel-collector", "localfs"]
 resolver = "2"
 
 [package]

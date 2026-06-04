@@ -92,6 +92,7 @@
       "binaries/bunqueue-worker-github-create-issue",
       "binaries/bunqueue-worker-http-request",
       "binaries/otel-collector",
+      "binaries/localfs",
       "binaries/rg",
       "binaries/s5cmd"
     ],
