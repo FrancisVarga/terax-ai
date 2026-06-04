@@ -3,6 +3,7 @@ import {
   reattachSession,
   unmarkRmuxLeaf,
 } from "@/modules/terminal";
+import { invoke } from "@tauri-apps/api/core";
 
 // Typed views of the rmux daemon's session/window/pane tree, as returned by the
 // daemon's GET /session/list HTTP verb (#130). These mirror the daemon JSON
@@ -30,18 +31,71 @@ export type Session = {
   windows: Window[];
 };
 
-// TODO(#132): the rmux daemon exposes session grouping over HTTP
-// (POST /session/new, POST /session/{id}/window/new, POST /window/{id}/split,
-// GET /session/list, POST /session/{id}/kill), but terax does NOT yet register
-// Tauri commands that proxy them. The SessionSwitcher needs those commands to
-// list/create/kill sessions. Until they exist, this client can only drive the
-// flows backed by the two commands that ARE registered today: pty_detach (via
-// the terminal session's close path) and pty_attach_existing (via
-// reattachSession). When the session.* commands land, add typed wrappers here:
-//   export async function listSessions(): Promise<Session[]> {
-//     return invoke<Session[]>("rmux_session_list");
-//   }
-// and similar for new/window/split/kill.
+// Shapes returned by the create verbs (the daemon hands back the ids it minted
+// so callers can attach/split without re-listing). Mirror the daemon JSON.
+export type NewSessionResult = {
+  session_id: DaemonSessionId;
+  window_id: DaemonWindowId;
+  pane_id: DaemonPaneId;
+};
+
+export type NewWindowResult = {
+  window_id: DaemonWindowId;
+  pane_id: DaemonPaneId;
+};
+
+export type SplitWindowResult = {
+  pane_id: DaemonPaneId;
+};
+
+export type SplitDir = "row" | "col";
+
+// The session/window verbs, proxied by the rmux::* Tauri commands (#130, #132).
+// `rmux_session_list` returns [] when the daemon is not connected (flag off or
+// not staged), so listSessions degrades to an empty tree rather than throwing —
+// the switcher renders its empty state. The mutating verbs DO reject when the
+// daemon is absent; callers surface that as a toast.
+export function listSessions(): Promise<Session[]> {
+  return invoke<Session[]>("rmux_session_list");
+}
+
+export function newSession(
+  name: string,
+  cwd?: string,
+): Promise<NewSessionResult> {
+  return invoke<NewSessionResult>("rmux_session_new", { name, cwd });
+}
+
+export function renameSession(
+  id: DaemonSessionId,
+  name: string,
+): Promise<void> {
+  return invoke<void>("rmux_session_rename", { id, name });
+}
+
+export function killSession(id: DaemonSessionId): Promise<void> {
+  return invoke<void>("rmux_session_kill", { id });
+}
+
+export function newWindow(
+  sessionId: DaemonSessionId,
+  name?: string,
+): Promise<NewWindowResult> {
+  return invoke<NewWindowResult>("rmux_window_new", {
+    sessionId,
+    name,
+  });
+}
+
+export function splitWindow(
+  windowId: DaemonWindowId,
+  dir: SplitDir,
+): Promise<SplitWindowResult> {
+  return invoke<SplitWindowResult>("rmux_window_split", {
+    windowId,
+    dir,
+  });
+}
 
 // Reattach a known daemon pane into a mounted leaf. The leaf is marked rmux by
 // reattachSession so its subsequent close detaches (keeping the daemon shell

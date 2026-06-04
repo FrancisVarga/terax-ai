@@ -409,6 +409,110 @@ fn post_json(url: &str, body: Value) -> Result<(), String> {
     })
 }
 
+/// Blocking POST that returns the JSON response body (for verbs like
+/// `/session/new` that hand back ids). Runs on the Tauri runtime, like
+/// `post_json`.
+fn post_json_resp(url: &str, body: Value) -> Result<Value, String> {
+    let url = url.to_string();
+    tauri::async_runtime::block_on(async move {
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("rmux daemon request failed: {e}"))?;
+        if resp.status().is_success() {
+            resp.json::<Value>()
+                .await
+                .map_err(|e| format!("rmux daemon bad response: {e}"))
+        } else {
+            Err(resp.text().await.unwrap_or_default())
+        }
+    })
+}
+
+/// Blocking GET returning the JSON response body (for `/session/list`).
+fn get_json(url: &str) -> Result<Value, String> {
+    let url = url.to_string();
+    tauri::async_runtime::block_on(async move {
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("rmux daemon request failed: {e}"))?;
+        if resp.status().is_success() {
+            resp.json::<Value>()
+                .await
+                .map_err(|e| format!("rmux daemon bad response: {e}"))
+        } else {
+            Err(resp.text().await.unwrap_or_default())
+        }
+    })
+}
+
+// --- Session / window verb forwarding (#132) ---
+// These drive the daemon's session.* / window.* HTTP verbs (added in #130) so
+// the SessionSwitcher can manage named sessions. All require the daemon to be
+// connected; ensure_connected lazily spawns it. The frontend only calls these
+// when the rmux flag is on.
+
+/// Create a named session (one window, one pane). Returns the daemon JSON
+/// `{session_id, window_id, pane_id}`.
+pub fn session_new_forwarded(rmux_state: &RmuxState, name: &str, cwd: Option<&str>) -> Result<Value, String> {
+    let base_url = rmux_state.ensure_connected()?;
+    post_json_resp(
+        &format!("{base_url}/session/new"),
+        serde_json::json!({ "name": name, "cwd": cwd }),
+    )
+}
+
+/// The full session/window/pane tree, or an empty array if the daemon is not
+/// connected (so the switcher shows "no sessions" instead of erroring).
+pub fn session_list_forwarded(rmux_state: &RmuxState) -> Result<Value, String> {
+    let Some(base_url) = rmux_state.base_url() else {
+        return Ok(serde_json::json!([]));
+    };
+    get_json(&format!("{base_url}/session/list"))
+}
+
+pub fn session_rename_forwarded(rmux_state: &RmuxState, id: u32, name: &str) -> Result<(), String> {
+    let base_url = rmux_state
+        .base_url()
+        .ok_or_else(|| "rmux daemon not connected".to_string())?;
+    post_json(&format!("{base_url}/session/{id}/rename"), serde_json::json!({ "name": name }))
+}
+
+pub fn session_kill_forwarded(rmux_state: &RmuxState, id: u32) -> Result<(), String> {
+    let base_url = rmux_state
+        .base_url()
+        .ok_or_else(|| "rmux daemon not connected".to_string())?;
+    post_json(&format!("{base_url}/session/{id}/kill"), serde_json::json!({}))
+}
+
+/// Add a window to a session. Returns `{window_id, pane_id}`.
+pub fn window_new_forwarded(rmux_state: &RmuxState, session_id: u32, name: Option<&str>) -> Result<Value, String> {
+    let base_url = rmux_state
+        .base_url()
+        .ok_or_else(|| "rmux daemon not connected".to_string())?;
+    post_json_resp(
+        &format!("{base_url}/session/{session_id}/window/new"),
+        serde_json::json!({ "name": name }),
+    )
+}
+
+/// Split a window. Returns `{pane_id}`. `dir` is "row" | "col".
+pub fn window_split_forwarded(rmux_state: &RmuxState, window_id: u32, dir: &str) -> Result<Value, String> {
+    let base_url = rmux_state
+        .base_url()
+        .ok_or_else(|| "rmux daemon not connected".to_string())?;
+    post_json_resp(
+        &format!("{base_url}/window/{window_id}/split"),
+        serde_json::json!({ "dir": dir }),
+    )
+}
+
 /// Async JSON POST to `/pane/open`, returning the daemon pane id.
 async fn open_pane(
     base_url: &str,
@@ -556,6 +660,58 @@ fn dispatch_frame(
 fn forget_pane(app: &AppHandle, terax_id: u32) {
     use tauri::Manager;
     app.state::<RmuxState>().panes.lock_safe().remove(&terax_id);
+}
+
+// --- Tauri commands for the SessionSwitcher (#132) ---
+// Thin wrappers exposing the daemon session/window verbs to the webview. The
+// switcher only calls these when the rmux flag is on; with the flag off (or the
+// daemon absent) session_list returns an empty array and the others error
+// cleanly, so the switcher degrades gracefully.
+
+#[tauri::command]
+pub fn rmux_session_new(
+    rmux_state: tauri::State<RmuxState>,
+    name: String,
+    cwd: Option<String>,
+) -> Result<Value, String> {
+    session_new_forwarded(&rmux_state, &name, cwd.as_deref())
+}
+
+#[tauri::command]
+pub fn rmux_session_list(rmux_state: tauri::State<RmuxState>) -> Result<Value, String> {
+    session_list_forwarded(&rmux_state)
+}
+
+#[tauri::command]
+pub fn rmux_session_rename(
+    rmux_state: tauri::State<RmuxState>,
+    id: u32,
+    name: String,
+) -> Result<(), String> {
+    session_rename_forwarded(&rmux_state, id, &name)
+}
+
+#[tauri::command]
+pub fn rmux_session_kill(rmux_state: tauri::State<RmuxState>, id: u32) -> Result<(), String> {
+    session_kill_forwarded(&rmux_state, id)
+}
+
+#[tauri::command]
+pub fn rmux_window_new(
+    rmux_state: tauri::State<RmuxState>,
+    session_id: u32,
+    name: Option<String>,
+) -> Result<Value, String> {
+    window_new_forwarded(&rmux_state, session_id, name.as_deref())
+}
+
+#[tauri::command]
+pub fn rmux_window_split(
+    rmux_state: tauri::State<RmuxState>,
+    window_id: u32,
+    dir: String,
+) -> Result<Value, String> {
+    window_split_forwarded(&rmux_state, window_id, &dir)
 }
 
 #[cfg(test)]

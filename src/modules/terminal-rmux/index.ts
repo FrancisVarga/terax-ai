@@ -12,14 +12,31 @@ export {
   RmuxTerminalStack,
   type RmuxTerminalStackHandle,
 } from "./RmuxTerminalStack";
+export { SessionSwitcher } from "./SessionSwitcher";
 export {
   markPaneDetachable,
   reattachPane,
   unmarkPaneDetachable,
+  listSessions,
+  newSession,
+  renameSession,
+  killSession,
+  newWindow,
+  splitWindow,
   type DaemonPaneId,
   type DaemonSessionId,
   type DaemonWindowId,
+  type NewSessionResult,
+  type NewWindowResult,
   type Pane,
   type Session,
+  type SplitDir,
+  type SplitWindowResult,
   type Window,
 } from "./lib/rmux-client";
+export {
+  activeWindow,
+  displayName,
+  paneCount,
+  useSessionsStore,
+} from "./lib/sessions";
