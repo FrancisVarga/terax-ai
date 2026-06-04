@@ -13,11 +13,19 @@ export type PtySession = {
   close: () => Promise<void>;
 };
 
+// How a session's close() tears down the backend pane:
+// - "kill": pty_close, the shell dies (the only behavior pre-rmux).
+// - "detach": pty_detach, the daemon keeps the shell running and returns its
+//   pane id so it can be reattached later. Only meaningful for daemon-backed
+//   panes; pty_detach falls through to a kill for in-process panes.
+export type CloseMode = "kill" | "detach";
+
 export async function openPty(
   cols: number,
   rows: number,
   handlers: PtyHandlers,
   cwd?: string,
+  closeMode: CloseMode = "kill",
 ): Promise<PtySession> {
   // Raw bytes — no base64/JSON round-trip; messages arrive as ArrayBuffer.
   const onData = new Channel<ArrayBuffer>();
@@ -47,8 +55,52 @@ export async function openPty(
     onExit,
   });
 
-  let closed = false;
+  return buildSession(id, closeMode, releaseHandlers);
+}
 
+// Reattach to an EXISTING daemon pane previously detached via pty_detach (or
+// surfaced by the session switcher). The backend replays the pane's ring on
+// connect, then streams live output. Wiring is identical to openPty so the
+// returned PtySession is indistinguishable from a freshly opened one; close()
+// always detaches (never kills) because a reattached pane is meant to outlive
+// the local view.
+export async function attachExistingPty(
+  daemonPaneId: number,
+  handlers: PtyHandlers,
+): Promise<PtySession> {
+  const onData = new Channel<ArrayBuffer>();
+  const onExit = new Channel<number>();
+
+  let released = false;
+  const noop = () => {};
+  const releaseHandlers = () => {
+    if (released) return;
+    released = true;
+    onData.onmessage = noop;
+    onExit.onmessage = noop;
+  };
+
+  onData.onmessage = (buf) => handlers.onData(new Uint8Array(buf));
+  onExit.onmessage = (code) => {
+    handlers.onExit?.(code);
+    releaseHandlers();
+  };
+
+  const id = await invoke<number>("pty_attach_existing", {
+    daemonPaneId,
+    onData,
+    onExit,
+  });
+
+  return buildSession(id, "detach", releaseHandlers);
+}
+
+function buildSession(
+  id: number,
+  closeMode: CloseMode,
+  releaseHandlers: () => void,
+): PtySession {
+  let closed = false;
   return {
     id,
     write: (data) => invoke("pty_write", { id, data }),
@@ -57,7 +109,9 @@ export async function openPty(
       if (closed) return;
       closed = true;
       try {
-        await invoke("pty_close", { id });
+        await invoke(closeMode === "detach" ? "pty_detach" : "pty_close", {
+          id,
+        });
       } finally {
         releaseHandlers();
       }

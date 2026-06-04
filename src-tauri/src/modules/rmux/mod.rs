@@ -194,6 +194,51 @@ pub fn close_forwarded(rmux_state: &RmuxState, id: u32) -> Result<bool, String> 
     Ok(true)
 }
 
+/// Forward a DETACH: stop the terax-side mapping but leave the daemon pane
+/// running (its ring keeps retaining output). Returns `Ok(Some(daemon_pane_id))`
+/// when the id was daemon-backed so the caller can surface the pane id to the
+/// frontend for a later reattach; `Ok(None)` when the id is not daemon-backed
+/// (an in-process pane has no detach concept). Unlike close, this does NOT tell
+/// the daemon to kill the pane.
+pub fn detach_forwarded(rmux_state: &RmuxState, id: u32) -> Result<Option<u32>, String> {
+    let Some(pane_id) = rmux_state.panes.lock_safe().remove(&id) else {
+        return Ok(None);
+    };
+    if let Some(base_url) = rmux_state.base_url() {
+        // Best-effort: the daemon detach verb is a confirmation no-op, so a
+        // failure here does not change that the pane keeps running.
+        let url = format!("{base_url}/pane/{pane_id}/detach");
+        let _ = post_json(&url, serde_json::json!({}));
+    }
+    Ok(Some(pane_id))
+}
+
+/// Re-attach to an EXISTING daemon pane (one previously detached). Allocates a
+/// fresh terax-facing id, maps it to the given daemon pane id, and starts the
+/// binary bridge which replays the pane's scrollback ring then streams live.
+/// Returns the new terax-facing id. Erries if the daemon is not connected.
+pub fn attach_existing(
+    app: &AppHandle,
+    pty_state: &PtyState,
+    rmux_state: &RmuxState,
+    daemon_pane_id: u32,
+    on_data: Channel<Response>,
+    on_exit: Channel<i32>,
+) -> Result<u32, String> {
+    let base_url = rmux_state
+        .base_url()
+        .ok_or_else(|| "rmux daemon not connected".to_string())?;
+    let terax_id = pty_state.next_id();
+    rmux_state.panes.lock_safe().insert(terax_id, daemon_pane_id);
+    let events_url = format!("{base_url}/pane/{daemon_pane_id}/attach");
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        run_event_bridge(app, events_url, terax_id, on_data, on_exit).await;
+    });
+    log::info!(target: "rmux", "reattached terax id={terax_id} -> daemon pane={daemon_pane_id}");
+    Ok(terax_id)
+}
+
 /// Best-effort close of every daemon-backed pane and clear the map. Used by
 /// `pty_close_all` on webview reload. Failures are swallowed: the panes live in
 /// the surviving daemon and a leftover is acceptable in Phase 1, so this must
@@ -364,6 +409,110 @@ fn post_json(url: &str, body: Value) -> Result<(), String> {
     })
 }
 
+/// Blocking POST that returns the JSON response body (for verbs like
+/// `/session/new` that hand back ids). Runs on the Tauri runtime, like
+/// `post_json`.
+fn post_json_resp(url: &str, body: Value) -> Result<Value, String> {
+    let url = url.to_string();
+    tauri::async_runtime::block_on(async move {
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("rmux daemon request failed: {e}"))?;
+        if resp.status().is_success() {
+            resp.json::<Value>()
+                .await
+                .map_err(|e| format!("rmux daemon bad response: {e}"))
+        } else {
+            Err(resp.text().await.unwrap_or_default())
+        }
+    })
+}
+
+/// Blocking GET returning the JSON response body (for `/session/list`).
+fn get_json(url: &str) -> Result<Value, String> {
+    let url = url.to_string();
+    tauri::async_runtime::block_on(async move {
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("rmux daemon request failed: {e}"))?;
+        if resp.status().is_success() {
+            resp.json::<Value>()
+                .await
+                .map_err(|e| format!("rmux daemon bad response: {e}"))
+        } else {
+            Err(resp.text().await.unwrap_or_default())
+        }
+    })
+}
+
+// --- Session / window verb forwarding (#132) ---
+// These drive the daemon's session.* / window.* HTTP verbs (added in #130) so
+// the SessionSwitcher can manage named sessions. All require the daemon to be
+// connected; ensure_connected lazily spawns it. The frontend only calls these
+// when the rmux flag is on.
+
+/// Create a named session (one window, one pane). Returns the daemon JSON
+/// `{session_id, window_id, pane_id}`.
+pub fn session_new_forwarded(rmux_state: &RmuxState, name: &str, cwd: Option<&str>) -> Result<Value, String> {
+    let base_url = rmux_state.ensure_connected()?;
+    post_json_resp(
+        &format!("{base_url}/session/new"),
+        serde_json::json!({ "name": name, "cwd": cwd }),
+    )
+}
+
+/// The full session/window/pane tree, or an empty array if the daemon is not
+/// connected (so the switcher shows "no sessions" instead of erroring).
+pub fn session_list_forwarded(rmux_state: &RmuxState) -> Result<Value, String> {
+    let Some(base_url) = rmux_state.base_url() else {
+        return Ok(serde_json::json!([]));
+    };
+    get_json(&format!("{base_url}/session/list"))
+}
+
+pub fn session_rename_forwarded(rmux_state: &RmuxState, id: u32, name: &str) -> Result<(), String> {
+    let base_url = rmux_state
+        .base_url()
+        .ok_or_else(|| "rmux daemon not connected".to_string())?;
+    post_json(&format!("{base_url}/session/{id}/rename"), serde_json::json!({ "name": name }))
+}
+
+pub fn session_kill_forwarded(rmux_state: &RmuxState, id: u32) -> Result<(), String> {
+    let base_url = rmux_state
+        .base_url()
+        .ok_or_else(|| "rmux daemon not connected".to_string())?;
+    post_json(&format!("{base_url}/session/{id}/kill"), serde_json::json!({}))
+}
+
+/// Add a window to a session. Returns `{window_id, pane_id}`.
+pub fn window_new_forwarded(rmux_state: &RmuxState, session_id: u32, name: Option<&str>) -> Result<Value, String> {
+    let base_url = rmux_state
+        .base_url()
+        .ok_or_else(|| "rmux daemon not connected".to_string())?;
+    post_json_resp(
+        &format!("{base_url}/session/{session_id}/window/new"),
+        serde_json::json!({ "name": name }),
+    )
+}
+
+/// Split a window. Returns `{pane_id}`. `dir` is "row" | "col".
+pub fn window_split_forwarded(rmux_state: &RmuxState, window_id: u32, dir: &str) -> Result<Value, String> {
+    let base_url = rmux_state
+        .base_url()
+        .ok_or_else(|| "rmux daemon not connected".to_string())?;
+    post_json_resp(
+        &format!("{base_url}/window/{window_id}/split"),
+        serde_json::json!({ "dir": dir }),
+    )
+}
+
 /// Async JSON POST to `/pane/open`, returning the daemon pane id.
 async fn open_pane(
     base_url: &str,
@@ -511,6 +660,58 @@ fn dispatch_frame(
 fn forget_pane(app: &AppHandle, terax_id: u32) {
     use tauri::Manager;
     app.state::<RmuxState>().panes.lock_safe().remove(&terax_id);
+}
+
+// --- Tauri commands for the SessionSwitcher (#132) ---
+// Thin wrappers exposing the daemon session/window verbs to the webview. The
+// switcher only calls these when the rmux flag is on; with the flag off (or the
+// daemon absent) session_list returns an empty array and the others error
+// cleanly, so the switcher degrades gracefully.
+
+#[tauri::command]
+pub fn rmux_session_new(
+    rmux_state: tauri::State<RmuxState>,
+    name: String,
+    cwd: Option<String>,
+) -> Result<Value, String> {
+    session_new_forwarded(&rmux_state, &name, cwd.as_deref())
+}
+
+#[tauri::command]
+pub fn rmux_session_list(rmux_state: tauri::State<RmuxState>) -> Result<Value, String> {
+    session_list_forwarded(&rmux_state)
+}
+
+#[tauri::command]
+pub fn rmux_session_rename(
+    rmux_state: tauri::State<RmuxState>,
+    id: u32,
+    name: String,
+) -> Result<(), String> {
+    session_rename_forwarded(&rmux_state, id, &name)
+}
+
+#[tauri::command]
+pub fn rmux_session_kill(rmux_state: tauri::State<RmuxState>, id: u32) -> Result<(), String> {
+    session_kill_forwarded(&rmux_state, id)
+}
+
+#[tauri::command]
+pub fn rmux_window_new(
+    rmux_state: tauri::State<RmuxState>,
+    session_id: u32,
+    name: Option<String>,
+) -> Result<Value, String> {
+    window_new_forwarded(&rmux_state, session_id, name.as_deref())
+}
+
+#[tauri::command]
+pub fn rmux_window_split(
+    rmux_state: tauri::State<RmuxState>,
+    window_id: u32,
+    dir: String,
+) -> Result<Value, String> {
+    window_split_forwarded(&rmux_state, window_id, &dir)
 }
 
 #[cfg(test)]
@@ -761,6 +962,87 @@ mod tests {
             false
         });
         assert!(seen, "late attach did not replay the marker from the ring");
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    // Session/window grouping verbs (#130) end-to-end against a live daemon:
+    // create a session, add a second window, split it, assert /session/list
+    // reflects the tree, then kill the session and assert every pane is reaped.
+    #[test]
+    #[ignore = "requires a built rmux-daemon binary via RMUX_DAEMON_E2E"]
+    fn end_to_end_session_window_lifecycle() {
+        let exe = match std::env::var("RMUX_DAEMON_E2E") {
+            Ok(p) => std::path::PathBuf::from(p),
+            Err(_) => return,
+        };
+        assert!(exe.is_file(), "RMUX_DAEMON_E2E does not point at a file: {}", exe.display());
+
+        let (child, port) = spawn_daemon(&exe).expect("spawn daemon + read port");
+        let base = format!("http://127.0.0.1:{port}");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let client = reqwest::Client::new();
+
+        let post = |url: String, body: Value| {
+            let client = client.clone();
+            rt.block_on(async move {
+                client.post(&url).json(&body).send().await.expect("post")
+                    .error_for_status().expect("status")
+                    .json::<Value>().await.unwrap_or(Value::Null)
+            })
+        };
+        let get = |url: String| {
+            let client = client.clone();
+            rt.block_on(async move {
+                client.get(&url).send().await.expect("get")
+                    .error_for_status().expect("status")
+                    .json::<Value>().await.expect("json")
+            })
+        };
+
+        // Create a session (1 window, 1 pane).
+        let created = post(format!("{base}/session/new"), serde_json::json!({ "name": "work" }));
+        let session_id = created["session_id"].as_u64().expect("session_id");
+
+        // Add a second window (another pane).
+        let win2 = post(format!("{base}/session/{session_id}/window/new"), serde_json::json!({}));
+        let window2_id = win2["window_id"].as_u64().expect("window_id");
+
+        // Split the second window (a sibling pane).
+        let _ = post(
+            format!("{base}/window/{window2_id}/split"),
+            serde_json::json!({ "dir": "row" }),
+        );
+
+        // List: one session, two windows, three panes total.
+        let list = get(format!("{base}/session/list"));
+        let sessions = list.as_array().expect("array");
+        assert_eq!(sessions.len(), 1, "exactly one session");
+        let windows = sessions[0]["windows"].as_array().expect("windows");
+        assert_eq!(windows.len(), 2, "two windows");
+        let total_panes: usize = windows
+            .iter()
+            .map(|w| w["panes"].as_array().map(|p| p.len()).unwrap_or(0))
+            .sum();
+        assert_eq!(total_panes, 3, "three panes (1 + 1 + split)");
+
+        // Health reflects the live panes.
+        let health = get(format!("{base}/health"));
+        assert_eq!(health["panes"].as_u64(), Some(3));
+        assert_eq!(health["sessions"].as_u64(), Some(1));
+
+        // Kill the session: all three panes reaped.
+        let _ = rt.block_on(async {
+            client.post(format!("{base}/session/{session_id}/kill"))
+                .send().await.expect("kill").error_for_status().expect("kill status")
+        });
+        let health = get(format!("{base}/health"));
+        assert_eq!(health["panes"].as_u64(), Some(0), "all panes reaped on kill");
+        assert_eq!(health["sessions"].as_u64(), Some(0), "session gone");
 
         let _ = child.kill();
         let _ = child.wait();

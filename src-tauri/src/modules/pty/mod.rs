@@ -305,6 +305,52 @@ pub fn pty_close(
     Ok(())
 }
 
+/// Detach a daemon-backed pane: stop streaming it locally but leave the shell
+/// running in the daemon (its ring keeps retaining output). Returns the daemon
+/// pane id so the frontend can store it and reattach later. For an in-process
+/// pane (no daemon) detach is meaningless, so it falls through to a normal close
+/// and returns `None`.
+#[tauri::command]
+pub fn pty_detach(
+    state: tauri::State<PtyState>,
+    rmux_state: tauri::State<crate::modules::rmux::RmuxState>,
+    id: u32,
+) -> Result<Option<u32>, String> {
+    if let Some(pane_id) = crate::modules::rmux::detach_forwarded(&rmux_state, id)? {
+        return Ok(Some(pane_id));
+    }
+    // Not daemon-backed: an in-process pane cannot survive a detach, so closing
+    // is the honest behavior. Reuse pty_close's teardown by removing + killing.
+    if let Some(s) = state.sessions.write_safe().remove(&id) {
+        let _ = s.killer.lock_safe().kill();
+        let s_fallback = Arc::clone(&s);
+        if thread::Builder::new()
+            .name(format!("terax-pty-drop-{id}"))
+            .spawn(move || session::drop_session(s))
+            .is_err()
+        {
+            session::drop_session(s_fallback);
+        }
+    }
+    Ok(None)
+}
+
+/// Reattach to an EXISTING daemon pane (one previously detached via `pty_detach`,
+/// or surfaced by the session switcher). Returns a fresh terax-facing id wired to
+/// the daemon pane; its scrollback ring replays on connect, then live output
+/// streams. Errors if the daemon is not connected (the pane is unreachable).
+#[tauri::command]
+pub fn pty_attach_existing(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, PtyState>,
+    rmux_state: tauri::State<'_, crate::modules::rmux::RmuxState>,
+    daemon_pane_id: u32,
+    on_data: Channel<Response>,
+    on_exit: Channel<i32>,
+) -> Result<u32, String> {
+    crate::modules::rmux::attach_existing(&app, &state, &rmux_state, daemon_pane_id, on_data, on_exit)
+}
+
 // A fresh webview load orphans the previous frontend's sessions in this still
 // running process; reap them on boot before any new tab spawns.
 #[tauri::command]
