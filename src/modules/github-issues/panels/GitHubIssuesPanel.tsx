@@ -8,12 +8,13 @@ import {
   Loading03Icon,
   RecordIcon,
   RefreshIcon,
+  Search01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Issue, IssueFilter } from "../store/issuesStore";
-import { useIssuesStore } from "../store/issuesStore";
+import { POLL_INTERVAL_MS, useIssuesStore } from "../store/issuesStore";
 
 const FILTERS: { id: IssueFilter; label: string }[] = [
   { id: "open", label: "Open" },
@@ -31,18 +32,27 @@ export function GitHubIssuesPanel() {
 
   const [filter, setFilter] = useState<IssueFilter>("open");
   const [composing, setComposing] = useState(false);
+  const [query, setQuery] = useState("");
 
   // SWR: on mount / root change / env change / filter change, ask the store to
   // ensure the cache is warm. The store no-ops when the cache is still fresh
-  // for this filter, so rapid sidebar tab toggles do not spawn `gh`.
+  // for this filter, so rapid sidebar tab toggles do not spawn `gh`. A second
+  // effect drives a background poll while the tab is mounted so the list stays
+  // live without a manual reload; each tick respects the store's TTL, so a
+  // fresh cache no-ops and only stale entries re-query `gh`.
   useEffect(() => {
     if (!root) return;
-    void load(root, filter);
+    void load(root, filter, Date.now());
+    const id = setInterval(
+      () => void load(root, filter, Date.now()),
+      POLL_INTERVAL_MS,
+    );
+    return () => clearInterval(id);
   }, [root, workspaceEnv, filter, load]);
 
   const reload = useCallback(() => {
     if (!root) return;
-    void load(root, filter, true);
+    void load(root, filter, Date.now(), true);
   }, [root, filter, load]);
 
   // Derive the header/empty-state from the cache (default to loading).
@@ -52,6 +62,21 @@ export function GitHubIssuesPanel() {
   // otherwise we are mid-switch and should fall back to loading.
   const issues =
     cache && cache.filter === filter ? cache.issues : [];
+
+  // Search is a client-side view over the already-fetched list — instant, no
+  // extra `gh` spawn. Matches title, #number, author, and label names so a
+  // query like "bug", "42", or a label finds the right issue.
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return issues;
+    return issues.filter(
+      (i) =>
+        i.title.toLowerCase().includes(q) ||
+        String(i.number).includes(q) ||
+        i.author.toLowerCase().includes(q) ||
+        i.labels.some((l) => l.name.toLowerCase().includes(q)),
+    );
+  }, [issues, query]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -94,6 +119,26 @@ export function GitHubIssuesPanel() {
       ) : null}
 
       {status !== "no-repo" ? (
+        <div className="relative shrink-0 border-b border-border/60 px-2 py-1.5">
+          <HugeiconsIcon
+            icon={Search01Icon}
+            size={13}
+            className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+          />
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setQuery("");
+            }}
+            placeholder="Search issues…"
+            className="w-full rounded border border-border/60 bg-background py-1 pl-7 pr-2 text-[11px] text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-primary/50"
+          />
+        </div>
+      ) : null}
+
+      {status !== "no-repo" ? (
         <div className="flex shrink-0 items-center gap-1 border-b border-border/60 px-2 py-1">
           {FILTERS.map((f) => (
             <button
@@ -130,13 +175,15 @@ export function GitHubIssuesPanel() {
             <br />
             <span className="text-muted-foreground">{cache?.error}</span>
           </div>
-        ) : issues.length === 0 ? (
+        ) : filtered.length === 0 ? (
           <div className="px-3 py-5 text-center text-xs leading-relaxed text-muted-foreground">
-            No {filter === "all" ? "" : filter} issues.
+            {query.trim()
+              ? `No issues match "${query.trim()}".`
+              : `No ${filter === "all" ? "" : filter} issues.`}
           </div>
         ) : (
           <div className="p-1">
-            {issues.map((issue) => (
+            {filtered.map((issue) => (
               <IssueRow key={issue.number} issue={issue} />
             ))}
           </div>
@@ -173,7 +220,7 @@ function CreateIssueForm({
     setSubmitting(true);
     setError(null);
     try {
-      await createIssue(cwd, title.trim(), body.trim(), filter);
+      await createIssue(cwd, title.trim(), body.trim(), filter, Date.now());
       onClose();
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));

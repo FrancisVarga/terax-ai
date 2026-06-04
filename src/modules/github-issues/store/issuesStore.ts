@@ -19,6 +19,22 @@ import {
 const ISSUES_TTL_MS = 30_000;
 /** Issues to fetch per state filter. */
 const ISSUES_LIMIT = 50;
+/**
+ * Background poll cadence while the issues tab is mounted. The panel drives a
+ * `setInterval` at this rate; each tick calls `load`, which respects the TTL,
+ * so a fresh cache no-ops and only stale entries actually re-query `gh`.
+ * Mirrors the github-feed module's `POLL_INTERVAL_MS`.
+ */
+export const POLL_INTERVAL_MS = 60_000;
+
+/** localStorage key the issue cache is persisted under. */
+const STORAGE_KEY = "terax:github-issues-cache";
+/**
+ * Max repos kept in the persisted cache. The in-memory cache is keyed by `cwd`
+ * (one entry per repo ever visited); persisting all of them would grow
+ * localStorage without bound, so we keep only the most-recently-fetched roots.
+ */
+const MAX_PERSISTED_ROOTS = 12;
 
 /** Which issue states the panel can show; the cache is keyed on this too. */
 export type IssueFilter = "open" | "closed" | "all";
@@ -72,6 +88,62 @@ export type IssuesCache = {
   loading: boolean;
 };
 
+/**
+ * Restore the persisted issue cache from localStorage. Every restored entry is
+ * marked stale (`fetchedAt: 0`, `loading: false`) so it paints instantly on
+ * launch but the panel's first `load` bypasses the TTL and re-polls `gh` for
+ * fresh data — same "serve cache, then revalidate" contract, just across a
+ * restart. A `loading` status is downgraded to `empty` since no fetch is in
+ * flight after a cold start. Malformed blobs are dropped silently.
+ */
+function loadPersisted(): Record<string, IssuesCache> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    const out: Record<string, IssuesCache> = {};
+    for (const [cwd, v] of Object.entries(parsed as Record<string, unknown>)) {
+      const e = v as Partial<IssuesCache>;
+      if (!e || !Array.isArray(e.issues)) continue;
+      out[cwd] = {
+        status: e.status === "loading" ? "empty" : (e.status ?? "empty"),
+        repo: e.repo ?? null,
+        issues: e.issues as Issue[],
+        filter: e.filter ?? "open",
+        error: undefined,
+        // Force stale so the next load() ignores the TTL and revalidates.
+        fetchedAt: 0,
+        loading: false,
+      };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Persist the issue cache to localStorage, keeping only the
+ * {@link MAX_PERSISTED_ROOTS} most-recently-fetched roots so the blob stays
+ * bounded. `loading`/`error` transient fields are written as-is but reset on
+ * restore. Best-effort: quota or serialization failures are swallowed.
+ */
+function persistCache(cache: Record<string, IssuesCache>): void {
+  if (typeof window === "undefined") return;
+  try {
+    const entries = Object.entries(cache)
+      // Don't persist no-repo placeholders or never-fetched stubs.
+      .filter(([, c]) => c.status !== "no-repo" && c.issues.length > 0)
+      .sort((a, b) => b[1].fetchedAt - a[1].fetchedAt)
+      .slice(0, MAX_PERSISTED_ROOTS);
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // ignore quota / serialization failures
+  }
+}
+
 type IssuesState = {
   /** Issue cache, keyed by working dir. */
   cache: Record<string, IssuesCache>;
@@ -79,19 +151,28 @@ type IssuesState = {
    * Ensure repo + issues for `cwd` are loaded. Serves cache when fresh,
    * revalidates in the background when stale. A changed `filter` always forces
    * a fetch. `force` bypasses the TTL (used by the manual reload button).
-   * Remote roots resolve to a `no-repo` cache entry.
+   * Remote roots resolve to a `no-repo` cache entry. `nowMs` is the caller's
+   * clock, injected so the store has no hidden dependency on a restricted
+   * clock — matches the github-feed store's `loadFeed(nowMs, …)` convention.
    */
-  load: (cwd: string, filter: IssueFilter, force?: boolean) => Promise<void>;
+  load: (
+    cwd: string,
+    filter: IssueFilter,
+    nowMs: number,
+    force?: boolean,
+  ) => Promise<void>;
   /**
    * Create an issue in `cwd`, then refresh the list so the new issue shows up
    * without waiting for the next TTL window. Returns the new issue's url, or
-   * throws so the form can surface the error inline.
+   * throws so the form can surface the error inline. `nowMs` threads through to
+   * the forced refresh.
    */
   createIssue: (
     cwd: string,
     title: string,
     body: string,
     filter: IssueFilter,
+    nowMs: number,
   ) => Promise<{ number: number; url: string }>;
 };
 
@@ -99,13 +180,21 @@ export const useIssuesStore = create<IssuesState>((set, get) => {
   const patch = (cwd: string, p: Partial<IssuesCache>) =>
     set((s) => {
       const cur = s.cache[cwd] ?? EMPTY;
-      return { cache: { ...s.cache, [cwd]: { ...cur, ...p } } };
+      const cache = { ...s.cache, [cwd]: { ...cur, ...p } };
+      // Persist on every cache mutation so issues survive an app restart. This
+      // is the single write path for the cache, so one call here covers loads,
+      // revalidations, and issue creation.
+      persistCache(cache);
+      return { cache };
     });
 
   return {
-    cache: {},
+    // Seed from localStorage: re-opening the app paints the last-known issues
+    // immediately, then the panel's first load() revalidates (entries restore
+    // stale, so the TTL is bypassed).
+    cache: loadPersisted(),
 
-    load: async (cwd, filter, force = false) => {
+    load: async (cwd, filter, nowMs, force = false) => {
       if (!cwd) return;
       const cached = get().cache[cwd];
       // Coalesce concurrent loads, and serve fresh cache (same filter) without
@@ -116,7 +205,7 @@ export const useIssuesStore = create<IssuesState>((set, get) => {
         cached &&
         cached.status !== "loading" &&
         cached.filter === filter &&
-        Date.now() - cached.fetchedAt < ISSUES_TTL_MS
+        nowMs - cached.fetchedAt < ISSUES_TTL_MS
       ) {
         return;
       }
@@ -129,7 +218,7 @@ export const useIssuesStore = create<IssuesState>((set, get) => {
           issues: [],
           filter,
           error: undefined,
-          fetchedAt: Date.now(),
+          fetchedAt: nowMs,
           loading: false,
         });
         return;
@@ -154,14 +243,14 @@ export const useIssuesStore = create<IssuesState>((set, get) => {
         patch(
           cwd,
           unchanged
-            ? { fetchedAt: Date.now(), loading: false }
+            ? { fetchedAt: nowMs, loading: false }
             : {
                 status,
                 repo,
                 issues,
                 filter,
                 error: undefined,
-                fetchedAt: Date.now(),
+                fetchedAt: nowMs,
                 loading: false,
               },
         );
@@ -174,16 +263,16 @@ export const useIssuesStore = create<IssuesState>((set, get) => {
           error: noRepo
             ? undefined
             : String(e instanceof Error ? e.message : e),
-          fetchedAt: Date.now(),
+          fetchedAt: nowMs,
           loading: false,
         });
       }
     },
 
-    createIssue: async (cwd, title, body, filter) => {
+    createIssue: async (cwd, title, body, filter, nowMs) => {
       const result = await createIssue(cwd, title, body);
       // Force a refresh so the freshly created issue appears immediately.
-      await get().load(cwd, filter, true);
+      await get().load(cwd, filter, nowMs, true);
       return result;
     },
   };
