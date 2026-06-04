@@ -93,6 +93,12 @@ pub struct S3Connection {
     /// Optional default bucket to focus the tree on.
     #[serde(default)]
     pub bucket: Option<String>,
+    /// True for the app-managed local S3 server connection (the `localfs`
+    /// sidecar, seeded by `modules::s3local`). The browser uses this to gate
+    /// mutation controls (create/delete bucket, upload/delete object) to the
+    /// local store only — remote connections stay read-only.
+    #[serde(default)]
+    pub is_local: bool,
 }
 
 /// The secret half kept in the OS secret store as a JSON blob.
@@ -297,6 +303,53 @@ pub async fn s3_save_connection(
         list.clone()
     })?;
     write_meta(&app, &snapshot)
+}
+
+/// Upsert a connection + its secret programmatically (not an IPC command).
+/// Used by `modules::s3local` to seed the local S3 server connection so the
+/// existing browser lists it. Same persistence path as `s3_save_connection`:
+/// secret -> OS secret store keyed by `conn.id`, metadata -> `s3_connections.json`.
+pub(crate) async fn upsert_connection(
+    app: &AppHandle,
+    state: &tauri::State<'_, S3State>,
+    secrets: &tauri::State<'_, SecretsState>,
+    conn: S3Connection,
+    access_key_id: String,
+    secret_access_key: String,
+) -> Result<(), String> {
+    let secret = S3Secret {
+        access_key_id,
+        secret_access_key,
+        session_token: None,
+    };
+    let blob = serde_json::to_string(&secret).map_err(|e| e.to_string())?;
+    super::secrets::secrets_set(
+        app.clone(),
+        (*secrets).clone(),
+        SECRET_SERVICE.to_string(),
+        conn.id.clone(),
+        blob,
+    )
+    .await?;
+
+    let snapshot = with_conns(app, state, |list| {
+        if let Some(slot) = list.iter_mut().find(|c| c.id == conn.id) {
+            *slot = conn.clone();
+        } else {
+            list.push(conn.clone());
+        }
+        list.clone()
+    })?;
+    write_meta(app, &snapshot)
+}
+
+/// Whether a connection id is configured (used by `s3local` to seed only once).
+pub(crate) fn connection_exists(
+    app: &AppHandle,
+    state: &tauri::State<'_, S3State>,
+    id: &str,
+) -> bool {
+    with_conns(app, state, |list| list.iter().any(|c| c.id == id)).unwrap_or(false)
 }
 
 /// Delete a connection and its stored credentials.
@@ -564,7 +617,10 @@ pub async fn s3_parquet_preview(
     use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 
     let conn = resolve(&app, &state, &secrets, &id).await?;
-    let store = std::sync::Arc::new(object_store(&conn, &bucket)?);
+    // `ParquetObjectReader::new` takes `Arc<dyn ObjectStore>`; annotate the Arc
+    // as the trait object so the unsize happens at construction.
+    let store: std::sync::Arc<dyn ObjectStore> =
+        std::sync::Arc::new(object_store(&conn, &bucket)?);
     let path = object_store::path::Path::from(key.as_str());
 
     let meta = store
@@ -681,6 +737,7 @@ mod tests {
             endpoint: None,
             force_path_style: false,
             bucket: Some("data".into()),
+            is_local: false,
         };
         let json = serde_json::to_string(&c).unwrap();
         assert!(!json.contains("secret"));

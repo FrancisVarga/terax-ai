@@ -22,6 +22,13 @@ export type S3Connection = {
   force_path_style: boolean;
   /** Optional default bucket. When set, the tree can skip the bucket-list step. */
   bucket: string | null;
+  /**
+   * True for the app-managed local S3 server (the `localfs` sidecar). The
+   * browser gates mutation controls (create/delete bucket, upload/delete
+   * object) to this connection only — remote connections stay read-only.
+   * Optional + defaulted because older persisted connections predate the field.
+   */
+  is_local?: boolean;
 };
 
 /**

@@ -14,6 +14,7 @@ pub mod otel;
 pub mod proc;
 pub mod pty;
 pub mod s3;
+pub mod s3local;
 pub mod secrets;
 pub mod shell;
 pub mod ssh;

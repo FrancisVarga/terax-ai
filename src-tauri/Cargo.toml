@@ -4,8 +4,13 @@
 # `target/release/`, which tripped ICE30 ("installed by two different
 # components"). NSIS was unaffected; MSI `light.exe` ICE validation was the only
 # failure. The member shares the collector core via a path dep on `terax_lib`.
+#
+# `localfs` (the local-only S3 server sidecar) is a separate member for the same
+# ICE30 reason. Unlike otel-collector it has NO path dep on `terax_lib` — it is a
+# standalone crate over the published `s3s-fs` library, so it never drags the app
+# crate into the sidecar build.
 [workspace]
-members = [".", "otel-collector", "kv-server"]
+members = [".", "otel-collector", "kv-server", "localfs"]
 resolver = "2"
 
 [package]
@@ -66,12 +71,23 @@ grep-searcher = "0.1"
 grep-matcher = "0.1"
 globset = "0.4"
 shared_child = "1"
+# The local-only S3 server, depended on as a library for the in-process dev
+# fallback (sidecar mode spawns the `localfs` binary instead). `modules::s3local`
+# calls `localfs::bind` + `localfs::serve` to run the identical S3 server in the
+# app process when no sidecar binary is staged.
+localfs = { path = "localfs" }
+# UUID v4 for generating the local S3 secret key (see `modules::s3local`).
+uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 # Parquet preview via the Arrow reader. `async` + `object_store` enable the
 # `ParquetObjectReader`/`ParquetRecordBatchStreamBuilder` path so S3 objects can
 # be range-paged without a full download (see `modules/s3.rs`); the listed
 # features cover the Arrow bridge plus the common on-disk compression codecs.
-parquet = { version = "53", default-features = false, features = [
+# Bumped 53 -> 54 so the arrow/chrono stack is compatible with chrono ^0.4.44,
+# which `s3s` (the localfs S3 server) requires. arrow 53 calls a bare
+# `.quarter()` that became ambiguous once chrono 0.4.44 added `Datelike::quarter`
+# (E0034); arrow 54 fixed it. Pulls object_store 0.12 (see below).
+parquet = { version = "54", default-features = false, features = [
 	"arrow",
 	"async",
 	"object_store",
@@ -83,6 +99,11 @@ parquet = { version = "53", default-features = false, features = [
 # reader the async parquet stream consumes; `aws-sdk-s3`/`aws-config` cover
 # listing, byte fetches, and the full AWS auth chain (static keys, profiles,
 # SSO, IAM) plus custom endpoints (MinIO/R2/Wasabi).
+# Pinned to 0.11 to match what `parquet` 54 depends on internally — the
+# `ParquetObjectReader::new(store, meta)` call shares `object_store`'s
+# `ObjectMeta`/`ObjectStore` types with parquet, so a version skew (0.12) makes
+# the `head()` meta type mismatch parquet's expected one. parquet 54 + arrow 54
+# is what we needed for chrono 0.4.44; object_store stays at 0.11.
 object_store = { version = "0.11", features = ["aws"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
@@ -92,8 +113,9 @@ aws-credential-types = "1"
 # mismatch) instead of the flat top-level "service error".
 aws-smithy-types = "1"
 # Arrow with default features so `arrow::util::display::array_value_to_string`
-# (used to stringify cells) is always available.
-arrow = "53"
+# (used to stringify cells) is always available. Kept in lockstep with `parquet`
+# (54) for chrono 0.4.44 compatibility.
+arrow = "54"
 # DuckDB (bundled = compiles libduckdb from source, no system lib) powers the
 # SQL query editor for CSV/Parquet files via the core `read_csv_auto` /
 # `read_parquet` table functions — no network-loaded extension needed. SQLite

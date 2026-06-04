@@ -3,7 +3,7 @@ pub mod modules;
 use modules::sync::MutexExt;
 use modules::{
     agent, agentscan, bunqueue, ccusage, cleanup, crash, docker, fs, git, gpu, kv, net, otel, pty,
-    s3, secrets, shell, ssh, workspace,
+    s3, s3local, secrets, shell, ssh, workspace,
 };
 use std::collections::HashMap;
 #[cfg(desktop)]
@@ -496,6 +496,7 @@ pub fn run() {
         .manage(ssh::SshFsState::default())
         .manage(ssh::SshBgState::default())
         .manage(s3::S3State::default())
+        .manage(s3local::S3LocalState::default())
         .manage(ProjectWindows::default())
         .manage(OpenWindows::default())
         .manage(otel::OtelState::default())
@@ -622,6 +623,16 @@ pub fn run() {
             kv::lifecycle::set_config(&kv_state, kv_port, kv_data_dir, kv_pass);
             kv::lifecycle::init_from_pref(app.handle(), &kv_state);
             kv::lifecycle::start_watchdog(app.handle().clone());
+
+            // Start the local-only S3 server (a smaller RustFS). In a packaged
+            // build this spawns the `localfs` sidecar against
+            // `<launch-cwd>/.t-camelot/s3-local/`; in dev (no sidecar staged) it
+            // runs the identical server in-process. Non-fatal — failures install
+            // `Backend::Off` and surface via `s3local_status`. The browser
+            // connection is seeded lazily by the frontend calling
+            // `s3local_seed_connection` once the endpoint is up.
+            let s3local_state = app.state::<s3local::S3LocalState>();
+            s3local::start(app.handle(), &s3local_state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -777,6 +788,13 @@ pub fn run() {
             kv::data::kv_data_dbsize,
             kv::data::kv_data_publish,
             kv::data::kv_data_subscribe,
+            s3local::s3local_status,
+            s3local::s3local_endpoint,
+            s3local::s3local_seed_connection,
+            s3local::s3local_create_bucket,
+            s3local::s3local_delete_bucket,
+            s3local::s3local_upload,
+            s3local::s3local_delete_object,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -795,6 +813,9 @@ pub fn run() {
                 // Kill the kv-server sidecar; it snapshots on its SIGTERM/Ctrl-C
                 // path before exiting. No-op in in-process mode.
                 kv::lifecycle::on_exit(&app.state::<kv::KvState>());
+                // Reap the localfs S3 sidecar (or stop the in-process server) so
+                // it doesn't outlive the app or keep its loopback port bound.
+                app.state::<s3local::S3LocalState>().shutdown();
             }
         });
 }
