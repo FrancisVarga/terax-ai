@@ -6148,7 +6148,6 @@ dependencies = [
 name = "rmux-daemon"
 version = "0.29.0"
 dependencies = [
- "base64 0.22.1",
  "bytes",
  "futures-util",
  "http-body-util",
@@ -8042,7 +8041,6 @@ dependencies = [
  "aws-credential-types",
  "aws-sdk-s3",
  "aws-smithy-types",
- "base64 0.22.1",
  "bincode",
  "bytes",
  "dashmap",

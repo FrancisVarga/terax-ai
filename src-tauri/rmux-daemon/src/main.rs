@@ -25,8 +25,6 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine as _;
 use http_body_util::{combinators::BoxBody, BodyExt, Full, StreamBody};
 use hyper::body::{Bytes, Frame};
 use hyper::server::conn::http1;
@@ -42,25 +40,75 @@ use terax_lib::modules::pty::{spawn_session, AgentSignal, PtyOutputSink, Session
 use terax_lib::modules::workspace::WorkspaceEnv;
 
 /// Capacity of a pane's output broadcast channel. Shell output can burst (a
-/// `cat` of a large file), so this is generous: a lagging SSE subscriber drops
-/// the oldest frames rather than stalling the reader thread, and xterm on the
-/// other end repaints from the live stream. 1024 frames is ample headroom.
+/// `cat` of a large file), so this is generous: a lagging stream subscriber
+/// drops the oldest frames rather than stalling the reader thread, and the
+/// client repaints from the live tail. 1024 frames is ample headroom.
 const PANE_CHANNEL_CAP: usize = 1024;
 
-/// One frame fanned out to a pane's `/events` subscribers. `Agent` carries the
-/// already-serialized JSON so the broadcast payload stays `Clone` and cheap.
+/// Per-pane scrollback ring cap in BYTES (sum of `Data` payloads). On attach the
+/// ring is replayed so a client that connects after output began still sees
+/// recent scrollback. 256 KiB is ~tens of full screens — enough to restore
+/// context on reattach without unbounded memory per pane.
+const RING_MAX_BYTES: usize = 256 * 1024;
+
+/// One frame of pane output. Crosses the broadcast channel AND is stored in the
+/// per-pane ring for replay-on-attach, so both the live and replay paths encode
+/// through the same `encode_frame`. `Agent` carries already-serialized JSON so
+/// the payload stays `Clone` and cheap.
 #[derive(Clone)]
-enum SseFrame {
+enum OutFrame {
     Data(Vec<u8>),
     Agent(String),
     Exit(i32),
 }
 
+/// Bounded per-pane scrollback. Holds recent frames up to `RING_MAX_BYTES` of
+/// `Data` payload; `Agent`/`Exit` frames are tiny and not byte-counted. Oldest
+/// frames are evicted first. Replayed in order on attach.
+struct Ring {
+    frames: std::collections::VecDeque<OutFrame>,
+    bytes: usize,
+}
+
+impl Ring {
+    fn new() -> Self {
+        Self { frames: std::collections::VecDeque::new(), bytes: 0 }
+    }
+
+    fn push(&mut self, frame: OutFrame) {
+        if let OutFrame::Data(b) = &frame {
+            self.bytes += b.len();
+        }
+        self.frames.push_back(frame);
+        while self.bytes > RING_MAX_BYTES {
+            match self.frames.pop_front() {
+                Some(OutFrame::Data(b)) => self.bytes -= b.len(),
+                Some(_) => {}
+                None => break,
+            }
+        }
+    }
+
+    fn snapshot(&self) -> Vec<OutFrame> {
+        self.frames.iter().cloned().collect()
+    }
+}
+
+/// A pane's output fan-out: the scrollback ring and the live broadcast sender,
+/// guarded together by ONE mutex so an append (ring push + broadcast send) is
+/// atomic against an attach (ring snapshot + subscribe). That atomicity is what
+/// closes the Phase 1 subscribe-race: no frame can slip between a new
+/// subscriber's snapshot and its broadcast subscription.
+struct PaneOutput {
+    ring: Ring,
+    tx: broadcast::Sender<OutFrame>,
+}
+
 /// A live pane: its shell session (dropping the `Arc` kills the child) and the
-/// broadcast sender its reader thread pushes output into.
+/// output fan-out (ring + broadcast) behind a single mutex.
 struct PaneEntry {
     session: Arc<Session>,
-    tx: broadcast::Sender<SseFrame>,
+    output: Arc<Mutex<PaneOutput>>,
 }
 
 /// Daemon-wide state shared across all connection tasks.
@@ -80,27 +128,38 @@ impl DaemonState {
     }
 }
 
-/// Output sink for one pane: pushes each PTY event onto the pane's broadcast
-/// channel. Sends are best-effort — with no live `/events` subscriber the send
-/// errors and is dropped, which is correct (there is nobody to receive it).
+/// Output sink for one pane: under the pane's single output mutex, appends each
+/// event to the scrollback ring AND broadcasts it to live subscribers in one
+/// atomic step. Holding the lock across both is what makes an append serialize
+/// against an attach (snapshot + subscribe under the same lock), closing the
+/// subscribe-race. The broadcast send is best-effort — with no live subscriber
+/// it errors and is dropped, which is correct (the ring still retains it).
 ///
 /// The reader/waiter threads inside `spawn_session` are OS threads, not async
-/// tasks; `broadcast::Sender` is `Send + Sync`, so pushing from those threads
-/// into the tokio channel needs no runtime handle.
-struct SseSink(broadcast::Sender<SseFrame>);
+/// tasks; `parking_lot::Mutex` + `broadcast::Sender` are `Send + Sync`, so
+/// pushing from those threads needs no runtime handle.
+struct PaneSink(Arc<Mutex<PaneOutput>>);
 
-impl PtyOutputSink for SseSink {
+impl PaneSink {
+    fn emit(&self, frame: OutFrame) {
+        let mut out = self.0.lock_safe();
+        out.ring.push(frame.clone());
+        let _ = out.tx.send(frame);
+    }
+}
+
+impl PtyOutputSink for PaneSink {
     fn data(&self, bytes: Vec<u8>) {
-        let _ = self.0.send(SseFrame::Data(bytes));
+        self.emit(OutFrame::Data(bytes));
     }
 
     fn agent(&self, signal: AgentSignal) {
         let json = serde_json::to_string(&signal).unwrap_or_else(|_| "null".to_string());
-        let _ = self.0.send(SseFrame::Agent(json));
+        self.emit(OutFrame::Agent(json));
     }
 
     fn exit(&self, code: i32) {
-        let _ = self.0.send(SseFrame::Exit(code));
+        self.emit(OutFrame::Exit(code));
     }
 }
 
@@ -212,7 +271,7 @@ async fn handle(
         if let Some((id_str, verb)) = rest.split_once('/') {
             if let Ok(id) = id_str.parse::<u32>() {
                 match (&method, verb) {
-                    (&Method::GET, "events") => return Ok(events_pane(&state, id)),
+                    (&Method::GET, "attach") => return Ok(attach_pane(&state, id)),
                     (&Method::POST, "write") => return Ok(write_pane(req, &state, id).await),
                     (&Method::POST, "resize") => return Ok(resize_pane(req, &state, id).await),
                     (&Method::POST, "close") => return Ok(close_pane(&state, id)),
@@ -248,8 +307,9 @@ async fn open_pane(
     };
 
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
-    let (tx, _rx) = broadcast::channel::<SseFrame>(PANE_CHANNEL_CAP);
-    let sink: Arc<dyn PtyOutputSink> = Arc::new(SseSink(tx.clone()));
+    let (tx, _rx) = broadcast::channel::<OutFrame>(PANE_CHANNEL_CAP);
+    let output = Arc::new(Mutex::new(PaneOutput { ring: Ring::new(), tx }));
+    let sink: Arc<dyn PtyOutputSink> = Arc::new(PaneSink(output.clone()));
 
     // Spawn the shell. `spawn_session` does blocking PTY setup; run it off the
     // async worker so the reactor thread is never blocked on ConPTY/openpty.
@@ -267,7 +327,7 @@ async fn open_pane(
         Err(e) => return text(StatusCode::INTERNAL_SERVER_ERROR, &format!("spawn join failed: {e}")),
     };
 
-    state.panes.lock_safe().insert(id, PaneEntry { session, tx });
+    state.panes.lock_safe().insert(id, PaneEntry { session, output });
     json_response(StatusCode::OK, &serde_json::json!({ "pane_id": id }))
 }
 
@@ -347,30 +407,45 @@ fn close_pane(state: &DaemonState, id: u32) -> Response<Body> {
     }
 }
 
-/// Build a `text/event-stream` response that emits one SSE frame per output
-/// chunk the pane produces. Output bytes are not UTF-8 safe, so `data` frames
-/// carry base64; `agent` frames carry JSON; `exit` carries the integer code.
-/// The stream ends when the pane's broadcast sender is dropped (pane closed).
-fn events_pane(state: &DaemonState, id: u32) -> Response<Body> {
-    let rx = {
+/// Attach to a pane's output: REPLAY the scrollback ring, then STREAM live
+/// frames, as one continuous binary body. Frame format is
+/// `[u8 kind][u32 LE len][len bytes]` (kind 0 = data raw bytes, 1 = agent JSON,
+/// 2 = exit code) — no base64, no text framing.
+///
+/// Atomicity (the subscribe-race fix): the ring snapshot AND the broadcast
+/// subscribe happen under the pane's single output mutex, which `PaneSink::emit`
+/// also takes to append-and-broadcast. So no frame can land between the snapshot
+/// and the subscription: the replayed ring and the live tail are exactly
+/// contiguous, with no gap and no duplicate.
+fn attach_pane(state: &DaemonState, id: u32) -> Response<Body> {
+    let (replay, rx) = {
         let panes = state.panes.lock_safe();
-        match panes.get(&id) {
-            Some(p) => p.tx.subscribe(),
+        let entry = match panes.get(&id) {
+            Some(p) => p,
             None => return text(StatusCode::NOT_FOUND, "no pane"),
-        }
+        };
+        let out = entry.output.lock_safe();
+        (out.ring.snapshot(), out.tx.subscribe())
     };
 
     use futures_util::stream;
-    // `unfold` turns the broadcast receiver into a stream of SSE frame bytes
-    // without pulling in `tokio-stream`.
-    let body_stream = stream::unfold(rx, |mut rx| async move {
+    // State threaded through `unfold`: the not-yet-sent replay frames (drained
+    // first) and the live broadcast receiver.
+    let init = (replay.into_iter(), rx);
+    let body_stream = stream::unfold(init, |(mut replay, mut rx)| async move {
+        // Drain the replay snapshot first.
+        if let Some(frame) = replay.next() {
+            return Some((Ok(Frame::data(encode_frame(&frame))), (replay, rx)));
+        }
+        // Then the live tail.
         loop {
             match rx.recv().await {
                 Ok(frame) => {
-                    let bytes = encode_frame(&frame);
-                    return Some((Ok(Frame::data(bytes)), rx));
+                    return Some((Ok(Frame::data(encode_frame(&frame))), (replay, rx)));
                 }
-                // Lagged: drop the missed frames, keep streaming the live tail.
+                // Lagged: the live producer outran this subscriber. Skip the
+                // missed frames and keep streaming; the client repaints from the
+                // tail (and still has the replayed scrollback).
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 // Sender gone (pane closed / child exited): end the stream.
                 Err(broadcast::error::RecvError::Closed) => return None,
@@ -380,20 +455,25 @@ fn events_pane(state: &DaemonState, id: u32) -> Response<Body> {
     let body = StreamBody::new(body_stream).boxed();
     Response::builder()
         .status(StatusCode::OK)
-        .header(hyper::header::CONTENT_TYPE, "text/event-stream")
+        .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
         .header(hyper::header::CACHE_CONTROL, "no-cache")
-        .header(hyper::header::CONNECTION, "keep-alive")
         .body(body)
         .unwrap()
 }
 
-fn encode_frame(frame: &SseFrame) -> Bytes {
-    let s = match frame {
-        SseFrame::Data(bytes) => format!("event: data\ndata: {}\n\n", BASE64.encode(bytes)),
-        SseFrame::Agent(json) => format!("event: agent\ndata: {json}\n\n"),
-        SseFrame::Exit(code) => format!("event: exit\ndata: {code}\n\n"),
+/// Encode one frame as `[u8 kind][u32 LE len][payload]`. kind 0 = data (raw PTY
+/// bytes, NOT base64), 1 = agent (JSON), 2 = exit (the code as 4-byte LE i32).
+fn encode_frame(frame: &OutFrame) -> Bytes {
+    let (kind, payload): (u8, Vec<u8>) = match frame {
+        OutFrame::Data(bytes) => (0, bytes.clone()),
+        OutFrame::Agent(json) => (1, json.as_bytes().to_vec()),
+        OutFrame::Exit(code) => (2, code.to_le_bytes().to_vec()),
     };
-    Bytes::from(s)
+    let mut out = Vec::with_capacity(1 + 4 + payload.len());
+    out.push(kind);
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(&payload);
+    Bytes::from(out)
 }
 
 async fn collect_body(
