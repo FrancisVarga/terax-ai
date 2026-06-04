@@ -70,6 +70,56 @@ pub async fn pty_open(
         log::warn!("pty_open: cwd rejected: {e}");
         e
     })?;
+    // On Android the process launches at `/`, which the app sandbox cannot
+    // read — a shell started there fails every `ls` with `os error 13`. When no
+    // explicit cwd was requested, fall back to the app's private data dir (the
+    // only reliably writable location; resolved via Tauri's path API, since
+    // Android sets neither `$HOME` nor `$TMPDIR` for the app process).
+    // On Android the process launches at `/`, which the app sandbox cannot read
+    // — a shell started there fails every `ls` with `os error 13`. The frontend
+    // may also pass `/` (or another unwritable path) as the requested cwd, so we
+    // can't just fill in a default when `cwd` is None: we must *override* any cwd
+    // the app can't actually write to with the app's private data dir (the only
+    // reliably writable location; Android sets neither `$HOME` nor `$TMPDIR`, so
+    // Tauri's path API is the only source).
+    #[cfg(target_os = "android")]
+    let cwd = {
+        use tauri::Manager;
+        let writable = |s: &str| -> bool {
+            let probe = std::path::Path::new(s).join(".terax-cwd-probe");
+            std::fs::write(&probe, b"").map(|_| std::fs::remove_file(&probe).ok()).is_ok()
+        };
+        if cwd.as_deref().is_some_and(writable) {
+            cwd
+        } else {
+            let p = app.path();
+            let candidates = [
+                ("app_data_dir", p.app_data_dir()),
+                ("app_cache_dir", p.app_cache_dir()),
+                ("app_local_data_dir", p.app_local_data_dir()),
+            ];
+            let mut resolved = None;
+            for (name, res) in candidates {
+                match res {
+                    Ok(dir) => match std::fs::create_dir_all(&dir) {
+                        Ok(()) => {
+                            log::info!("pty_open: android cwd from {name}: {}", dir.display());
+                            resolved = Some(dir.to_string_lossy().into_owned());
+                            break;
+                        }
+                        Err(e) => {
+                            log::warn!("pty_open: {name} {} not creatable: {e}", dir.display())
+                        }
+                    },
+                    Err(e) => log::warn!("pty_open: {name} unavailable: {e}"),
+                }
+            }
+            if resolved.is_none() {
+                log::warn!("pty_open: no writable android dir resolved; PTY will use process cwd");
+            }
+            resolved
+        }
+    };
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
     let session = tauri::async_runtime::spawn_blocking(move || {
         session::spawn(id, app, cols, rows, cwd, workspace, on_data, on_exit).map(|(s, _)| s)

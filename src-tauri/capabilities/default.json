@@ -26,9 +26,6 @@
     "notification:default",
     "dialog:allow-save",
     "dialog:allow-open",
-    "store:default",
-    "autostart:allow-enable",
-    "autostart:allow-disable",
-    "autostart:allow-is-enabled"
+    "store:default"
   ]
 }

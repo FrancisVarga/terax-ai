@@ -107,10 +107,27 @@ pub fn open_store(db_path: Option<&Path>) -> Arc<OtelStore> {
 /// Spawn the OTLP ingest server on the current tokio runtime. `sink` is notified
 /// after each non-empty batch. Returns immediately; the server runs until the
 /// task is dropped / the process exits.
+///
+/// No-op (logged) when called outside a Tokio runtime. The desktop setup hook
+/// always runs inside Tauri's runtime, but on mobile the in-process fallback can
+/// run on a runtime-less thread — a bare `tokio::spawn` would panic there, and
+/// the release profile's `panic = "abort"` would take the whole app down. The
+/// module contract is "any failure degrades to the in-memory store", so we skip
+/// ingest rather than abort.
 pub fn spawn_ingest(addr: SocketAddr, store: Arc<OtelStore>, sink: Arc<dyn IngestSink>) {
-    tokio::spawn(async move {
-        ingest::serve(addr, store, sink).await;
-    });
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(async move {
+                ingest::serve(addr, store, sink).await;
+            });
+        }
+        Err(_) => {
+            log::warn!(
+                target: "otel",
+                "no tokio runtime on this thread; skipping in-process OTLP ingest (observability disabled)"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

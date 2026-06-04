@@ -6,9 +6,13 @@ use modules::{
     s3, secrets, shell, ssh, workspace,
 };
 use std::collections::HashMap;
+#[cfg(desktop)]
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
-use tauri::{Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, RunEvent, State};
+#[cfg(desktop)]
+use tauri::{Emitter, WebviewUrl, WebviewWindowBuilder};
+#[cfg(desktop)]
 use tauri_plugin_window_state::StateFlags;
 
 /// Drained on first read so HMR / re-mounts can't replay the launch dir.
@@ -65,6 +69,7 @@ fn parse_launch_target() -> (Option<String>, Option<String>) {
     (None, None)
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Result<(), String> {
     let url_path = match tab.as_deref() {
@@ -126,17 +131,30 @@ async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Res
     Ok(())
 }
 
+/// Mobile stub: multi-window / always-on-top settings windows are a desktop
+/// concept. Kept so the command appears in `generate_handler!` on every target.
+#[cfg(mobile)]
+#[tauri::command]
+async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Result<(), String> {
+    let _ = (app, tab);
+    Err("settings window not supported on this platform".to_string())
+}
+
 /// Monotonic counter for unique secondary-window labels. The first app window
 /// is "main"; spawned windows are "main-2", "main-3", … Tauri rejects duplicate
 /// labels, so a process-wide counter guarantees uniqueness across the session.
+#[cfg(desktop)]
 static WINDOW_SEQ: AtomicU32 = AtomicU32::new(2);
 
 /// Maps a normalized project directory → the window label opened for it, so
 /// re-opening a project focuses the existing window instead of spawning a
 /// duplicate. Entries are pruned when their window closes (CloseRequested) and
 /// validated on lookup (a dead label is treated as no match).
+/// On mobile the registry is still managed for handler symmetry but never
+/// queried (no secondary windows), so its field reads as dead there.
 #[derive(Default)]
-struct ProjectWindows(Mutex<HashMap<String, String>>);
+#[cfg_attr(mobile, allow(dead_code))]
+struct ProjectWindows(#[cfg_attr(mobile, allow(dead_code))] Mutex<HashMap<String, String>>);
 
 /// Tracks the *current* project dir of every live app window, keyed by window
 /// label (the `main` window plus each spawned `main-N`). The frontend reports
@@ -219,6 +237,7 @@ fn persist_window_session<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 
 /// Read the last session's open-window dirs. Absent/unreadable → empty (first
 /// run or a wiped store falls back to the single config-declared window).
+#[cfg(desktop)]
 fn read_window_session<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<String> {
     use tauri_plugin_store::StoreExt;
     let Ok(store) = app.store(WINDOW_SESSION_STORE) else {
@@ -261,6 +280,7 @@ fn normalize_dir_key(dir: &str) -> String {
 /// Keeps the RFC 3986 unreserved set (`A-Z a-z 0-9 - _ . ~`) verbatim and
 /// `%XX`-escapes everything else — enough to carry an arbitrary filesystem path
 /// through `?dir=` without pulling in a urlencoding crate.
+#[cfg(desktop)]
 fn encode_query_component(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -274,14 +294,25 @@ fn encode_query_component(s: &str) -> String {
     out
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 async fn open_main_window(app: tauri::AppHandle, dir: Option<String>) -> Result<(), String> {
     spawn_main_window(&app, dir)
 }
 
+/// Mobile stub: multi-window project layouts are a desktop concept. Kept so the
+/// command appears in `generate_handler!` on every target.
+#[cfg(mobile)]
+#[tauri::command]
+async fn open_main_window(app: tauri::AppHandle, dir: Option<String>) -> Result<(), String> {
+    let _ = (app, dir);
+    Err("multi-window not supported on this platform".to_string())
+}
+
 /// Spawn (or focus) a project window. Shared by the `open_main_window` command
 /// and the on-launch session restore in `setup()`. Sync so it can run in the
 /// non-async setup hook; window construction is synchronous anyway.
+#[cfg(desktop)]
 fn spawn_main_window(app: &tauri::AppHandle, dir: Option<String>) -> Result<(), String> {
     // Re-opening a project should focus its existing window rather than spawn a
     // duplicate. We track dir → label at spawn time; on lookup, validate the
@@ -405,8 +436,12 @@ pub fn run() {
     let (cli_dir, cli_file) = parse_launch_target();
     workspace::init_launch_cwd(cli_dir.as_deref());
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_process::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_process::init());
+
+    // Desktop-only plugins. These crates are gated to non-mobile targets in
+    // Cargo.toml, so on Android/iOS they do not exist and must be skipped.
+    #[cfg(desktop)]
+    let builder = builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Skip restoring VISIBLE — frontend calls window.show() after first
         // paint so the user never sees a transparent window-shadow flash on
@@ -416,7 +451,9 @@ pub fn run() {
                 .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
                 .build(),
         )
-        .plugin(tauri_plugin_autostart::Builder::new().build())
+        .plugin(tauri_plugin_autostart::Builder::new().build());
+
+    builder
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_notification::init())
@@ -464,6 +501,22 @@ pub fn run() {
         .manage(otel::OtelState::default())
         .manage(kv::KvState::default())
         .setup(|app| {
+            // On mobile the process launches at `/`, which the app sandbox cannot
+            // read — the file explorer and shell both default to it and fail with
+            // `os error 13`. Record the app's private data dir as the mobile home
+            // so `workspace::resolve_launch_dir` returns a readable, writable root,
+            // and authorize it on the registry so `workspace_current_dir` accepts
+            // it. Desktop skips this entirely (its launch cwd / home dir is fine).
+            #[cfg(mobile)]
+            {
+                use tauri::Manager;
+                if let Ok(dir) = app.path().app_data_dir() {
+                    let _ = std::fs::create_dir_all(&dir);
+                    workspace::set_mobile_home(dir.clone());
+                    let _ = app.state::<workspace::WorkspaceRegistry>().authorize(&dir);
+                }
+            }
+
             // Window titles (incl. the dev-distinguishing " Dev" suffix and the
             // active project name) are owned by the frontend — see the title
             // effect in App.tsx. The webview overwrites the title on mount, so a
@@ -473,7 +526,8 @@ pub fn run() {
             // project dir that was open at last quit. The config-declared `main`
             // window already exists, so we seed it in the open-window registry and
             // skip re-spawning the saved dir it already covers. A CLI launch dir
-            // takes precedence as `main`'s dir.
+            // takes precedence as `main`'s dir. Mobile has no secondary windows.
+            #[cfg(desktop)]
             {
                 let handle = app.handle();
                 let main_dir = workspace::launch_cwd_snapshot()

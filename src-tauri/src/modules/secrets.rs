@@ -107,7 +107,7 @@ where
     Ok(f(map))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn entry(service: &str, account: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(service, account).map_err(|e| e.to_string())
 }
@@ -125,7 +125,7 @@ pub async fn secrets_get(
         let key = key(&service, &account);
         with_store(&app, &state, |m| m.get(&key).cloned())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let _ = (app, state);
         let e = entry(&service, &account)?;
@@ -134,6 +134,11 @@ pub async fn secrets_get(
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(err) => Err(err.to_string()),
         }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (app, state, service, account);
+        Err("secure storage not available on this platform".to_string())
     }
 }
 
@@ -157,11 +162,16 @@ pub async fn secrets_set(
         };
         write_store(&app, &snapshot)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let _ = (app, state);
         let e = entry(&service, &account)?;
         e.set_password(&password).map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (app, state, service, account, password);
+        Err("secure storage not available on this platform".to_string())
     }
 }
 
@@ -184,7 +194,7 @@ pub async fn secrets_delete(
         };
         write_store(&app, &snapshot)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let _ = (app, state);
         let e = entry(&service, &account)?;
@@ -192,6 +202,11 @@ pub async fn secrets_delete(
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(err) => Err(err.to_string()),
         }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (app, state, service, account);
+        Err("secure storage not available on this platform".to_string())
     }
 }
 
@@ -292,7 +307,7 @@ pub async fn secrets_get_all(
                 .collect()
         })
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let _ = (app, state);
         Ok(accounts
@@ -303,5 +318,10 @@ pub async fn secrets_get_all(
                     .and_then(|e| e.get_password().ok())
             })
             .collect())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (app, state, service);
+        Ok(accounts.into_iter().map(|_| None).collect())
     }
 }

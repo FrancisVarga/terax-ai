@@ -84,6 +84,44 @@ fn ensure_utf8_locale(cmd: &mut CommandBuilder) {
     cmd.env("LANG", fallback);
 }
 
+/// Resolve a writable working directory on Android.
+///
+/// `dirs::home_dir()` returns `/` on Android (no per-user home; `$HOME` is
+/// typically unset), and the app sandbox cannot `read`/`exec` the filesystem
+/// root — a PTY started there fails every `ls` with `os error 13`. So on Android
+/// we instead use the app's private data dir, which Tauri's wry runtime exports
+/// as `$HOME` (e.g. `/data/data/<pkg>/files`). `.is_dir()` alone is not enough
+/// under the sandbox (existence != accessibility), so we probe for write access.
+///
+/// No-op on every other platform (returns `None`, leaving the desktop fallback
+/// chain to `dirs::home_dir()` untouched).
+#[cfg(target_os = "android")]
+fn android_home_dir() -> Option<PathBuf> {
+    let writable = |p: &std::path::Path| -> bool {
+        // A real access check: try to create a probe file in the dir. The
+        // sandbox grants rwx only inside the app's own data dir, so this is the
+        // cheapest reliable "can the shell actually live here" test.
+        let probe = p.join(".terax-cwd-probe");
+        match std::fs::write(&probe, b"") {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&probe);
+                true
+            }
+            Err(_) => false,
+        }
+    };
+    ["HOME", "TMPDIR"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .map(PathBuf::from)
+        .find(|p| p.is_dir() && writable(p))
+}
+
+#[cfg(not(target_os = "android"))]
+fn android_home_dir() -> Option<PathBuf> {
+    None
+}
+
 fn apply_common(cmd: &mut CommandBuilder, cwd: Option<String>) {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
@@ -94,6 +132,7 @@ fn apply_common(cmd: &mut CommandBuilder, cwd: Option<String>) {
         .map(PathBuf::from)
         .filter(|p| p.is_dir())
         .or_else(|| workspace::launch_cwd_snapshot().filter(|p| p.is_dir()))
+        .or_else(android_home_dir)
         .or_else(|| dirs::home_dir().filter(|p| p.is_dir()));
     if let Some(cwd) = resolved_cwd {
         #[cfg(windows)]

@@ -115,6 +115,11 @@ pub fn bootstrap_registry(registry: &WorkspaceRegistry) {
     if let Some(home) = dirs::home_dir() {
         let _ = registry.authorize(home);
     }
+    // On mobile the sandbox-writable data dir is the explorer/shell root; it must
+    // be pre-authorized or `workspace_current_dir` rejects it.
+    if let Some(home) = MOBILE_HOME.get() {
+        let _ = registry.authorize(home.clone());
+    }
 }
 
 #[tauri::command]
@@ -160,6 +165,17 @@ pub fn launch_cwd_snapshot() -> Option<PathBuf> {
     LAUNCH_CWD.get().and_then(|o| o.clone())
 }
 
+// On mobile there is no usable launch cwd: the process starts at `/`, which the
+// app sandbox cannot read (`os error 13` on every `read_dir`/`ls`). `setup()`
+// (which has the `AppHandle`) records the app's private data dir here so the
+// file explorer and shell default to a readable, writable location instead of
+// `/`. Desktop never sets this — its `dirs::home_dir()` fallback is correct.
+static MOBILE_HOME: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn set_mobile_home(dir: PathBuf) {
+    let _ = MOBILE_HOME.set(dir);
+}
+
 fn resolve_launch_dir() -> PathBuf {
     if let Some(cwd) = launch_cwd_snapshot() {
         return cwd;
@@ -169,6 +185,9 @@ fn resolve_launch_dir() -> PathBuf {
         .filter(|p| is_usable_launch_dir(p))
     {
         return cwd;
+    }
+    if let Some(home) = MOBILE_HOME.get() {
+        return home.clone();
     }
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
