@@ -194,6 +194,51 @@ pub fn close_forwarded(rmux_state: &RmuxState, id: u32) -> Result<bool, String> 
     Ok(true)
 }
 
+/// Forward a DETACH: stop the terax-side mapping but leave the daemon pane
+/// running (its ring keeps retaining output). Returns `Ok(Some(daemon_pane_id))`
+/// when the id was daemon-backed so the caller can surface the pane id to the
+/// frontend for a later reattach; `Ok(None)` when the id is not daemon-backed
+/// (an in-process pane has no detach concept). Unlike close, this does NOT tell
+/// the daemon to kill the pane.
+pub fn detach_forwarded(rmux_state: &RmuxState, id: u32) -> Result<Option<u32>, String> {
+    let Some(pane_id) = rmux_state.panes.lock_safe().remove(&id) else {
+        return Ok(None);
+    };
+    if let Some(base_url) = rmux_state.base_url() {
+        // Best-effort: the daemon detach verb is a confirmation no-op, so a
+        // failure here does not change that the pane keeps running.
+        let url = format!("{base_url}/pane/{pane_id}/detach");
+        let _ = post_json(&url, serde_json::json!({}));
+    }
+    Ok(Some(pane_id))
+}
+
+/// Re-attach to an EXISTING daemon pane (one previously detached). Allocates a
+/// fresh terax-facing id, maps it to the given daemon pane id, and starts the
+/// binary bridge which replays the pane's scrollback ring then streams live.
+/// Returns the new terax-facing id. Erries if the daemon is not connected.
+pub fn attach_existing(
+    app: &AppHandle,
+    pty_state: &PtyState,
+    rmux_state: &RmuxState,
+    daemon_pane_id: u32,
+    on_data: Channel<Response>,
+    on_exit: Channel<i32>,
+) -> Result<u32, String> {
+    let base_url = rmux_state
+        .base_url()
+        .ok_or_else(|| "rmux daemon not connected".to_string())?;
+    let terax_id = pty_state.next_id();
+    rmux_state.panes.lock_safe().insert(terax_id, daemon_pane_id);
+    let events_url = format!("{base_url}/pane/{daemon_pane_id}/attach");
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        run_event_bridge(app, events_url, terax_id, on_data, on_exit).await;
+    });
+    log::info!(target: "rmux", "reattached terax id={terax_id} -> daemon pane={daemon_pane_id}");
+    Ok(terax_id)
+}
+
 /// Best-effort close of every daemon-backed pane and clear the map. Used by
 /// `pty_close_all` on webview reload. Failures are swallowed: the panes live in
 /// the surviving daemon and a leftover is acceptable in Phase 1, so this must

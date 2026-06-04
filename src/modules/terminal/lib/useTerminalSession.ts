@@ -11,7 +11,7 @@ import {
 } from "./osc-handlers";
 import { decodeRemoteCwd, getRemoteCwdBinding } from "./remote-cwd";
 import { remoteUri } from "@/modules/explorer/lib/remote";
-import { openPty, type PtySession } from "./pty-bridge";
+import { attachExistingPty, openPty, type PtySession } from "./pty-bridge";
 import {
   acquireSlot,
   applyBackgroundActive,
@@ -67,6 +67,20 @@ type Session = {
 };
 
 const sessions = new Map<number, Session>();
+
+// Leaves that opt into detach-on-close (rmux daemon panes). Empty by default,
+// so the in-process path is untouched: openPtyForSession reads this to pick the
+// pty close mode, and a normal leaf is never present here, so its close() kills
+// exactly as before. The terminal-rmux module owns the membership of this set.
+const rmuxLeaves = new Set<number>();
+
+export function markRmuxLeaf(leafId: number): void {
+  rmuxLeaves.add(leafId);
+}
+
+export function unmarkRmuxLeaf(leafId: number): void {
+  rmuxLeaves.delete(leafId);
+}
 
 const readyLeaves = new Set<number>();
 const readyWaiters = new Map<
@@ -380,7 +394,54 @@ async function openPtyForSession(
       },
     },
     cwd,
+    rmuxLeaves.has(leafId) ? "detach" : "kill",
   );
+}
+
+// Wire an EXISTING daemon pane (one previously detached) into a leaf's session,
+// mirroring openPtyForSession's onData/onExit handlers so the reattached pane
+// behaves identically to a freshly opened one. Marks the leaf rmux so its
+// close() detaches rather than kills. The session must exist (the leaf is
+// mounted) and must not already hold a live pty; an already-attached leaf is
+// left untouched. Returns true once the daemon pane is wired in.
+export async function reattachSession(
+  leafId: number,
+  daemonPaneId: number,
+): Promise<boolean> {
+  const s = sessions.get(leafId);
+  if (!s || s.disposed) return false;
+  markRmuxLeaf(leafId);
+  if (s.pty || s.ptyOpening) return false;
+  s.ptyOpening = true;
+  let pty: PtySession;
+  try {
+    pty = await attachExistingPty(daemonPaneId, {
+      onData: (bytes) => deliverPtyBytes(leafId, bytes),
+      onExit: (code) => {
+        s.shellExited = true;
+        s.pty = null;
+        const slot = getSlotForLeaf(leafId);
+        if (slot) slot.term.options.disableStdin = true;
+        if (s.callbacks.onExit) s.callbacks.onExit(code);
+        else s.pendingExit = code;
+      },
+    });
+  } catch (e) {
+    s.ptyOpening = false;
+    console.error("[terax] reattach attachExistingPty failed:", e);
+    return false;
+  }
+  s.ptyOpening = false;
+  if (s.disposed) {
+    pty.close();
+    return false;
+  }
+  s.shellExited = false;
+  s.pendingExit = null;
+  s.pty = pty;
+  if (s.cols > 0 && s.rows > 0) pty.resize(s.cols, s.rows);
+  flushInputQueue(s);
+  return true;
 }
 
 function bindLeafToSlot(leafId: number, s: Session): void {

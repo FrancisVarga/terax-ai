@@ -1,11 +1,15 @@
 export { TerminalPane, type TerminalPaneHandle } from "./TerminalPane";
 export { TerminalStack } from "./TerminalStack";
+export { PaneTreeView } from "./PaneTreeView";
 export {
   clearFocusedTerminal,
   disposeSession,
   injectCommand,
   leafIdForPty,
+  markRmuxLeaf,
+  reattachSession,
   respawnSession,
+  unmarkRmuxLeaf,
   whenSessionReady,
   writeToSession,
 } from "./lib/useTerminalSession";
