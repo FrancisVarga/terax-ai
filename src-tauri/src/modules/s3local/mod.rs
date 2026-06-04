@@ -537,7 +537,9 @@ pub async fn s3local_delete_bucket(
     Ok(())
 }
 
-/// Stream a local file into an object on `projectDir`'s local server.
+/// Stream a local file into an object on `projectDir`'s local server, then verify
+/// the object is readable (HEAD) so a server-side finalize failure surfaces as a
+/// loud error instead of a silently-missing object.
 #[tauri::command]
 pub async fn s3local_upload(
     state: State<'_, S3LocalState>,
@@ -547,17 +549,39 @@ pub async fn s3local_upload(
     src_path: String,
 ) -> Result<(), String> {
     let client = local_client(&state, &project_dir)?;
-    let body = aws_sdk_s3::primitives::ByteStream::from_path(std::path::Path::new(&src_path))
+
+    // Stat the source so we can send an explicit Content-Length — a known-size
+    // body avoids any chunked/aws-chunked transfer encoding (keeps the PUT a
+    // simple sized request the server finalizes deterministically).
+    let path = std::path::Path::new(&src_path);
+    let len = std::fs::metadata(path)
+        .map_err(|e| format!("reading {src_path}: {e}"))?
+        .len();
+    let body = aws_sdk_s3::primitives::ByteStream::from_path(path)
         .await
         .map_err(|e| format!("reading {src_path}: {e}"))?;
+
     client
         .put_object()
         .bucket(&bucket)
         .key(&key)
+        .content_length(len as i64)
         .body(body)
         .send()
         .await
         .map_err(|e| aws_err("upload object", e))?;
+
+    // Confirm the object actually landed (the PUT returning 200 but the object
+    // being absent would mean a finalize/rename failed server-side). Surfacing
+    // this here turns a silent "empty bucket" into an actionable error.
+    client
+        .head_object()
+        .bucket(&bucket)
+        .key(&key)
+        .send()
+        .await
+        .map_err(|e| aws_err("upload verify (object not found after PUT)", e))?;
+
     Ok(())
 }
 

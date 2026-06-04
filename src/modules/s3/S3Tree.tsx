@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { toast } from "sonner";
 import { useCallback, useEffect, useState } from "react";
 import {
   AddCircleIcon,
@@ -113,35 +114,57 @@ export function S3Tree({ connection, projectDir, onOpenObject, selectedKey }: Pr
     connection.is_local && projectDir
       ? {
           createBucket: async (name) => {
-            await invoke("s3local_create_bucket", {
-              projectDir,
-              bucket: name,
-            });
-            reload("buckets", "", "");
+            try {
+              await invoke("s3local_create_bucket", { projectDir, bucket: name });
+              reload("buckets", "", "");
+            } catch (e) {
+              toast.error(`Create bucket failed: ${e}`);
+            }
           },
           deleteBucket: async (bucket) => {
-            await invoke("s3local_delete_bucket", { projectDir, bucket });
-            reload("buckets", "", "");
+            try {
+              await invoke("s3local_delete_bucket", { projectDir, bucket });
+              reload("buckets", "", "");
+            } catch (e) {
+              toast.error(`Delete bucket failed: ${e}`);
+            }
           },
           upload: async (bucket, prefix) => {
             const picked = await openFileDialog({ multiple: false });
             if (!picked || Array.isArray(picked)) return;
-            // Object key = current prefix + the picked file's base name.
-            const base = picked.split(/[\\/]/).pop() ?? "file";
-            await invoke("s3local_upload", {
-              projectDir,
-              bucket,
-              key: `${prefix}${base}`,
-              srcPath: picked,
-            });
-            reload(`${bucket}::${prefix}`, bucket, prefix);
+            // Object key = current prefix + the picked file's base name. Strip any
+            // path separators AND a Windows drive prefix / colon from the base: a
+            // colon in the key makes the server's on-disk path invalid on Windows
+            // (drive/ADS separator) and the PUT fails. Keep only a clean filename.
+            const base =
+              (picked.split(/[\\/]/).pop() ?? "file").replace(/:/g, "_") ||
+              "file";
+            const key = `${prefix}${base}`;
+            try {
+              await invoke("s3local_upload", {
+                projectDir,
+                bucket,
+                key,
+                srcPath: picked,
+              });
+              // Only refresh + report success once the server confirms the PUT
+              // finalized, so a silent failure never looks like an empty bucket.
+              reload(`${bucket}::${prefix}`, bucket, prefix);
+              toast.success(`Uploaded ${base}`);
+            } catch (e) {
+              toast.error(`Upload failed: ${e}`);
+            }
           },
           deleteObject: async (bucket, key) => {
-            await invoke("s3local_delete_object", { projectDir, bucket, key });
-            // Reload the object's parent prefix (everything up to the last "/").
-            const slash = key.lastIndexOf("/");
-            const prefix = slash >= 0 ? key.slice(0, slash + 1) : "";
-            reload(`${bucket}::${prefix}`, bucket, prefix);
+            try {
+              await invoke("s3local_delete_object", { projectDir, bucket, key });
+              // Reload the object's parent prefix (everything up to the last "/").
+              const slash = key.lastIndexOf("/");
+              const prefix = slash >= 0 ? key.slice(0, slash + 1) : "";
+              reload(`${bucket}::${prefix}`, bucket, prefix);
+            } catch (e) {
+              toast.error(`Delete object failed: ${e}`);
+            }
           },
         }
       : null;
