@@ -1,3 +1,4 @@
 /target
 .daemon-out.txt
 .daemon-err.txt
+Cargo.lock

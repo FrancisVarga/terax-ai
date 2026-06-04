@@ -144,7 +144,7 @@ if (!existsSync(OUT_DIR)) mkdirSync(OUT_DIR, { recursive: true });
  * cargo build runs — order-independent and robust to future reordering. Each
  * per-sidecar script still overwrites its placeholder with the real binary.
  */
-const RUST_SIDECAR_BASES = ["otel-collector", "kv-server", "localfs"];
+const RUST_SIDECAR_BASES = ["otel-collector", "kv-server", "localfs", "rmux-daemon"];
 for (const base of RUST_SIDECAR_BASES) {
   const placeholder = join(OUT_DIR, `${base}-${triple}${EXE}`);
   if (!existsSync(placeholder)) {

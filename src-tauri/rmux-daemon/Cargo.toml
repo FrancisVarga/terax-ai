@@ -10,10 +10,9 @@ edition = "2021"
 name = "rmux-daemon"
 path = "src/main.rs"
 
-# Empty table: detaches this crate from the parent `src-tauri` workspace so it is
-# not (yet) a member there. Phase 1 (#110) keeps the daemon standalone; wiring it
-# into the workspace + externalBin is #111.
-[workspace]
+# Workspace member of `src-tauri` (#111), like otel-collector/kv-server/localfs.
+# Shares the workspace `target/` and `Cargo.lock`; built via
+# scripts/build-rmux-sidecar.mjs and staged as a Tauri externalBin.
 
 [dependencies]
 # The shared PTY core lives in the `terax` package's library target, whose lib

@@ -6145,6 +6145,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rmux-daemon"
+version = "0.29.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures-util",
+ "http-body-util",
+ "hyper 1.10.0",
+ "hyper-util",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "terax",
+ "tokio",
+]
+
+[[package]]
 name = "rsa"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -10,7 +10,7 @@
 # standalone crate over the published `s3s-fs` library, so it never drags the app
 # crate into the sidecar build.
 [workspace]
-members = [".", "otel-collector", "kv-server", "localfs"]
+members = [".", "otel-collector", "kv-server", "localfs", "rmux-daemon"]
 resolver = "2"
 
 [package]
