@@ -1,15 +1,32 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
 import {
+  AddCircleIcon,
   ArrowRight01Icon,
   CloudServerIcon,
   DatabaseIcon,
+  Delete02Icon,
   File01Icon,
   Folder01Icon,
+  Upload01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@/lib/utils";
 import type { S3Connection, S3Entry } from "./lib/types";
+
+/**
+ * Mutation actions wired to the `s3local_*` commands. Only ever passed down for
+ * an `is_local` connection — remote connections render no mutation controls, so
+ * the existing read-only browser is unchanged for them. Each action, on success,
+ * reloads the affected tree node so the change shows without a full refresh.
+ */
+type Mutations = {
+  createBucket: (name: string) => Promise<void>;
+  deleteBucket: (bucket: string) => Promise<void>;
+  upload: (bucket: string, prefix: string) => Promise<void>;
+  deleteObject: (bucket: string, key: string) => Promise<void>;
+};
 
 /**
  * Lazy S3 object browser. The hierarchy is:
@@ -73,6 +90,51 @@ export function S3Tree({ connection, onOpenObject, selectedKey }: Props) {
     [connection.id],
   );
 
+  // Drop a node's cached children so the next render re-fetches it. Used after a
+  // mutation so the tree reflects the change without a full reload. The bucket
+  // level uses the fixed id "buckets"; a prefix node uses `${bucket}::${prefix}`.
+  const reload = useCallback(
+    (id: string, bucket: string, prefix: string) => {
+      if (expanded.has(id) || id === "buckets") load(id, bucket, prefix);
+      else setNodes((n) => ({ ...n, [id]: { status: "idle" } }));
+    },
+    [expanded, load],
+  );
+
+  // Mutation actions, only built for the local server connection. `null` for
+  // remote connections → the read-only browser is unchanged for them.
+  const mutations: Mutations | null = connection.is_local
+    ? {
+        createBucket: async (name) => {
+          await invoke("s3local_create_bucket", { bucket: name });
+          reload("buckets", "", "");
+        },
+        deleteBucket: async (bucket) => {
+          await invoke("s3local_delete_bucket", { bucket });
+          reload("buckets", "", "");
+        },
+        upload: async (bucket, prefix) => {
+          const picked = await openFileDialog({ multiple: false });
+          if (!picked || Array.isArray(picked)) return;
+          // Object key = current prefix + the picked file's base name.
+          const base = picked.split(/[\\/]/).pop() ?? "file";
+          await invoke("s3local_upload", {
+            bucket,
+            key: `${prefix}${base}`,
+            srcPath: picked,
+          });
+          reload(`${bucket}::${prefix}`, bucket, prefix);
+        },
+        deleteObject: async (bucket, key) => {
+          await invoke("s3local_delete_object", { bucket, key });
+          // Reload the object's parent prefix (everything up to the last "/").
+          const slash = key.lastIndexOf("/");
+          const prefix = slash >= 0 ? key.slice(0, slash + 1) : "";
+          reload(`${bucket}::${prefix}`, bucket, prefix);
+        },
+      }
+    : null;
+
   const toggle = useCallback(
     (id: string, bucket: string, prefix: string) => {
       setExpanded((prev) => {
@@ -107,6 +169,19 @@ export function S3Tree({ connection, onOpenObject, selectedKey }: Props) {
         <span className="truncate text-xs font-medium text-foreground/80">
           {connection.name}
         </span>
+        {mutations ? (
+          <button
+            type="button"
+            title="Create bucket"
+            className="ml-auto flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent/70 hover:text-foreground"
+            onClick={() => {
+              const name = window.prompt("New bucket name:");
+              if (name?.trim()) void mutations.createBucket(name.trim());
+            }}
+          >
+            <HugeiconsIcon icon={AddCircleIcon} size={14} strokeWidth={1.75} />
+          </button>
+        ) : null}
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-1 [scrollbar-gutter:stable]">
@@ -118,6 +193,7 @@ export function S3Tree({ connection, onOpenObject, selectedKey }: Props) {
           onToggle={toggle}
           onOpenObject={onOpenObject}
           selectedKey={selectedKey}
+          mutations={mutations}
         />
       </div>
     </div>
@@ -137,6 +213,7 @@ function BucketsLevel({
   onToggle,
   onOpenObject,
   selectedKey,
+  mutations,
 }: {
   connId: string;
   defaultBucket: string | null;
@@ -145,6 +222,7 @@ function BucketsLevel({
   onToggle: (id: string, bucket: string, prefix: string) => void;
   onOpenObject: (connId: string, bucket: string, key: string) => void;
   selectedKey: string | null;
+  mutations: Mutations | null;
 }) {
   const rootId = "buckets";
   const node = nodes[rootId];
@@ -174,6 +252,7 @@ function BucketsLevel({
         onToggle={onToggle}
         onOpenObject={onOpenObject}
         selectedKey={selectedKey}
+        mutations={mutations}
       />
     );
   }
@@ -205,6 +284,7 @@ function BucketsLevel({
           onToggle={onToggle}
           onOpenObject={onOpenObject}
           selectedKey={selectedKey}
+          mutations={mutations}
         />
       ))}
     </>
@@ -229,6 +309,7 @@ function PrefixNode({
   onToggle,
   onOpenObject,
   selectedKey,
+  mutations,
 }: {
   connId: string;
   bucket: string;
@@ -241,10 +322,36 @@ function PrefixNode({
   onToggle: (id: string, bucket: string, prefix: string) => void;
   onOpenObject: (connId: string, bucket: string, key: string) => void;
   selectedKey: string | null;
+  mutations: Mutations | null;
 }) {
   const id = `${bucket}::${prefix}`;
   const isExpanded = expanded.has(id);
   const node = nodes[id];
+
+  // Row actions for the local server: upload into any bucket/folder; delete a
+  // bucket (empty-only, S3 semantics — a non-empty bucket surfaces the server's
+  // BucketNotEmpty error via the rejected promise).
+  const nodeActions: RowAction[] = mutations
+    ? [
+        {
+          icon: Upload01Icon,
+          title: "Upload file here",
+          onClick: () => void mutations.upload(bucket, prefix),
+        },
+        ...(icon === "bucket"
+          ? [
+              {
+                icon: Delete02Icon,
+                title: "Delete bucket (must be empty)",
+                onClick: () => {
+                  if (window.confirm(`Delete bucket "${bucket}"?`))
+                    void mutations.deleteBucket(bucket);
+                },
+              } as RowAction,
+            ]
+          : []),
+      ]
+    : [];
 
   return (
     <>
@@ -255,6 +362,7 @@ function PrefixNode({
         icon={icon === "bucket" ? "bucket" : "folder"}
         label={name}
         onClick={() => onToggle(id, bucket, prefix)}
+        actions={nodeActions}
       />
       {isExpanded ? (
         node?.status === "loading" || !node ? (
@@ -280,6 +388,7 @@ function PrefixNode({
                   onToggle={onToggle}
                   onOpenObject={onOpenObject}
                   selectedKey={selectedKey}
+                  mutations={mutations}
                 />
               ) : (
                 <Row
@@ -290,6 +399,20 @@ function PrefixNode({
                   label={entry.name}
                   isSelected={selectedKey === entry.key}
                   onClick={() => onOpenObject(connId, bucket, entry.key)}
+                  actions={
+                    mutations
+                      ? [
+                          {
+                            icon: Delete02Icon,
+                            title: "Delete object",
+                            onClick: () => {
+                              if (window.confirm(`Delete "${entry.key}"?`))
+                                void mutations.deleteObject(bucket, entry.key);
+                            },
+                          },
+                        ]
+                      : []
+                  }
                 />
               ),
             )
@@ -300,6 +423,14 @@ function PrefixNode({
   );
 }
 
+/** A hover-revealed trailing action on a row (upload / delete). */
+type RowAction = {
+  // HugeIcons icon node (typed loosely to avoid importing the icon type).
+  icon: Parameters<typeof HugeiconsIcon>[0]["icon"];
+  title: string;
+  onClick: () => void;
+};
+
 /** A single tree row. Mirrors explorer `EntryRow` styling (chevron, indent). */
 function Row({
   depth,
@@ -309,6 +440,7 @@ function Row({
   label,
   isSelected = false,
   onClick,
+  actions = [],
 }: {
   depth: number;
   expandable: boolean;
@@ -317,6 +449,7 @@ function Row({
   label: string;
   isSelected?: boolean;
   onClick: () => void;
+  actions?: RowAction[];
 }) {
   const iconNode =
     icon === "bucket"
@@ -325,34 +458,56 @@ function Row({
         ? Folder01Icon
         : File01Icon;
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={label}
+    <div
       className={cn(
-        "group flex h-6 w-full min-w-0 cursor-pointer items-center gap-2 rounded-sm px-1.5 text-left text-[13px] text-foreground/85 transition-colors hover:bg-accent/70",
+        "group flex h-6 w-full min-w-0 items-center rounded-sm pr-1 text-foreground/85 transition-colors hover:bg-accent/70",
         isSelected && "bg-accent text-foreground",
       )}
-      style={{ paddingLeft: 6 + depth * 12 }}
     >
-      <span className="flex size-3.5 shrink-0 items-center justify-center text-muted-foreground">
-        {expandable ? (
-          <HugeiconsIcon
-            icon={ArrowRight01Icon}
-            size={12}
-            strokeWidth={2.25}
-            className={cn("transition-transform", isExpanded && "rotate-90")}
-          />
-        ) : null}
-      </span>
-      <HugeiconsIcon
-        icon={iconNode}
-        size={15}
-        strokeWidth={1.75}
-        className="size-4 shrink-0 text-muted-foreground group-hover:text-foreground"
-      />
-      <span className="min-w-0 flex-1 truncate">{label}</span>
-    </button>
+      <button
+        type="button"
+        onClick={onClick}
+        title={label}
+        className="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 px-1.5 text-left text-[13px]"
+        style={{ paddingLeft: 6 + depth * 12 }}
+      >
+        <span className="flex size-3.5 shrink-0 items-center justify-center text-muted-foreground">
+          {expandable ? (
+            <HugeiconsIcon
+              icon={ArrowRight01Icon}
+              size={12}
+              strokeWidth={2.25}
+              className={cn("transition-transform", isExpanded && "rotate-90")}
+            />
+          ) : null}
+        </span>
+        <HugeiconsIcon
+          icon={iconNode}
+          size={15}
+          strokeWidth={1.75}
+          className="size-4 shrink-0 text-muted-foreground group-hover:text-foreground"
+        />
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+      </button>
+      {actions.length > 0 ? (
+        <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+          {actions.map((action) => (
+            <button
+              key={action.title}
+              type="button"
+              title={action.title}
+              onClick={(e) => {
+                e.stopPropagation();
+                action.onClick();
+              }}
+              className="flex size-5 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
+            >
+              <HugeiconsIcon icon={action.icon} size={13} strokeWidth={1.75} />
+            </button>
+          ))}
+        </span>
+      ) : null}
+    </div>
   );
 }
 

@@ -2,11 +2,10 @@
 //!
 //! Runs out-of-process from the Terax app (spawned by `modules::s3local`):
 //!   - serves the full S3 API on loopback against a plain local directory,
-//!   - the storage semantics come from the conformance-tested `s3s_fs::FileSystem`
-//!     (bucket/object CRUD, ListObjectsV2, multipart, copy, checksums, ranges…),
-//!   - `s3s` itself enforces AWS SigV4 on every request via `SimpleAuth`.
+//!   - storage semantics from the conformance-tested `s3s_fs::FileSystem`,
+//!   - `s3s` enforces AWS SigV4 on every request via `SimpleAuth`.
 //!
-//! Everything binds 127.0.0.1 only — loopback is the trust boundary, same as the
+//! Binds 127.0.0.1 only — loopback is the trust boundary, same as the
 //! otel-collector sidecar. The data root is the project's
 //! `<project-cwd>/.t-camelot/s3-local/`, passed as an absolute path by the app.
 //!
@@ -15,18 +14,13 @@
 //!
 //! `--port 0` binds an ephemeral port; the chosen port is printed to stdout as
 //! `LOCALFS_PORT=<n>` on a line by itself so the parent can capture it.
+//!
+//! The serve loop itself lives in the crate library ([`localfs::serve`]) so the
+//! app's in-process dev fallback runs the identical server.
 
+use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-
-use s3s::auth::SimpleAuth;
-use s3s::service::S3ServiceBuilder;
-use s3s_fs::FileSystem;
-
-use tokio::net::TcpListener;
-
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::server::conn::auto::Builder as ConnBuilder;
 
 /// Parsed CLI args. Hand-rolled to keep the binary dependency-light (no clap),
 /// matching the otel-collector sidecar's style.
@@ -96,61 +90,22 @@ fn main() {
 }
 
 async fn run(args: Args) -> Result<(), String> {
-    // `FileSystem::new` canonicalizes the root (and resolves it against the
-    // process cwd if relative) — we always pass an absolute `--root`, so the
-    // sidecar's own working directory is irrelevant. The dir must already exist;
-    // the app creates it before spawning us.
-    let fs = FileSystem::new(&args.root)
-        .map_err(|e| format!("opening data root {}: {e:?}", args.root.display()))?;
-
-    let service = {
-        let mut b = S3ServiceBuilder::new(fs);
-        // Real AWS SigV4 verification. A request signed with the wrong secret is
-        // rejected with 403 SignatureDoesNotMatch by s3s before reaching storage.
-        b.set_auth(SimpleAuth::from_single(args.access_key, args.secret_key));
-        b.build()
-    };
-
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, args.port));
-    let listener = TcpListener::bind(addr)
-        .await
-        .map_err(|e| format!("binding {addr}: {e}"))?;
-    let local_addr = listener.local_addr().map_err(|e| e.to_string())?;
+    let (listener, service) =
+        localfs::bind(&args.root, addr, args.access_key, args.secret_key).await?;
 
     // Contract with the parent (modules::s3local): emit the resolved port on its
-    // own line so `--port 0` ephemeral binding is observable. Must be flushed
-    // before we block in the accept loop.
-    println!("LOCALFS_PORT={}", local_addr.port());
-    use std::io::Write;
+    // own line so `--port 0` ephemeral binding is observable. Flushed before we
+    // block in the accept loop.
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    println!("LOCALFS_PORT={port}");
     let _ = std::io::stdout().flush();
 
-    let http_server = ConnBuilder::new(TokioExecutor::new());
-    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
-    let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
-
-    loop {
-        let (socket, _) = tokio::select! {
-            res = listener.accept() => match res {
-                Ok(conn) => conn,
-                Err(err) => {
-                    eprintln!("localfs: error accepting connection: {err}");
-                    continue;
-                }
-            },
-            _ = ctrl_c.as_mut() => break,
-        };
-
-        let conn = http_server.serve_connection(TokioIo::new(socket), service.clone());
-        let conn = graceful.watch(conn.into_owned());
-        tokio::spawn(async move {
-            let _ = conn.await;
-        });
-    }
-
-    tokio::select! {
-        () = graceful.shutdown() => {}
-        () = tokio::time::sleep(std::time::Duration::from_secs(10)) => {}
-    }
+    // Shut down on ctrl-c (the parent kills us on app exit; this is a fallback).
+    localfs::serve(listener, service, async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await;
 
     Ok(())
 }

@@ -3,7 +3,7 @@ pub mod modules;
 use modules::sync::MutexExt;
 use modules::{
     agent, agentscan, bunqueue, ccusage, cleanup, crash, docker, fs, git, gpu, net, otel, pty, s3,
-    secrets, shell, ssh, workspace,
+    s3local, secrets, shell, ssh, workspace,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -414,6 +414,7 @@ pub fn run() {
         .manage(ssh::SshFsState::default())
         .manage(ssh::SshBgState::default())
         .manage(s3::S3State::default())
+        .manage(s3local::S3LocalState::default())
         .manage(ProjectWindows::default())
         .manage(OpenWindows::default())
         .manage(otel::OtelState::default())
@@ -502,6 +503,16 @@ pub fn run() {
             // failure degrades to an in-memory in-process store.
             let otel_state = app.state::<otel::OtelState>();
             otel::start(app.handle(), &otel_state);
+
+            // Start the local-only S3 server (a smaller RustFS). In a packaged
+            // build this spawns the `localfs` sidecar against
+            // `<launch-cwd>/.t-camelot/s3-local/`; in dev (no sidecar staged) it
+            // runs the identical server in-process. Non-fatal — failures install
+            // `Backend::Off` and surface via `s3local_status`. The browser
+            // connection is seeded lazily by the frontend calling
+            // `s3local_seed_connection` once the endpoint is up.
+            let s3local_state = app.state::<s3local::S3LocalState>();
+            s3local::start(app.handle(), &s3local_state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -642,6 +653,13 @@ pub fn run() {
             otel::otel_attr_breakdown,
             otel::otel_query,
             otel::otel_clear,
+            s3local::s3local_status,
+            s3local::s3local_endpoint,
+            s3local::s3local_seed_connection,
+            s3local::s3local_create_bucket,
+            s3local::s3local_delete_bucket,
+            s3local::s3local_upload,
+            s3local::s3local_delete_object,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -657,6 +675,9 @@ pub fn run() {
                 // Reap the otel-collector sidecar so it doesn't outlive the app
                 // and keep its loopback ports bound. No-op in in-process mode.
                 app.state::<otel::OtelState>().shutdown();
+                // Reap the localfs S3 sidecar (or stop the in-process server) so
+                // it doesn't outlive the app or keep its loopback port bound.
+                app.state::<s3local::S3LocalState>().shutdown();
             }
         });
 }
