@@ -12,3 +12,4 @@
 # Absolute, space-containing paths that cc-rs cannot parse and that break CI.
 # Kept local-only: each dev box regenerates from its own VS2022 vcvars64.bat.
 /.cargo/config.toml
+.rmux-daemon-e2e.exe
