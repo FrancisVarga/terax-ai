@@ -1,0 +1,20 @@
+# Paths the `tauri dev` file watcher must ignore to avoid self-triggered rebuild
+# loops. Without this, the watcher sees writes under these paths and restarts the
+# `terax` build — but the still-running dev app + its spawned sidecars hold open
+# handles to the staged sidecar binaries, so `tauri-build`'s externalBin copy
+# fails on Windows with "Access is denied" (os error 5).
+
+# Sidecar crates are built out-of-band by their own scripts
+# (scripts/build-otel-sidecar.mjs, scripts/build-localfs-sidecar.mjs), not by the
+# main `tauri dev` rebuild. Watching their sources only causes spurious rebuilds.
+otel-collector/
+localfs/
+kv-server/
+
+# Staged externalBin sidecar binaries. `tauri-build` copies into this dir; the
+# watcher seeing those writes would re-trigger the build that just wrote them.
+binaries/
+
+# Build output.
+target/
+gen/
