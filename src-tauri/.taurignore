@@ -10,6 +10,7 @@
 otel-collector/
 localfs/
 kv-server/
+rmux-daemon/
 
 # Staged externalBin sidecar binaries. `tauri-build` copies into this dir; the
 # watcher seeing those writes would re-trigger the build that just wrote them.

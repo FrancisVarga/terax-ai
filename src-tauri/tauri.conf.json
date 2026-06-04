@@ -94,6 +94,7 @@
       "binaries/kv-server",
       "binaries/otel-collector",
       "binaries/localfs",
+      "binaries/rmux-daemon",
       "binaries/rg",
       "binaries/s5cmd"
     ],
