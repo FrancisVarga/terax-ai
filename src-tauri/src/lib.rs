@@ -3,7 +3,7 @@ pub mod modules;
 use modules::sync::MutexExt;
 use modules::{
     agent, agentscan, bunqueue, ccusage, cleanup, crash, docker, fs, git, gpu, kv, net, otel, pty,
-    s3, s3local, secrets, shell, ssh, workspace,
+    rmux, s3, s3local, secrets, shell, ssh, workspace,
 };
 use std::collections::HashMap;
 #[cfg(desktop)]
@@ -479,6 +479,7 @@ pub fn run() {
         )
         .plugin(tauri_plugin_opener::init())
         .manage(pty::PtyState::default())
+        .manage(rmux::RmuxState::default())
         .manage(shell::ShellState::default())
         .manage(secrets::SecretsState::default())
         .manage(fs::watch::FsWatchState::default())

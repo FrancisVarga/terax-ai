@@ -141,8 +141,12 @@ async fn run() {
         }
     };
     // Machine-readable line the parent parses to learn the port, plus a human
-    // line on stderr for log scraping.
+    // line on stderr for log scraping. stdout MUST be flushed explicitly: when
+    // the parent captures it via a pipe (not a tty) Rust block-buffers stdout,
+    // so without this flush the port line sits in the buffer and the parent's
+    // port-read blocks forever while the daemon sits in the accept loop below.
     println!("rmux-daemon: listening port={}", local.port());
+    let _ = std::io::stdout().flush();
     eprintln!("rmux-daemon: listening on http://{local}");
 
     loop {

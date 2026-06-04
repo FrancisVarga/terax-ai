@@ -45,6 +45,15 @@ impl Default for PtyState {
     }
 }
 
+impl PtyState {
+    /// Allocate the next session id. Shared with the rmux daemon-forwarding path
+    /// so daemon-backed and in-process ids draw from one monotonic sequence and
+    /// can never collide across modes.
+    pub fn next_id(&self) -> u32 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
 /// Raise the Windows multimedia timer resolution to 1ms for the process
 /// lifetime. Without this the default ~15.6ms timer granularity rounds the
 /// flusher's `thread::sleep(FLUSH_COALESCE)` (4ms) up to a full tick, adding
@@ -66,6 +75,7 @@ pub fn raise_timer_resolution() {
 pub async fn pty_open(
     app: tauri::AppHandle,
     state: tauri::State<'_, PtyState>,
+    rmux_state: tauri::State<'_, crate::modules::rmux::RmuxState>,
     registry: tauri::State<'_, WorkspaceRegistry>,
     cols: u16,
     rows: u16,
@@ -129,7 +139,31 @@ pub async fn pty_open(
             resolved
         }
     };
-    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    // Daemon-forwarding path (#110). When the flag is on, route the open to the
+    // out-of-process rmux daemon so its shells survive Terax. Any failure (flag
+    // off implicitly, daemon not staged in dev, spawn/connect error) falls
+    // through to the in-process path below — an open must never fail because the
+    // daemon was unavailable. The channels are cloned so they remain usable for
+    // the fallback if forwarding errs.
+    if crate::modules::rmux::daemon_enabled() {
+        match crate::modules::rmux::open_forwarded(
+            &app,
+            &state,
+            &rmux_state,
+            cols,
+            rows,
+            cwd.clone(),
+            on_data.clone(),
+            on_exit.clone(),
+        )
+        .await
+        {
+            Ok(id) => return Ok(id),
+            Err(e) => log::warn!("pty_open: daemon forward failed ({e}); using in-process"),
+        }
+    }
+
+    let id = state.next_id();
     let sink: Arc<dyn sink::PtyOutputSink> =
         Arc::new(sink::TauriChannelSink::new(app, on_data, on_exit));
     let session = tauri::async_runtime::spawn_blocking(move || {
@@ -150,7 +184,17 @@ pub async fn pty_open(
 }
 
 #[tauri::command]
-pub fn pty_write(state: tauri::State<PtyState>, id: u32, data: String) -> Result<(), String> {
+pub fn pty_write(
+    state: tauri::State<PtyState>,
+    rmux_state: tauri::State<crate::modules::rmux::RmuxState>,
+    id: u32,
+    data: String,
+) -> Result<(), String> {
+    // Daemon-backed ids forward to the sidecar; an unknown id falls through to
+    // the in-process session map.
+    if crate::modules::rmux::write_forwarded(&rmux_state, id, &data)? {
+        return Ok(());
+    }
     let session = state
         .sessions
         .read_safe()
@@ -177,10 +221,14 @@ pub fn pty_write(state: tauri::State<PtyState>, id: u32, data: String) -> Result
 #[tauri::command]
 pub fn pty_resize(
     state: tauri::State<PtyState>,
+    rmux_state: tauri::State<crate::modules::rmux::RmuxState>,
     id: u32,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    if crate::modules::rmux::resize_forwarded(&rmux_state, id, cols, rows)? {
+        return Ok(());
+    }
     let session = state
         .sessions
         .read_safe()
@@ -207,7 +255,16 @@ pub fn pty_resize(
 }
 
 #[tauri::command]
-pub fn pty_close(state: tauri::State<PtyState>, id: u32) -> Result<(), String> {
+pub fn pty_close(
+    state: tauri::State<PtyState>,
+    rmux_state: tauri::State<crate::modules::rmux::RmuxState>,
+    id: u32,
+) -> Result<(), String> {
+    // Daemon-backed close forwards and removes the mapping; otherwise fall
+    // through to the in-process teardown.
+    if crate::modules::rmux::close_forwarded(&rmux_state, id)? {
+        return Ok(());
+    }
     let session = state.sessions.write_safe().remove(&id);
     if let Some(s) = session {
         if let Err(e) = s.killer.lock_safe().kill() {
@@ -251,7 +308,13 @@ pub fn pty_close(state: tauri::State<PtyState>, id: u32) -> Result<(), String> {
 // A fresh webview load orphans the previous frontend's sessions in this still
 // running process; reap them on boot before any new tab spawns.
 #[tauri::command]
-pub fn pty_close_all(state: tauri::State<PtyState>) -> Result<usize, String> {
+pub fn pty_close_all(
+    state: tauri::State<PtyState>,
+    rmux_state: tauri::State<crate::modules::rmux::RmuxState>,
+) -> Result<usize, String> {
+    // Best-effort close of daemon-backed panes; the surviving daemon keeps any
+    // that fail, which is acceptable in Phase 1 and must not block the reload.
+    crate::modules::rmux::close_all_forwarded(&rmux_state);
     let drained: Vec<(u32, Arc<Session>)> = {
         let mut sessions = state.sessions.write_safe();
         sessions.drain().collect()
