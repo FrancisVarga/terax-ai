@@ -20,8 +20,14 @@ export type ProjectCardInsights = {
   /** GitHub star/issue counts. Only when the remote is a GitHub repo. */
   stars: number | null;
   openIssues: number | null;
-  /** Subject + epoch-ms of the most recent commit, for a "last active" line. */
-  lastCommit: { subject: string; atMs: number } | null;
+  /** Most recent commit: subject/time + churn, for a "last active" line.
+   *  Churn is optional — entries cached before it was tracked omit it. */
+  lastCommit: {
+    subject: string;
+    atMs: number;
+    insertions?: number;
+    deletions?: number;
+  } | null;
 };
 
 const LOADING = { kind: "loading" } as const;
@@ -67,7 +73,7 @@ export function useProjectCardInsights(
       summary?: RepoSummary;
       stars: number | null;
       openIssues: number | null;
-      lastCommit: { subject: string; atMs: number } | null;
+      lastCommit: ProjectCardInsights["lastCommit"];
     } = { stars: null, openIssues: null, lastCommit: null };
 
     void (async () => {
@@ -128,7 +134,12 @@ export function useProjectCardInsights(
         .then((list) => {
           const c = list[0];
           if (c) {
-            fresh.lastCommit = { subject: c.subject, atMs: c.timestampSecs * 1000 };
+            fresh.lastCommit = {
+              subject: c.subject,
+              atMs: c.timestampSecs * 1000,
+              insertions: c.insertions,
+              deletions: c.deletions,
+            };
             patch({ lastCommit: fresh.lastCommit });
           }
         })

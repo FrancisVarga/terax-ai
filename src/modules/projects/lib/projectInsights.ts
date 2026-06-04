@@ -17,6 +17,10 @@ export type RepoSummary = {
   ahead: number;
   behind: number;
   changedCount: number;
+  /** Working-tree breakdown of `changedCount` (optional for cache back-compat). */
+  staged?: number;
+  unstaged?: number;
+  untracked?: number;
   remoteUrl: string | null;
   remote: RemoteWebInfo | null;
 };
@@ -138,13 +142,19 @@ export async function loadRepoSummary(
     native.gitStatus(repo.repoRoot).catch(() => null),
     native.gitRemoteUrl(repo.repoRoot).catch(() => null),
   ]);
+  const files = status?.changedFiles ?? [];
   return {
     repoRoot: repo.repoRoot,
     branch: repo.branch,
     upstream: repo.upstream,
     ahead: status?.ahead ?? 0,
     behind: status?.behind ?? 0,
-    changedCount: status?.changedFiles.length ?? 0,
+    changedCount: files.length,
+    // A renamed/modified file can be both staged and unstaged; count each side
+    // independently so the breakdown mirrors what `git status` shows per slot.
+    staged: files.filter((f) => f.staged).length,
+    unstaged: files.filter((f) => f.unstaged && !f.untracked).length,
+    untracked: files.filter((f) => f.untracked).length,
     remoteUrl: remoteUrl ?? null,
     remote: parseRemoteWebUrl(remoteUrl),
   };

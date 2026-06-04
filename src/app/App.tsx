@@ -601,6 +601,8 @@ export default function App() {
         setPinnedExplorerRoot(project.path.replace(/\\/g, "/"));
       }
       cdInNewTab(project.path);
+      // Stamp recency so the dashboard's "Recent" row reflects real opens.
+      useProjectsStore.getState().markOpened(project.id);
     },
     [cdInNewTab],
   );

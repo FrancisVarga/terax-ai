@@ -17,6 +17,12 @@ export type Project = {
   notes: string;
   /** Creation time (ms since epoch) — for stable list ordering. */
   createdAt: number;
+  /**
+   * Last time the project was opened (ms since epoch). Optional for
+   * back-compat: projects added before this field existed have it undefined and
+   * simply don't appear in the "Recent" row until opened once.
+   */
+  lastOpenedAt?: number;
 };
 
 const STORE_PATH = "terax-projects.json";
@@ -46,6 +52,37 @@ export function basename(path: string): string {
 /** Normalize a path to forward slashes (matches the explorer's convention). */
 export function normalizePath(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/+$/, "") || path;
+}
+
+const SSH_PREFIX = "ssh://";
+
+/** A project's server group key, derived from its path (no stored field). */
+export type ServerKey = { kind: "local" } | { kind: "ssh"; alias: string };
+
+/**
+ * Derive the "server" a project lives on purely from its path. Remote projects
+ * are encoded as `ssh://<alias>/<path>` (see explorer/lib/remote.ts), so the
+ * alias is the server. Everything else is the local machine. This keeps the
+ * Project model free of a redundant `server` field.
+ */
+export function serverOf(path: string): ServerKey {
+  if (path.startsWith(SSH_PREFIX)) {
+    const rest = path.slice(SSH_PREFIX.length);
+    const slash = rest.indexOf("/");
+    const alias = slash === -1 ? rest : rest.slice(0, slash);
+    if (alias) return { kind: "ssh", alias };
+  }
+  return { kind: "local" };
+}
+
+/** Stable string id for a server group (used as a Map key + section key). */
+export function serverGroupId(key: ServerKey): string {
+  return key.kind === "ssh" ? `ssh:${key.alias}` : "local";
+}
+
+/** Human-readable label for a server group header. */
+export function serverLabel(key: ServerKey): string {
+  return key.kind === "ssh" ? key.alias : "Local";
 }
 
 /** Parse a comma/whitespace separated tag string into a clean, deduped list. */

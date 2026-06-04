@@ -17,6 +17,8 @@ type State = {
   /** Insert or update a project (matched by id). */
   upsert: (project: Project) => void;
   remove: (id: string) => void;
+  /** Stamp a project's lastOpenedAt to now (drives the Recent row). */
+  markOpened: (id: string) => void;
   /** True when any project already points at `path` (normalized compare). */
   hasPath: (path: string) => boolean;
 };
@@ -51,6 +53,16 @@ export const useProjectsStore = create<State>((set, get) => ({
     void saveProjects(next).then(() => emit(CHANGED_EVENT));
     // Drop the project's cached insights so a re-add starts clean.
     if (removed) void clearInsights(removed.path);
+  },
+  markOpened: (id) => {
+    const list = get().projects;
+    const idx = list.findIndex((p) => p.id === id);
+    if (idx === -1) return;
+    const next = list.map((p) =>
+      p.id === id ? { ...p, lastOpenedAt: Date.now() } : p,
+    );
+    set({ projects: next });
+    void saveProjects(next).then(() => emit(CHANGED_EVENT));
   },
   hasPath: (path) => {
     const norm = path.replace(/\\/g, "/").replace(/\/+$/, "");

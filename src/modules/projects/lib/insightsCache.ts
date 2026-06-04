@@ -38,7 +38,13 @@ export type CachedInsights = {
     summary?: RepoSummary;
     stars: number | null;
     openIssues: number | null;
-    lastCommit: { subject: string; atMs: number } | null;
+    lastCommit: {
+      subject: string;
+      atMs: number;
+      // Optional: entries cached before churn was tracked omit these.
+      insertions?: number;
+      deletions?: number;
+    } | null;
   };
 };
 
