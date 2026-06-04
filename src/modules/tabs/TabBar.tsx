@@ -25,6 +25,7 @@ import {
   FolderLibraryIcon,
   GitBranchIcon,
   GitCompareIcon,
+  GithubIcon,
   ServerStack02Icon,
   Globe02Icon,
   IncognitoIcon,
@@ -78,6 +79,7 @@ type Props = {
   onOpenOtel: () => void;
   onOpenKv: () => void;
   onOpenCcusage: () => void;
+  onOpenGithubFeed: () => void;
   onClose: (id: number) => void;
   /** Pin (promote) a preview tab to persistent on double-click. */
   onPin: (id: number) => void;
@@ -102,6 +104,7 @@ export function TabBar({
   onOpenOtel,
   onOpenKv,
   onOpenCcusage,
+  onOpenGithubFeed,
   onClose,
   onPin,
   onReorder,
@@ -370,6 +373,10 @@ export function TabBar({
               <HugeiconsIcon icon={Coins01Icon} size={14} strokeWidth={1.75} />
               <span className="flex-1">ccusage</span>
             </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onOpenGithubFeed()}>
+              <HugeiconsIcon icon={GithubIcon} size={14} strokeWidth={1.75} />
+              <span className="flex-1">GitHub Feed</span>
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuLabel>Agents</DropdownMenuLabel>
             <DropdownMenuItem onSelect={() => onOpenClaude()}>
@@ -527,6 +534,16 @@ function TabIcon({ tab }: { tab: Tab }) {
       />
     );
   }
+  if (tab.kind === "github-feed") {
+    return (
+      <HugeiconsIcon
+        icon={GithubIcon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
+    );
+  }
   if (tab.kind === "projects" || tab.kind === "project-detail") {
     return (
       <HugeiconsIcon
@@ -563,6 +580,7 @@ function labelFor(t: Tab): string {
   if (t.kind === "otel") return t.title;
   if (t.kind === "kv") return t.title;
   if (t.kind === "ccusage") return t.title;
+  if (t.kind === "github-feed") return t.title;
   if (t.kind === "projects") return t.title;
   if (t.kind === "project-detail") return t.title;
   if (t.kind === "data") return t.title;

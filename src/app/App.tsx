@@ -111,6 +111,7 @@ export default function App() {
     openOtelTab,
     openKvTab,
     openCcusageTab,
+    openGithubFeedTab,
     openProjectDetailTab,
     openDockerDetailTab,
     openAiDiffTab,
@@ -851,6 +852,7 @@ export default function App() {
     openS3Tab,
     openDockerTab,
     openSshTab,
+    openGithubFeedTab,
     addCurrentFolderToProjects,
     toggleSidebar,
     toggleRightSidebar,
@@ -1083,6 +1085,7 @@ export default function App() {
             onOpenOtel={() => openOtelTab()}
             onOpenKv={() => openKvTab()}
             onOpenCcusage={() => openCcusageTab()}
+            onOpenGithubFeed={() => openGithubFeedTab()}
             onClose={handleClose}
             onPin={pinTab}
             onReorder={reorderTab}

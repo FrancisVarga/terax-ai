@@ -164,6 +164,13 @@ export type CcusageTab = {
   title: string;
 };
 
+/** Personal GitHub activity feed + trending repos/topics — a singleton tab. */
+export type GithubFeedTab = {
+  id: number;
+  kind: "github-feed";
+  title: string;
+};
+
 export type ProjectsTab = {
   id: number;
   kind: "projects";
@@ -227,6 +234,7 @@ export type Tab =
   | OtelTab
   | KvTab
   | CcusageTab
+  | GithubFeedTab
   | ProjectsTab
   | ProjectDetailTab;
 
@@ -852,6 +860,23 @@ export function useTabs(
     return targetId;
   }, []);
 
+  /** Open (or focus) the singleton GitHub feed dashboard tab. */
+  const openGithubFeedTab = useCallback(() => {
+    let targetId: number | null = null;
+    setTabs((curr) => {
+      const existing = curr.find((t) => t.kind === "github-feed");
+      if (existing) {
+        targetId = existing.id;
+        return curr;
+      }
+      const id = nextIdRef.current++;
+      targetId = id;
+      return [...curr, { id, kind: "github-feed", title: "GitHub Feed" }];
+    });
+    if (targetId !== null) setActiveId(targetId);
+    return targetId;
+  }, []);
+
   const newMarkdownTab = useCallback((path: string) => {
     let targetId: number | null = null;
     setTabs((curr) => {
@@ -1371,6 +1396,7 @@ export function useTabs(
     openOtelTab,
     openKvTab,
     openCcusageTab,
+    openGithubFeedTab,
     openDockerDetailTab,
     openAiDiffTab,
     openGitDiffTab,

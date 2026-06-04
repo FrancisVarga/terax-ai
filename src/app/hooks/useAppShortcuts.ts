@@ -47,6 +47,7 @@ type UseAppShortcutsArgs = {
   openS3Tab: () => void;
   openDockerTab: () => void;
   openSshTab: () => void;
+  openGithubFeedTab: () => void;
   addCurrentFolderToProjects: () => void;
   toggleSidebar: () => void;
   toggleRightSidebar: () => void;
@@ -94,6 +95,7 @@ export function useAppShortcuts({
   openS3Tab,
   openDockerTab,
   openSshTab,
+  openGithubFeedTab,
   toggleSidebar,
   toggleRightSidebar,
   toggleExplorerFocus,
@@ -138,6 +140,7 @@ export function useAppShortcuts({
       "view.sshRemote": openSshTab,
       "view.docker": openDockerTab,
       "view.s3": openS3Tab,
+      "view.githubFeed": openGithubFeedTab,
       "view.projects": () => cycleSidebarView("projects"),
       "projects.addCurrent": addCurrentFolderToProjects,
       "explorer.focus": toggleExplorerFocus,
@@ -206,6 +209,7 @@ export function useAppShortcuts({
       openS3Tab,
       openDockerTab,
       openSshTab,
+      openGithubFeedTab,
       addCurrentFolderToProjects,
       toggleSidebar,
       toggleRightSidebar,

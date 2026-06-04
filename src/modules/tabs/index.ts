@@ -23,6 +23,7 @@ export {
   type OtelTab,
   type KvTab,
   type CcusageTab,
+  type GithubFeedTab,
   type ProjectsTab,
   type ProjectDetailTab,
   type AiDiffStatus,

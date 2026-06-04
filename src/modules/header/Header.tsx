@@ -51,6 +51,7 @@ type Props = {
   onOpenOtel: () => void;
   onOpenKv: () => void;
   onOpenCcusage: () => void;
+  onOpenGithubFeed: () => void;
   onClose: (id: number) => void;
   /** Promote a preview (transient) tab to persistent. */
   onPin: (id: number) => void;
@@ -86,6 +87,7 @@ export function Header({
   onOpenOtel,
   onOpenKv,
   onOpenCcusage,
+  onOpenGithubFeed,
   onClose,
   onPin,
   onReorder,
@@ -276,6 +278,7 @@ export function Header({
           onOpenOtel={onOpenOtel}
           onOpenKv={onOpenKv}
           onOpenCcusage={onOpenCcusage}
+          onOpenGithubFeed={onOpenGithubFeed}
           onClose={onClose}
           onPin={onPin}
           onReorder={onReorder}

@@ -26,6 +26,7 @@ import { AnalyticsStack } from "@/modules/agentlytics";
 import { OtelStack } from "@/modules/otel";
 import { KvStack } from "@/modules/kv";
 import { CcusageStack } from "@/modules/ccusage";
+import { GitHubFeedStack } from "@/modules/github-feed";
 import { ProjectsDashboard, ProjectDetailStack } from "@/modules/projects";
 import type { SearchAddon } from "@xterm/addon-search";
 
@@ -269,6 +270,9 @@ export function TabStackRouter({
       </TabLayer>
       <TabLayer visible={activeKind === "ccusage"} padded={false}>
         <CcusageStack tabs={tabs} activeId={activeId} />
+      </TabLayer>
+      <TabLayer visible={activeKind === "github-feed"} padded={false}>
+        <GitHubFeedStack tabs={tabs} activeId={activeId} />
       </TabLayer>
       <TabLayer visible={activeKind === "projects"} padded={false}>
         <ProjectsDashboard

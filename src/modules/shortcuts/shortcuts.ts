@@ -40,6 +40,7 @@ export type ShortcutId =
   | "view.sshRemote"
   | "view.docker"
   | "view.s3"
+  | "view.githubFeed"
   | "view.projects"
   | "projects.addCurrent"
   | "editor.undo"
@@ -266,6 +267,12 @@ export const SHORTCUTS: Shortcut[] = [
   {
     id: "view.s3",
     label: "Open S3",
+    group: "View",
+    defaultBindings: [],
+  },
+  {
+    id: "view.githubFeed",
+    label: "Open GitHub Feed",
     group: "View",
     defaultBindings: [],
   },
