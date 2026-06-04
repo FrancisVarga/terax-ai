@@ -1,6 +1,6 @@
 [package]
 name = "otel-collector"
-version = "0.24.0"
+version = "0.25.0"
 description = "Standalone OTEL collector sidecar for Terax"
 authors = ["crynta"]
 license = "Apache-2.0"
