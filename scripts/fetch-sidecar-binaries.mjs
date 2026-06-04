@@ -21,10 +21,26 @@
  *   --all                stage every supported triple (release/CI builds)
  *   --target=<triple>    stage one specific triple
  *   --tool=<name>        limit to one tool (rg | s5cmd); repeatable
+ *   --force              re-download even if the staged version already matches
+ *
+ * Local-dev cache: each staged sidecar gets a sibling `<file>.version` marker
+ * recording the upstream version it was built from. On a subsequent local run we
+ * still ask GitHub for the latest version (cheap JSON GET), but if the marker
+ * already matches we skip the multi-MB download + extract + copy. The marker is
+ * the cache key, so an upstream version bump invalidates it automatically. CI
+ * (process.env.CI set) always fetches fresh for reproducible release artifacts;
+ * `--force` overrides the cache locally.
  */
 
 import { spawnSync } from "node:child_process";
-import { createWriteStream, existsSync, mkdirSync, rmSync } from "node:fs";
+import {
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { chmod, copyFile, mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -162,6 +178,23 @@ async function findBinary(dir, bin) {
   return null;
 }
 
+/**
+ * True when a previously-staged sidecar already matches `version`, so the
+ * download can be skipped. Requires BOTH the binary and its `.version` marker to
+ * exist and the marker to record the same version. Disabled in CI and under
+ * --force so release builds and explicit re-fetches always pull fresh.
+ */
+function isCached(outfile, version) {
+  if (CACHE_DISABLED) return false;
+  const marker = `${outfile}.version`;
+  if (!existsSync(outfile) || !existsSync(marker)) return false;
+  try {
+    return readFileSync(marker, "utf8").trim() === version;
+  } catch {
+    return false;
+  }
+}
+
 async function stage(tool, triple, version) {
   const spec = tool.asset(triple, version);
   if (!spec) {
@@ -173,6 +206,11 @@ async function stage(tool, triple, version) {
   const outfile = join(OUT_DIR, `${tool.base}-${triple}${exe}`);
   const url = `https://github.com/${tool.repo}/releases/download/${tool.tag(version)}/${spec.name}`;
 
+  if (isCached(outfile, version)) {
+    console.log(`  ${tool.base} ${triple}  (cached ${version}, skip)`);
+    return;
+  }
+
   console.log(`  ${tool.base} ${triple}  <-  ${spec.name}`);
   const work = await mkdtemp(join(tmpdir(), `${tool.base}-fetch-`));
   try {
@@ -183,6 +221,8 @@ async function stage(tool, triple, version) {
     if (!bin) throw new Error(`${tool.binName} not found inside ${spec.name}`);
     await copyFile(bin, outfile);
     if (!isWin) await chmod(outfile, 0o755); // release archives keep the bit, but be explicit
+    // Record the version as the local-dev cache key for the next run.
+    writeFileSync(`${outfile}.version`, version);
     console.log(`    -> ${outfile}`);
   } finally {
     rmSync(work, { recursive: true, force: true });
@@ -191,6 +231,9 @@ async function stage(tool, triple, version) {
 
 const args = process.argv.slice(2);
 const all = args.includes("--all");
+// Local-dev cache is off in CI (reproducible release artifacts) and under
+// --force (explicit re-fetch). Marker files only consulted when this is false.
+const CACHE_DISABLED = Boolean(process.env.CI) || args.includes("--force");
 const argTriple = args.find((a) => a.startsWith("--target="));
 const wantedTools = args
   .filter((a) => a.startsWith("--tool="))

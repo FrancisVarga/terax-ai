@@ -153,6 +153,27 @@ for (const base of RUST_SIDECAR_BASES) {
   }
 }
 
+// Local-dev mtime cache: skip `bun build --compile` when the output exe is
+// already newer than its entry source AND newer than this build script itself
+// (a config change here should force a rebuild). bun has no built-in staleness
+// check, so this is a make-style guard. CI always rebuilds for reproducible
+// release artifacts; --force overrides locally.
+const CACHE_DISABLED = Boolean(process.env.CI) || process.argv.includes("--force");
+const SELF_MTIME = statSync(fileURLToPath(import.meta.url)).mtimeMs;
+
+/** True when `outfile` is up to date relative to `entry` and this script. */
+function isUpToDate(outfile, entry) {
+  if (CACHE_DISABLED || !existsSync(outfile)) return false;
+  try {
+    const out = statSync(outfile).mtimeMs;
+    // A zero-byte placeholder (staged above) is never a valid cache hit.
+    if (statSync(outfile).size === 0) return false;
+    return out >= statSync(entry).mtimeMs && out >= SELF_MTIME;
+  } catch {
+    return false;
+  }
+}
+
 console.log(`Building bunqueue sidecars for ${triple} (${bunTarget})`);
 
 for (const { base, entry } of TARGETS) {
@@ -161,6 +182,10 @@ for (const { base, entry } of TARGETS) {
     process.exit(1);
   }
   const outfile = join(OUT_DIR, `${base}-${triple}${EXE}`);
+  if (isUpToDate(outfile, entry)) {
+    console.log(`  ${base}  (up to date, skip)`);
+    continue;
+  }
   console.log(`  ${base}  <-  ${entry}`);
   const r = spawnSync(
     BUN,
