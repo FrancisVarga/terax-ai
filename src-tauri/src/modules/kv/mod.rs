@@ -10,3 +10,7 @@
 //! in #97 and is added here as a sibling submodule.
 
 pub mod core;
+pub mod data;
+pub mod lifecycle;
+
+pub use lifecycle::KvState;

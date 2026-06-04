@@ -1,7 +1,9 @@
 mod agent_detect;
 mod da_filter;
+// `pub(crate)` so the kv lifecycle (modules/kv) can reuse the Job Object to tie
+// the kv-server sidecar's lifetime to Terax (kill-on-job-close).
 #[cfg(windows)]
-mod job;
+pub(crate) mod job;
 mod session;
 pub(crate) mod shell_init;
 

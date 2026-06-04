@@ -2,8 +2,8 @@ pub mod modules;
 
 use modules::sync::MutexExt;
 use modules::{
-    agent, agentscan, bunqueue, ccusage, cleanup, crash, docker, fs, git, gpu, net, otel, pty, s3,
-    secrets, shell, ssh, workspace,
+    agent, agentscan, bunqueue, ccusage, cleanup, crash, docker, fs, git, gpu, kv, net, otel, pty,
+    s3, secrets, shell, ssh, workspace,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -150,6 +150,51 @@ struct OpenWindows(Mutex<HashMap<String, String>>);
 /// other Tauri-store JSON in the app data dir.
 const WINDOW_SESSION_STORE: &str = "terax-window-session.json";
 const WINDOW_SESSION_KEY: &str = "dirs";
+
+/// Read the persisted `kvPort` pref (the embedded KV server port). `None` keeps
+/// the lifecycle default (6379, dev-offset applied there).
+fn read_kv_port_pref<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<u16> {
+    use tauri_plugin_store::StoreExt;
+    app.store("terax-settings.json")
+        .ok()
+        .and_then(|s| s.get("kvPort"))
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u16::try_from(n).ok())
+        .filter(|p| *p >= 1024)
+}
+
+/// Read the persisted `kvRequirePass` pref. Empty/absent -> no auth.
+fn read_kv_pass_pref<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<String> {
+    use tauri_plugin_store::StoreExt;
+    app.store("terax-settings.json")
+        .ok()
+        .and_then(|s| s.get("kvRequirePass"))
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .filter(|s| !s.is_empty())
+}
+
+/// Ensure the opened project's `.gitignore` ignores `.t-camelot/` so the cache
+/// data dir is never committed. Idempotent; best-effort. `kv_data_dir` is
+/// `<project>/.t-camelot/kv_data`, so the project root is two parents up.
+fn ensure_kv_gitignore(kv_data_dir: &std::path::Path) {
+    let Some(project_root) = kv_data_dir.parent().and_then(|p| p.parent()) else {
+        return;
+    };
+    let gitignore = project_root.join(".gitignore");
+    let entry = ".t-camelot/";
+    let existing = std::fs::read_to_string(&gitignore).unwrap_or_default();
+    if existing.lines().any(|l| l.trim() == entry || l.trim() == ".t-camelot") {
+        return;
+    }
+    let mut next = existing;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str("\n# Terax embedded KV server data (machine-local, never commit).\n");
+    next.push_str(entry);
+    next.push('\n');
+    let _ = std::fs::write(&gitignore, next);
+}
 
 /// Snapshot the open-window dirs to the store so the next launch can restore
 /// them. Called on `ExitRequested`. Best-effort: any store error is logged and
@@ -417,6 +462,7 @@ pub fn run() {
         .manage(ProjectWindows::default())
         .manage(OpenWindows::default())
         .manage(otel::OtelState::default())
+        .manage(kv::KvState::default())
         .setup(|app| {
             // Window titles (incl. the dev-distinguishing " Dev" suffix and the
             // active project name) are owned by the frontend — see the title
@@ -502,6 +548,26 @@ pub fn run() {
             // failure degrades to an in-memory in-process store.
             let otel_state = app.state::<otel::OtelState>();
             otel::start(app.handle(), &otel_state);
+
+            // Start the embedded Redis/Valkey-protocol KV server so the user can
+            // point any standard Redis client (ioredis, redis-py, redis-cli) at
+            // a local cache + pub/sub during development. Packaged: spawns the
+            // `kv-server` sidecar; dev (no sidecar staged): runs in-process.
+            // Off by default - only starts if the `kvEnabled` pref is set.
+            // Data persists under the opened project's `.t-camelot/kv_data` dir
+            // so the cache is per-project and survives restarts.
+            let kv_state = app.state::<kv::KvState>();
+            let kv_data_dir = workspace::launch_cwd_snapshot()
+                .or_else(|| app.path().app_data_dir().ok().map(|d| d.join("kv")))
+                .map(|base| base.join(".t-camelot").join("kv_data"));
+            if let Some(ref dir) = kv_data_dir {
+                ensure_kv_gitignore(dir);
+            }
+            let kv_port = read_kv_port_pref(app.handle());
+            let kv_pass = read_kv_pass_pref(app.handle());
+            kv::lifecycle::set_config(&kv_state, kv_port, kv_data_dir, kv_pass);
+            kv::lifecycle::init_from_pref(app.handle(), &kv_state);
+            kv::lifecycle::start_watchdog(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -642,6 +708,21 @@ pub fn run() {
             otel::otel_attr_breakdown,
             otel::otel_query,
             otel::otel_clear,
+            kv::lifecycle::kv_status,
+            kv::lifecycle::kv_logs,
+            kv::lifecycle::kv_ensure,
+            kv::lifecycle::kv_set_enabled,
+            kv::lifecycle::kv_restart,
+            kv::lifecycle::kv_set_port,
+            kv::data::kv_data_scan,
+            kv::data::kv_data_get,
+            kv::data::kv_data_set,
+            kv::data::kv_data_expire,
+            kv::data::kv_data_del,
+            kv::data::kv_data_flushdb,
+            kv::data::kv_data_dbsize,
+            kv::data::kv_data_publish,
+            kv::data::kv_data_subscribe,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -657,6 +738,9 @@ pub fn run() {
                 // Reap the otel-collector sidecar so it doesn't outlive the app
                 // and keep its loopback ports bound. No-op in in-process mode.
                 app.state::<otel::OtelState>().shutdown();
+                // Kill the kv-server sidecar; it snapshots on its SIGTERM/Ctrl-C
+                // path before exiting. No-op in in-process mode.
+                kv::lifecycle::on_exit(&app.state::<kv::KvState>());
             }
         });
 }

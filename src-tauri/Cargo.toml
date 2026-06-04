@@ -5,7 +5,7 @@
 # components"). NSIS was unaffected; MSI `light.exe` ICE validation was the only
 # failure. The member shares the collector core via a path dep on `terax_lib`.
 [workspace]
-members = [".", "otel-collector"]
+members = [".", "otel-collector", "kv-server"]
 resolver = "2"
 
 [package]
@@ -175,12 +175,17 @@ flate2 = "1"
 # entry points we build the codec on.
 redis-protocol = { version = "6", features = ["bytes"] }
 dashmap = "6"
+# Snapshot persistence (#98): serde derive on the snapshot types + a compact
+# binary on-disk format. The snapshot is an internal file (not user-edited), so
+# bincode's size/speed beats JSON. serde 1 + serde_json are already in the tree.
+bincode = "1"
+# Loopback Redis client used by the data CRUD UI commands (#107) to read/write
+# the running sidecar (the UI's single source of truth). `tokio-comp` for the
+# async multiplexed connection; `aio` pulled in by it.
+redis = { version = "0.27", default-features = false, features = ["tokio-comp"] }
 
 [dev-dependencies]
 proptest = "1"
-# Real Redis client used by the kv acceptance test to drive a genuine handshake
-# + command round-trip against `kv_core::serve` (issue #100).
-redis = { version = "0.27", default-features = false, features = ["tokio-comp"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -11,10 +11,14 @@
 //! `(Store, Conn, args, now)`, so the whole surface is unit-testable without a
 //! socket (see the `#[cfg(test)]` modules in each file).
 
+#[cfg(test)]
+mod acceptance;
 pub mod conn;
 pub mod dispatch;
 pub mod pubsub;
 pub mod resp;
+pub mod server;
+pub mod snapshot;
 pub mod store;
 pub mod value;
 
@@ -22,5 +26,7 @@ pub use conn::Conn;
 pub use dispatch::{dispatch, Clock, Dispatch, SERVER_NAME, SERVER_VERSION};
 pub use pubsub::{NoopPubSub, PubSub};
 pub use resp::{encode_reply, parse_command, Proto, Reply};
+pub use server::{bind_and_serve, serve, Broadcaster, ServerCtx};
+pub use snapshot::{decode as decode_snapshot, encode as encode_snapshot, Snapshot};
 pub use store::{Store, TtlState};
 pub use value::{Entry, Value};

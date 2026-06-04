@@ -273,6 +273,13 @@ impl Store {
         self.map.clear();
     }
 
+    /// Insert a fully-formed entry, bypassing the read-path TTL checks. Used by
+    /// snapshot load (the caller has already dropped expired keys and converted
+    /// deadlines).
+    pub fn insert_loaded(&self, entry: Entry, key: String) {
+        self.map.insert(key, entry);
+    }
+
     /// Convert a TTL `Duration` from now into a monotonic deadline. Helper for
     /// the command layer.
     pub fn deadline_in(now: Instant, ttl: Duration) -> Instant {

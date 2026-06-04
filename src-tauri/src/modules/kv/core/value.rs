@@ -15,10 +15,28 @@ use bytes::Bytes;
 /// A value held in the store. The byte payload of a string is `Bytes` so it can
 /// be cloned cheaply (ref-counted) when read and encoded straight into a RESP
 /// bulk-string frame without a copy.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `serde` derives back the snapshot persistence (#98); `Bytes` serializes as a
+/// byte sequence. Phase 2 variants will serialize the same way.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Value {
     /// A binary-safe string (the only Phase 1 type).
-    Str(Bytes),
+    Str(#[serde(with = "bytes_serde")] Bytes),
+}
+
+/// Serialize `Bytes` as a plain byte sequence for snapshots.
+mod bytes_serde {
+    use bytes::Bytes;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(b: &Bytes, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bytes(b)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Bytes, D::Error> {
+        let v = Vec::<u8>::deserialize(d)?;
+        Ok(Bytes::from(v))
+    }
 }
 
 impl Value {

@@ -1,0 +1,30 @@
+[package]
+name = "kv-server"
+version = "0.24.0"
+description = "Standalone embedded Redis/Valkey-protocol KV server sidecar for Terax"
+authors = ["crynta"]
+license = "Apache-2.0"
+edition = "2021"
+
+# A SEPARATE workspace member, not a `[[bin]]` of `terax`. A crate-bin twin under
+# `terax`'s `target/release/` plus the Tauri `externalBin` copy trips the WiX MSI
+# ICE30 "installed by two different components" validation (see issues #90/#91 for
+# the same fix applied to otel-collector). NSIS is unaffected; MSI must pass.
+[[bin]]
+name = "kv-server"
+path = "src/main.rs"
+
+[dependencies]
+# The shared KV core (store + RESP codec + dispatch + serve loop + snapshot)
+# lives in the `terax` package's library target, lib name `terax_lib`.
+terax_lib = { path = "..", package = "terax" }
+bytes = "1"
+tokio = { version = "1", default-features = false, features = [
+	"rt-multi-thread",
+	"net",
+	"time",
+	"macros",
+	"signal",
+	"sync",
+] }
+log = "0.4"

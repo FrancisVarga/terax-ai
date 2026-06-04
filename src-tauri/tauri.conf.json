@@ -91,6 +91,7 @@
       "binaries/bunqueue-server",
       "binaries/bunqueue-worker-github-create-issue",
       "binaries/bunqueue-worker-http-request",
+      "binaries/kv-server",
       "binaries/otel-collector",
       "binaries/rg",
       "binaries/s5cmd"
