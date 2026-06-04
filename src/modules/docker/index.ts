@@ -1,6 +1,7 @@
 export { DockerDetailPane } from "./DockerDetailPane";
 export { DockerDetailStack } from "./DockerDetailStack";
 export { DockerPanel } from "./DockerPanel";
+export { DockerStack } from "./DockerStack";
 export { DockerStatsGraphs } from "./DockerStatsGraphs";
 export {
   displayName,

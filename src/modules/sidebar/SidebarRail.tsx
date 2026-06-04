@@ -1,11 +1,8 @@
 import { cn } from "@/lib/utils";
 import {
-  CloudIcon,
-  ContainerIcon,
   FolderGitTwoIcon,
   FolderLibraryIcon,
   FolderTreeIcon,
-  ServerStack02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { SidebarViewId } from "./types";
@@ -36,6 +33,8 @@ export function SidebarRail({
   changedCount,
   isProject,
 }: Props) {
+  // SSH, Docker, and S3 moved out of the sidebar into main-editor tabs (opened
+  // via keyboard shortcuts / command palette), so they no longer appear here.
   const items: RailItem[] = [
     { id: "explorer", label: "Files", icon: FolderTreeIcon },
     {
@@ -44,10 +43,7 @@ export function SidebarRail({
       icon: FolderGitTwoIcon,
       badge: changedCount,
     },
-    { id: "ssh-remote", label: "SSH", icon: ServerStack02Icon },
-    { id: "docker", label: "Docker", icon: ContainerIcon },
     { id: "projects", label: "Projects", icon: FolderLibraryIcon },
-    { id: "s3", label: "S3", icon: CloudIcon },
   ];
 
   return (

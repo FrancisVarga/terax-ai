@@ -25,6 +25,7 @@ import {
   FolderLibraryIcon,
   GitBranchIcon,
   GitCompareIcon,
+  ServerStack02Icon,
   Globe02Icon,
   IncognitoIcon,
   PencilEdit02Icon,
@@ -476,6 +477,26 @@ function TabIcon({ tab }: { tab: Tab }) {
       />
     );
   }
+  if (tab.kind === "docker") {
+    return (
+      <HugeiconsIcon
+        icon={ContainerIcon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
+    );
+  }
+  if (tab.kind === "ssh") {
+    return (
+      <HugeiconsIcon
+        icon={ServerStack02Icon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
+    );
+  }
   if (tab.kind === "agentlytics") {
     return (
       <HugeiconsIcon
@@ -546,6 +567,8 @@ function labelFor(t: Tab): string {
   if (t.kind === "project-detail") return t.title;
   if (t.kind === "data") return t.title;
   if (t.kind === "s3") return t.title;
+  if (t.kind === "docker") return t.title;
+  if (t.kind === "ssh") return t.title;
   if (!t.cwd) return t.title;
   const parts = t.cwd.split(/[\\/]/).filter(Boolean);
   return parts.length ? parts[parts.length - 1] : "/";

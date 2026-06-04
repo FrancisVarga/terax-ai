@@ -3,10 +3,7 @@ import {
   FileExplorer,
   type FileExplorerHandle,
 } from "@/modules/explorer";
-import { SshRemotePanel, type SshHost } from "@/modules/ssh-remote";
-import { DockerPanel } from "@/modules/docker";
 import { ProjectsPanel, type Project } from "@/modules/projects";
-import { S3Panel } from "@/modules/s3";
 import {
   SourceControlPanel,
   useSourceControl,
@@ -25,7 +22,6 @@ type AppSidebarProps = {
   rootPath: string | null;
   /** Truthy while a remote browse is active (enables the exit-remote affordance). */
   remoteActive: boolean;
-  remoteAlias: string | null;
   sourceControl: SourceControl;
 
   onOpenFile: (path: string, pin?: boolean) => void;
@@ -38,10 +34,7 @@ type AppSidebarProps = {
   onAddToProjects: (path: string) => void;
   onExitRemote: () => void;
 
-  onConnectSsh: (host: SshHost, targetPath?: string) => void;
-  onOpenContainer: Parameters<typeof DockerPanel>[0]["onOpenContainer"];
   onOpenProject: (project: Project) => void;
-  onOpenS3Browser: () => void;
   onOpenDiff: Parameters<typeof SourceControlPanel>[0]["onOpenDiff"];
   onOpenGitGraph: () => void;
 };
@@ -58,7 +51,6 @@ export function AppSidebar({
   isProject,
   rootPath,
   remoteActive,
-  remoteAlias,
   sourceControl,
   onOpenFile,
   onPathRenamed,
@@ -69,10 +61,7 @@ export function AppSidebar({
   onOpenDataPreview,
   onAddToProjects,
   onExitRemote,
-  onConnectSsh,
-  onOpenContainer,
   onOpenProject,
-  onOpenS3Browser,
   onOpenDiff,
   onOpenGitGraph,
 }: AppSidebarProps) {
@@ -93,14 +82,8 @@ export function AppSidebar({
             onAddToProjects={onAddToProjects}
             onExitRemote={remoteActive ? onExitRemote : undefined}
           />
-        ) : view === "ssh-remote" ? (
-          <SshRemotePanel onConnect={onConnectSsh} />
-        ) : view === "docker" ? (
-          <DockerPanel host={remoteAlias} onOpenContainer={onOpenContainer} />
         ) : view === "projects" ? (
           <ProjectsPanel onOpenProject={onOpenProject} />
-        ) : view === "s3" ? (
-          <S3Panel onOpenBrowser={onOpenS3Browser} />
         ) : (
           <SourceControlPanel
             open

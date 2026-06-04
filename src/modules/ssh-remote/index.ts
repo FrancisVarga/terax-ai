@@ -1,4 +1,5 @@
 export { SshRemotePanel } from "./SshRemotePanel";
+export { SshStack } from "./SshStack";
 export {
   describeHost,
   sshCommandFor,

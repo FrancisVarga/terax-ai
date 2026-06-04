@@ -39,8 +39,6 @@ function readSidebarView(): SidebarViewId {
     if (
       stored === "explorer" ||
       stored === "source-control" ||
-      stored === "ssh-remote" ||
-      stored === "docker" ||
       stored === "projects"
     )
       return stored;

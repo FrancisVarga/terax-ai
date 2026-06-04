@@ -12,7 +12,7 @@ import {
   type ShortcutId,
 } from "@/modules/shortcuts";
 
-type SidebarView = "ssh-remote" | "docker" | "projects" | "source-control";
+type SidebarView = "projects" | "source-control";
 
 type UseAppShortcutsArgs = {
   activeId: number;
@@ -42,6 +42,11 @@ type UseAppShortcutsArgs = {
 
   // Sidebar / view / zoom
   cycleSidebarView: (view: SidebarView) => void;
+  // S3, Docker, and SSH are main-editor tabs now (moved out of the sidebar),
+  // opened via these singleton tab-openers.
+  openS3Tab: () => void;
+  openDockerTab: () => void;
+  openSshTab: () => void;
   addCurrentFolderToProjects: () => void;
   toggleSidebar: () => void;
   toggleRightSidebar: () => void;
@@ -86,6 +91,9 @@ export function useAppShortcuts({
   openClaudeTeam,
   cycleSidebarView,
   addCurrentFolderToProjects,
+  openS3Tab,
+  openDockerTab,
+  openSshTab,
   toggleSidebar,
   toggleRightSidebar,
   toggleExplorerFocus,
@@ -127,8 +135,9 @@ export function useAppShortcuts({
       "settings.open": () => void openSettingsWindow(),
       "sidebar.toggle": toggleSidebar,
       "rightSidebar.toggle": toggleRightSidebar,
-      "view.sshRemote": () => cycleSidebarView("ssh-remote"),
-      "view.docker": () => cycleSidebarView("docker"),
+      "view.sshRemote": openSshTab,
+      "view.docker": openDockerTab,
+      "view.s3": openS3Tab,
       "view.projects": () => cycleSidebarView("projects"),
       "projects.addCurrent": addCurrentFolderToProjects,
       "explorer.focus": toggleExplorerFocus,
@@ -194,6 +203,9 @@ export function useAppShortcuts({
       openClaudeGoldenDuo,
       openClaudeTeam,
       cycleSidebarView,
+      openS3Tab,
+      openDockerTab,
+      openSshTab,
       addCurrentFolderToProjects,
       toggleSidebar,
       toggleRightSidebar,

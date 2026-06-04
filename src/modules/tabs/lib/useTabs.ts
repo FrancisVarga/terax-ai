@@ -190,6 +190,22 @@ export type DockerDetailTab = {
   host: string | null;
 };
 
+/** Docker container list — a singleton main-content tab (the container browser
+ * formerly in the left sidebar). Rows open a `docker-detail` tab. */
+export type DockerTab = {
+  id: number;
+  kind: "docker";
+  title: string;
+};
+
+/** SSH remote host list — a singleton main-content tab (the host browser
+ * formerly in the left sidebar). Rows connect (opening a terminal tab). */
+export type SshTab = {
+  id: number;
+  kind: "ssh";
+  title: string;
+};
+
 export type Tab =
   | TerminalTab
   | EditorTab
@@ -205,6 +221,8 @@ export type Tab =
   | GitCommitFileDiffTab
   | BunqueueTab
   | DockerDetailTab
+  | DockerTab
+  | SshTab
   | AnalyticsTab
   | OtelTab
   | KvTab
@@ -689,6 +707,40 @@ export function useTabs(
       const id = nextIdRef.current++;
       targetId = id;
       return [...curr, { id, kind: "s3", title: "S3" } satisfies S3Tab];
+    });
+    if (targetId !== null) setActiveId(targetId);
+    return targetId;
+  }, []);
+
+  /** Open (or focus) the singleton Docker container-list tab. */
+  const openDockerTab = useCallback(() => {
+    let targetId: number | null = null;
+    setTabs((curr) => {
+      const existing = curr.find((t) => t.kind === "docker");
+      if (existing) {
+        targetId = existing.id;
+        return curr;
+      }
+      const id = nextIdRef.current++;
+      targetId = id;
+      return [...curr, { id, kind: "docker", title: "Docker" } satisfies DockerTab];
+    });
+    if (targetId !== null) setActiveId(targetId);
+    return targetId;
+  }, []);
+
+  /** Open (or focus) the singleton SSH remote-host list tab. */
+  const openSshTab = useCallback(() => {
+    let targetId: number | null = null;
+    setTabs((curr) => {
+      const existing = curr.find((t) => t.kind === "ssh");
+      if (existing) {
+        targetId = existing.id;
+        return curr;
+      }
+      const id = nextIdRef.current++;
+      targetId = id;
+      return [...curr, { id, kind: "ssh", title: "SSH" } satisfies SshTab];
     });
     if (targetId !== null) setActiveId(targetId);
     return targetId;
@@ -1310,6 +1362,8 @@ export function useTabs(
     newLogTab,
     newDataTab,
     openS3Tab,
+    openDockerTab,
+    openSshTab,
     openBunqueueTab,
     openProjectsTab,
     openProjectDetailTab,

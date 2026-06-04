@@ -39,6 +39,7 @@ export type ShortcutId =
   | "rightSidebar.toggle"
   | "view.sshRemote"
   | "view.docker"
+  | "view.s3"
   | "view.projects"
   | "projects.addCurrent"
   | "editor.undo"
@@ -252,13 +253,19 @@ export const SHORTCUTS: Shortcut[] = [
   },
   {
     id: "view.sshRemote",
-    label: "Connect SSH server",
+    label: "Open SSH",
     group: "View",
     defaultBindings: [],
   },
   {
     id: "view.docker",
     label: "Open Docker",
+    group: "View",
+    defaultBindings: [],
+  },
+  {
+    id: "view.s3",
+    label: "Open S3",
     group: "View",
     defaultBindings: [],
   },

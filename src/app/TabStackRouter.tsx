@@ -20,7 +20,8 @@ import {
   type GitHistorySearchHandle,
 } from "@/modules/git-history";
 import { BunqueueStack } from "@/modules/bunqueue";
-import { DockerDetailStack } from "@/modules/docker";
+import { DockerDetailStack, DockerStack } from "@/modules/docker";
+import { SshStack } from "@/modules/ssh-remote";
 import { AnalyticsStack } from "@/modules/agentlytics";
 import { OtelStack } from "@/modules/otel";
 import { KvStack } from "@/modules/kv";
@@ -87,6 +88,12 @@ export type TabStackRouterProps = {
   gitDiffTabs: ComponentProps<typeof GitDiffStack>["gitDiffs"];
   gitHistoryTabs: ComponentProps<typeof GitHistoryStack>["gitHistories"];
   dockerDetailTabs: ComponentProps<typeof DockerDetailStack>["dockerDetails"];
+  /** SSH alias for a remote Docker daemon; `null` lists the local daemon. */
+  dockerHost: string | null;
+  /** Open a container's deep-detail tab from the Docker list tab. */
+  onOpenContainer: ComponentProps<typeof DockerStack>["onOpenContainer"];
+  /** Connect to a host (opens a terminal) from the SSH list tab. */
+  onConnectSsh: ComponentProps<typeof SshStack>["onConnect"];
   activeId: number;
   activeKind: Tab["kind"] | undefined;
   registerTerminalHandle: (id: number, handle: TerminalPaneHandle | null) => void;
@@ -132,6 +139,9 @@ export function TabStackRouter({
   gitDiffTabs,
   gitHistoryTabs,
   dockerDetailTabs,
+  dockerHost,
+  onOpenContainer,
+  onConnectSsh,
   activeId,
   activeKind,
   registerTerminalHandle,
@@ -197,6 +207,17 @@ export function TabStackRouter({
       </TabLayer>
       <TabLayer visible={activeKind === "s3"} padded>
         <S3Stack tabs={tabs} activeId={activeId} />
+      </TabLayer>
+      <TabLayer visible={activeKind === "docker"} padded={false}>
+        <DockerStack
+          tabs={tabs}
+          activeId={activeId}
+          host={dockerHost}
+          onOpenContainer={onOpenContainer}
+        />
+      </TabLayer>
+      <TabLayer visible={activeKind === "ssh"} padded={false}>
+        <SshStack tabs={tabs} activeId={activeId} onConnect={onConnectSsh} />
       </TabLayer>
       <TabLayer visible={activeKind === "ai-diff"} padded>
         <AiDiffStack

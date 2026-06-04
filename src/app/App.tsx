@@ -104,6 +104,8 @@ export default function App() {
     newLogTab,
     newDataTab,
     openS3Tab,
+    openDockerTab,
+    openSshTab,
     openBunqueueTab,
     openAnalyticsTab,
     openOtelTab,
@@ -239,6 +241,20 @@ export default function App() {
       .catch(() => setLaunchCwd(null))
       .finally(() => setLaunchCwdResolved(true));
   }, []);
+
+  // Seed the local S3 server as a browser connection once on launch, so the S3
+  // tab shows "Local (.t-camelot)" ready to browse. The backend started the
+  // server at app setup; this is idempotent (keyed by a fixed connection id) and
+  // refreshes the endpoint in case the ephemeral port changed across restarts.
+  // Best-effort: a not-yet-running server just leaves the tab's existing list
+  // unchanged.
+  useEffect(() => {
+    if (!launchCwdResolved) return;
+    void invoke("s3local_seed_connection").catch(() => {
+      // Server may be disabled or still starting; the S3 tab still works for
+      // any manually-added connections.
+    });
+  }, [launchCwdResolved]);
 
 
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -816,6 +832,9 @@ export default function App() {
     openClaudeGoldenDuo,
     openClaudeTeam,
     cycleSidebarView,
+    openS3Tab,
+    openDockerTab,
+    openSshTab,
     addCurrentFolderToProjects,
     toggleSidebar,
     toggleRightSidebar,
@@ -974,6 +993,9 @@ export default function App() {
       gitDiffTabs={gitDiffTabs}
       gitHistoryTabs={gitHistoryTabs}
       dockerDetailTabs={dockerDetailTabs}
+      dockerHost={remoteAlias}
+      onOpenContainer={openDockerDetailTab}
+      onConnectSsh={connectSsh}
       activeId={activeId}
       activeKind={activeTab?.kind}
       registerTerminalHandle={registerTerminalHandle}
@@ -1076,7 +1098,6 @@ export default function App() {
                 isProject={isProjectWindow}
                 rootPath={remoteRoot ?? explorerRoot}
                 remoteActive={remoteRoot !== null}
-                remoteAlias={remoteAlias}
                 sourceControl={sourceControl}
                 onOpenFile={handleOpenFile}
                 onPathRenamed={handlePathRenamed}
@@ -1087,10 +1108,7 @@ export default function App() {
                 onOpenDataPreview={openDataPreview}
                 onAddToProjects={handleAddToProjects}
                 onExitRemote={exitRemote}
-                onConnectSsh={connectSsh}
-                onOpenContainer={openDockerDetailTab}
                 onOpenProject={openProject}
-                onOpenS3Browser={() => openS3Tab()}
                 onOpenDiff={openGitDiffTab}
                 onOpenGitGraph={openGitGraphFromContext}
               />

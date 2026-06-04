@@ -17,6 +17,8 @@ export {
   type GitCommitFileDiffTab,
   type BunqueueTab,
   type DockerDetailTab,
+  type DockerTab,
+  type SshTab,
   type AnalyticsTab,
   type OtelTab,
   type KvTab,
