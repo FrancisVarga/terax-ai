@@ -6,6 +6,7 @@ mod da_filter;
 pub(crate) mod job;
 mod session;
 pub(crate) mod shell_init;
+mod sink;
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -121,8 +122,10 @@ pub async fn pty_open(
         }
     };
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    let sink: Arc<dyn sink::PtyOutputSink> =
+        Arc::new(sink::TauriChannelSink::new(app, on_data, on_exit));
     let session = tauri::async_runtime::spawn_blocking(move || {
-        session::spawn(id, app, cols, rows, cwd, workspace, on_data, on_exit).map(|(s, _)| s)
+        session::spawn(id, cols, rows, cwd, workspace, sink).map(|(s, _)| s)
     })
     .await
     .map_err(|e| {
