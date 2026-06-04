@@ -765,4 +765,85 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
     }
+
+    // Session/window grouping verbs (#130) end-to-end against a live daemon:
+    // create a session, add a second window, split it, assert /session/list
+    // reflects the tree, then kill the session and assert every pane is reaped.
+    #[test]
+    #[ignore = "requires a built rmux-daemon binary via RMUX_DAEMON_E2E"]
+    fn end_to_end_session_window_lifecycle() {
+        let exe = match std::env::var("RMUX_DAEMON_E2E") {
+            Ok(p) => std::path::PathBuf::from(p),
+            Err(_) => return,
+        };
+        assert!(exe.is_file(), "RMUX_DAEMON_E2E does not point at a file: {}", exe.display());
+
+        let (child, port) = spawn_daemon(&exe).expect("spawn daemon + read port");
+        let base = format!("http://127.0.0.1:{port}");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let client = reqwest::Client::new();
+
+        let post = |url: String, body: Value| {
+            let client = client.clone();
+            rt.block_on(async move {
+                client.post(&url).json(&body).send().await.expect("post")
+                    .error_for_status().expect("status")
+                    .json::<Value>().await.unwrap_or(Value::Null)
+            })
+        };
+        let get = |url: String| {
+            let client = client.clone();
+            rt.block_on(async move {
+                client.get(&url).send().await.expect("get")
+                    .error_for_status().expect("status")
+                    .json::<Value>().await.expect("json")
+            })
+        };
+
+        // Create a session (1 window, 1 pane).
+        let created = post(format!("{base}/session/new"), serde_json::json!({ "name": "work" }));
+        let session_id = created["session_id"].as_u64().expect("session_id");
+
+        // Add a second window (another pane).
+        let win2 = post(format!("{base}/session/{session_id}/window/new"), serde_json::json!({}));
+        let window2_id = win2["window_id"].as_u64().expect("window_id");
+
+        // Split the second window (a sibling pane).
+        let _ = post(
+            format!("{base}/window/{window2_id}/split"),
+            serde_json::json!({ "dir": "row" }),
+        );
+
+        // List: one session, two windows, three panes total.
+        let list = get(format!("{base}/session/list"));
+        let sessions = list.as_array().expect("array");
+        assert_eq!(sessions.len(), 1, "exactly one session");
+        let windows = sessions[0]["windows"].as_array().expect("windows");
+        assert_eq!(windows.len(), 2, "two windows");
+        let total_panes: usize = windows
+            .iter()
+            .map(|w| w["panes"].as_array().map(|p| p.len()).unwrap_or(0))
+            .sum();
+        assert_eq!(total_panes, 3, "three panes (1 + 1 + split)");
+
+        // Health reflects the live panes.
+        let health = get(format!("{base}/health"));
+        assert_eq!(health["panes"].as_u64(), Some(3));
+        assert_eq!(health["sessions"].as_u64(), Some(1));
+
+        // Kill the session: all three panes reaped.
+        let _ = rt.block_on(async {
+            client.post(format!("{base}/session/{session_id}/kill"))
+                .send().await.expect("kill").error_for_status().expect("kill status")
+        });
+        let health = get(format!("{base}/health"));
+        assert_eq!(health["panes"].as_u64(), Some(0), "all panes reaped on kill");
+        assert_eq!(health["sessions"].as_u64(), Some(0), "session gone");
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
