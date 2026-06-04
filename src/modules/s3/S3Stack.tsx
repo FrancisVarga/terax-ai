@@ -14,6 +14,10 @@ export type S3Tab = { id: number; kind: "s3"; title: string };
 type Props = {
   tabs: Tab[];
   activeId: number;
+  /** This window's project root — the data root for the per-project local S3
+   * server. Passed through to the browser so its mutations target the right
+   * server. `null` when no project is open. */
+  projectDir: string | null;
 };
 
 /**
@@ -28,7 +32,7 @@ type Props = {
  * and map the survivors to `S3Tab`, which compiles now and keeps working once
  * `"s3"` lands in the union.
  */
-export function S3Stack({ tabs, activeId }: Props) {
+export function S3Stack({ tabs, activeId, projectDir }: Props) {
   const s3 = tabs.filter(
     (t) => (t as { kind: string }).kind === "s3",
   ) as unknown as S3Tab[];
@@ -46,7 +50,7 @@ export function S3Stack({ tabs, activeId }: Props) {
             )}
             aria-hidden={!visible}
           >
-            <S3Browser visible={visible} />
+            <S3Browser visible={visible} projectDir={projectDir} />
           </div>
         );
       })}

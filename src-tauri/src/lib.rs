@@ -624,15 +624,12 @@ pub fn run() {
             kv::lifecycle::init_from_pref(app.handle(), &kv_state);
             kv::lifecycle::start_watchdog(app.handle().clone());
 
-            // Start the local-only S3 server (a smaller RustFS). In a packaged
-            // build this spawns the `localfs` sidecar against
-            // `<launch-cwd>/.t-camelot/s3-local/`; in dev (no sidecar staged) it
-            // runs the identical server in-process. Non-fatal — failures install
-            // `Backend::Off` and surface via `s3local_status`. The browser
-            // connection is seeded lazily by the frontend calling
-            // `s3local_seed_connection` once the endpoint is up.
-            let s3local_state = app.state::<s3local::S3LocalState>();
-            s3local::start(app.handle(), &s3local_state);
+            // The local-only S3 server (a smaller RustFS) is NOT started here:
+            // it is per-project, spawned lazily when a window's S3 tab calls
+            // `s3local_ensure`/`s3local_seed_connection` with its project root,
+            // so each project gets its own `<project>/.t-camelot/s3-local` store.
+            // The managed `S3LocalState` (a root->server map) is registered above
+            // via `.manage`; its `shutdown` reaps every spawned server on exit.
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -788,8 +785,7 @@ pub fn run() {
             kv::data::kv_data_dbsize,
             kv::data::kv_data_publish,
             kv::data::kv_data_subscribe,
-            s3local::s3local_status,
-            s3local::s3local_endpoint,
+            s3local::s3local_ensure,
             s3local::s3local_seed_connection,
             s3local::s3local_create_bucket,
             s3local::s3local_delete_bucket,

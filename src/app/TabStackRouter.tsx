@@ -88,6 +88,10 @@ export type TabStackRouterProps = {
   gitDiffTabs: ComponentProps<typeof GitDiffStack>["gitDiffs"];
   gitHistoryTabs: ComponentProps<typeof GitHistoryStack>["gitHistories"];
   dockerDetailTabs: ComponentProps<typeof DockerDetailStack>["dockerDetails"];
+  /** This window's project root — the data root for its per-project local S3
+   * server (`<projectDir>/.t-camelot/s3-local`). Threaded to the S3 tab so its
+   * bucket/object mutations target the right server. */
+  projectDir: string | null;
   /** SSH alias for a remote Docker daemon; `null` lists the local daemon. */
   dockerHost: string | null;
   /** Open a container's deep-detail tab from the Docker list tab. */
@@ -139,6 +143,7 @@ export function TabStackRouter({
   gitDiffTabs,
   gitHistoryTabs,
   dockerDetailTabs,
+  projectDir,
   dockerHost,
   onOpenContainer,
   onConnectSsh,
@@ -206,7 +211,7 @@ export function TabStackRouter({
         <DataStack data={dataTabs} activeId={activeId} />
       </TabLayer>
       <TabLayer visible={activeKind === "s3"} padded>
-        <S3Stack tabs={tabs} activeId={activeId} />
+        <S3Stack tabs={tabs} activeId={activeId} projectDir={projectDir} />
       </TabLayer>
       <TabLayer visible={activeKind === "docker"} padded={false}>
         <DockerStack

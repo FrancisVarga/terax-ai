@@ -343,15 +343,6 @@ pub(crate) async fn upsert_connection(
     write_meta(app, &snapshot)
 }
 
-/// Whether a connection id is configured (used by `s3local` to seed only once).
-pub(crate) fn connection_exists(
-    app: &AppHandle,
-    state: &tauri::State<'_, S3State>,
-    id: &str,
-) -> bool {
-    with_conns(app, state, |list| list.iter().any(|c| c.id == id)).unwrap_or(false)
-}
-
 /// Delete a connection and its stored credentials.
 #[tauri::command]
 pub async fn s3_delete_connection(

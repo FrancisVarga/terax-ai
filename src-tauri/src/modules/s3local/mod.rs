@@ -31,6 +31,7 @@
 //! External clients (aws-cli, scripts) read the same persisted key so they keep
 //! working across app restarts.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -42,7 +43,6 @@ use tauri::{AppHandle, Manager, State};
 use tokio::sync::oneshot;
 
 use crate::modules::sync::MutexExt;
-use crate::modules::workspace;
 
 /// Tauri externalBin base name (no triple, no extension) — must match the entry
 /// in `tauri.conf.json` `bundle.externalBin`.
@@ -52,10 +52,9 @@ const SIDECAR_BASE: &str = "localfs";
 /// by the user; sits alongside other `.t-camelot/` project state.
 const DATA_SUBDIR: &str = ".t-camelot/s3-local";
 
-/// How the server is running. Resolved once in `init`.
-enum Backend {
-    /// Out-of-process `localfs` sidecar. `child` is held so `kill` reaps it on
-    /// shutdown.
+/// One running localfs server for a single project root.
+enum Server {
+    /// Out-of-process `localfs` sidecar. `child` is held so `kill` reaps it.
     Sidecar {
         child: Arc<shared_child::SharedChild>,
         port: u16,
@@ -65,25 +64,40 @@ enum Backend {
         port: u16,
         stop: Mutex<Option<oneshot::Sender<()>>>,
     },
-    /// Server failed to start; endpoint unavailable. Carries the reason for
-    /// `s3local_status`.
-    Off { reason: String },
 }
 
-impl Backend {
-    fn port(&self) -> Option<u16> {
+impl Server {
+    fn port(&self) -> u16 {
         match self {
-            Backend::Sidecar { port, .. } | Backend::InProcess { port, .. } => Some(*port),
-            Backend::Off { .. } => None,
+            Server::Sidecar { port, .. } | Server::InProcess { port, .. } => *port,
+        }
+    }
+    fn stop(&self) {
+        match self {
+            Server::Sidecar { child, .. } => {
+                let _ = child.kill();
+            }
+            Server::InProcess { stop, .. } => {
+                if let Some(tx) = stop.lock_safe().take() {
+                    let _ = tx.send(());
+                }
+            }
         }
     }
 }
 
-/// Managed Tauri state: the resolved backend + the resolved data root + creds.
+/// Managed Tauri state: one localfs server PER project root.
+///
+/// Terax is multi-window/multi-project; each window's S3 tab calls
+/// [`s3local_ensure`] with its own project dir, which lazily spawns (or reuses)
+/// a server rooted at `<project>/.t-camelot/s3-local`. Keying by the canonical
+/// data root gives true per-project isolation — opening two project windows
+/// yields two independent object stores. The one shared bit is the loopback
+/// credential (a per-install key; the trust boundary is loopback, not the key).
 #[derive(Default)]
 pub struct S3LocalState {
-    backend: Mutex<Option<Backend>>,
-    root: Mutex<Option<PathBuf>>,
+    /// canonical data root -> running server.
+    servers: Mutex<HashMap<PathBuf, Server>>,
     creds: Mutex<Option<Credentials>>,
 }
 
@@ -93,128 +107,141 @@ struct Credentials {
     secret_access_key: String,
 }
 
+/// Result of [`s3local_ensure`]: the running endpoint for a project's S3 server.
+#[derive(Serialize)]
+pub struct ServerInfo {
+    /// `http://127.0.0.1:<port>` for this project's server.
+    endpoint: String,
+    /// Absolute on-disk data root (`<project>/.t-camelot/s3-local`).
+    root: String,
+    /// The local access key id (the secret never crosses IPC).
+    access_key_id: String,
+}
+
 impl S3LocalState {
-    /// Resolve the data root + credentials, then start the server (sidecar if
-    /// staged, else in-process). Non-fatal: any failure installs `Backend::Off`
-    /// with a reason so `s3local_status` can report it.
-    fn init(&self, app: &AppHandle) {
-        let root = match resolve_root() {
-            Ok(r) => r,
-            Err(e) => {
-                *self.backend.lock_safe() = Some(Backend::Off {
-                    reason: format!("resolve data root: {e}"),
-                });
-                return;
-            }
-        };
-        let creds = load_or_create_credentials(app).unwrap_or_else(|_| Credentials {
-            // A failure to persist still yields a usable in-memory key for this
-            // session; external clients just won't find it on disk.
-            access_key_id: "localfs".into(),
-            secret_access_key: random_secret(),
-        });
+    /// Lazily ensure a server is running for `project_dir`'s data root, returning
+    /// its endpoint. Reuses an existing server for the same root (idempotent), so
+    /// repeated calls from the same window are cheap. Spawns the sidecar if staged,
+    /// else runs in-process (dev).
+    fn ensure(&self, app: &AppHandle, project_dir: &std::path::Path) -> Result<ServerInfo, String> {
+        let root = resolve_root(project_dir)?;
+        let creds = self.creds(app);
 
-        *self.root.lock_safe() = Some(root.clone());
-        *self.creds.lock_safe() = Some(creds.clone());
+        // Fast path: already running for this root.
+        if let Some(srv) = self.servers.lock_safe().get(&root) {
+            return Ok(ServerInfo {
+                endpoint: format!("http://127.0.0.1:{}", srv.port()),
+                root: root.display().to_string(),
+                access_key_id: creds.access_key_id.clone(),
+            });
+        }
 
-        let backend = match find_sidecar(SIDECAR_BASE) {
-            Some(exe) => match spawn_sidecar(&exe, &root, &creds) {
-                Ok(b) => b,
-                Err(e) => {
-                    log::warn!(target: "s3local", "sidecar spawn failed ({e}); using in-process server");
-                    self.start_in_process(&root, &creds)
-                }
-            },
+        let server = match find_sidecar(SIDECAR_BASE) {
+            Some(exe) => spawn_sidecar(&exe, &root, &creds).or_else(|e| {
+                log::warn!(target: "s3local", "sidecar spawn failed ({e}); using in-process server");
+                start_in_process(&root, &creds)
+            })?,
             None => {
                 log::info!(target: "s3local", "no localfs sidecar staged; using in-process server (dev)");
-                self.start_in_process(&root, &creds)
+                start_in_process(&root, &creds)?
             }
         };
-        if let Some(p) = backend.port() {
-            log::info!(target: "s3local", "localfs S3 server listening on http://127.0.0.1:{p} (root: {})", root.display());
+        let port = server.port();
+        log::info!(target: "s3local", "localfs S3 server listening on http://127.0.0.1:{port} (root: {})", root.display());
+
+        // Insert; if another caller raced us to the same root, keep the first and
+        // stop ours (avoids two servers on the same dir).
+        let mut guard = self.servers.lock_safe();
+        if let Some(existing) = guard.get(&root) {
+            let info = ServerInfo {
+                endpoint: format!("http://127.0.0.1:{}", existing.port()),
+                root: root.display().to_string(),
+                access_key_id: creds.access_key_id.clone(),
+            };
+            drop(guard);
+            server.stop();
+            return Ok(info);
         }
-        *self.backend.lock_safe() = Some(backend);
+        guard.insert(root.clone(), server);
+        Ok(ServerInfo {
+            endpoint: format!("http://127.0.0.1:{port}"),
+            root: root.display().to_string(),
+            access_key_id: creds.access_key_id,
+        })
     }
 
-    /// Run the server in-process on the Tauri runtime. Binds port 0 (ephemeral),
-    /// resolves the port synchronously via `block_on`, then spawns the accept
-    /// loop. Returns `Backend::Off` if the bind fails.
-    fn start_in_process(&self, root: &std::path::Path, creds: &Credentials) -> Backend {
-        let addr = SocketAddr::from(([127, 0, 0, 1], 0));
-        let root = root.to_path_buf();
-        let ak = creds.access_key_id.clone();
-        let sk = creds.secret_access_key.clone();
-
-        let bound = tauri::async_runtime::block_on(async move {
-            localfs::bind(&root, addr, ak, sk).await
-        });
-
-        match bound {
-            Ok((listener, service)) => {
-                let port = match listener.local_addr() {
-                    Ok(a) => a.port(),
-                    Err(e) => return Backend::Off { reason: e.to_string() },
-                };
-                let (tx, rx) = oneshot::channel::<()>();
-                tauri::async_runtime::spawn(async move {
-                    localfs::serve(listener, service, async {
-                        let _ = rx.await;
-                    })
-                    .await;
-                });
-                Backend::InProcess {
-                    port,
-                    stop: Mutex::new(Some(tx)),
-                }
-            }
-            Err(reason) => Backend::Off { reason },
-        }
+    /// The shared per-install loopback credential, loaded+persisted on first use.
+    fn creds(&self, app: &AppHandle) -> Credentials {
+        let mut guard = self.creds.lock_safe();
+        guard
+            .get_or_insert_with(|| {
+                load_or_create_credentials(app).unwrap_or_else(|_| Credentials {
+                    access_key_id: "localfs".into(),
+                    secret_access_key: random_secret(),
+                })
+            })
+            .clone()
     }
 
-    /// Stop the server on app shutdown. Kills the sidecar child or signals the
-    /// in-process serve loop to drain.
+    /// Stop every running server on app shutdown.
     pub fn shutdown(&self) {
-        match self.backend.lock_safe().as_ref() {
-            Some(Backend::Sidecar { child, .. }) => {
-                let _ = child.kill();
-            }
-            Some(Backend::InProcess { stop, .. }) => {
-                if let Some(tx) = stop.lock_safe().take() {
-                    let _ = tx.send(());
-                }
-            }
-            _ => {}
+        for (_, srv) in self.servers.lock_safe().drain() {
+            srv.stop();
         }
     }
 
-    fn status(&self) -> S3LocalStatus {
-        let guard = self.backend.lock_safe();
-        let (running, port, reason) = match guard.as_ref() {
-            Some(Backend::Sidecar { port, .. }) => (true, Some(*port), None),
-            Some(Backend::InProcess { port, .. }) => (true, Some(*port), None),
-            Some(Backend::Off { reason }) => (false, None, Some(reason.clone())),
-            None => (false, None, Some("not initialized".into())),
-        };
-        S3LocalStatus {
-            running,
-            endpoint: port.map(|p| format!("http://127.0.0.1:{p}")),
-            root: self.root.lock_safe().as_ref().map(|p| p.display().to_string()),
-            access_key_id: self.creds.lock_safe().as_ref().map(|c| c.access_key_id.clone()),
-            reason,
-        }
+    /// Endpoint + creds for an already-running server at `project_dir`'s root, or
+    /// an error if none is running yet (the frontend must call `ensure` first).
+    fn lookup(&self, project_dir: &std::path::Path) -> Result<(String, Credentials), String> {
+        let root = resolve_root(project_dir)?;
+        let guard = self.servers.lock_safe();
+        let srv = guard
+            .get(&root)
+            .ok_or_else(|| format!("no local S3 server running for {}", root.display()))?;
+        let endpoint = format!("http://127.0.0.1:{}", srv.port());
+        drop(guard);
+        let creds = self
+            .creds
+            .lock_safe()
+            .clone()
+            .ok_or("local S3 credentials unavailable")?;
+        Ok((endpoint, creds))
     }
 }
 
-/// Resolve `<launch-cwd>/.t-camelot/s3-local/`, creating it. Falls back to the
-/// process cwd if the launch-cwd snapshot is unavailable.
-fn resolve_root() -> Result<PathBuf, String> {
-    let base = workspace::launch_cwd_snapshot()
-        .or_else(|| std::env::current_dir().ok())
-        .ok_or("no launch cwd available")?;
-    let root = base.join(DATA_SUBDIR);
+/// Run a server in-process on the Tauri runtime (dev fallback). Binds port 0,
+/// resolves the port via `block_on`, spawns the accept loop.
+fn start_in_process(root: &std::path::Path, creds: &Credentials) -> Result<Server, String> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+    let root = root.to_path_buf();
+    let ak = creds.access_key_id.clone();
+    let sk = creds.secret_access_key.clone();
+
+    let (listener, service) =
+        tauri::async_runtime::block_on(async move { localfs::bind(&root, addr, ak, sk).await })?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let (tx, rx) = oneshot::channel::<()>();
+    tauri::async_runtime::spawn(async move {
+        localfs::serve(listener, service, async {
+            let _ = rx.await;
+        })
+        .await;
+    });
+    Ok(Server::InProcess {
+        port,
+        stop: Mutex::new(Some(tx)),
+    })
+}
+
+/// Resolve `<project_dir>/.t-camelot/s3-local/`, creating it. `project_dir` is
+/// the window's project root (the dir the file explorer shows). Canonicalized so
+/// the path handed to the sidecar — and used as the server-map key — is stable.
+fn resolve_root(project_dir: &std::path::Path) -> Result<PathBuf, String> {
+    if !project_dir.is_dir() {
+        return Err(format!("project dir not found: {}", project_dir.display()));
+    }
+    let root = project_dir.join(DATA_SUBDIR);
     std::fs::create_dir_all(&root).map_err(|e| format!("create {}: {e}", root.display()))?;
-    // Canonicalize so the absolute path we hand the sidecar is stable regardless
-    // of its own working directory.
     std::fs::canonicalize(&root).map_err(|e| format!("canonicalize {}: {e}", root.display()))
 }
 
@@ -273,7 +300,7 @@ fn spawn_sidecar(
     exe: &std::path::Path,
     root: &std::path::Path,
     creds: &Credentials,
-) -> Result<Backend, String> {
+) -> Result<Server, String> {
     let mut cmd = Command::new(exe);
     cmd.arg("--root")
         .arg(root)
@@ -313,7 +340,7 @@ fn spawn_sidecar(
         }
     });
 
-    Ok(Backend::Sidecar { child, port })
+    Ok(Server::Sidecar { child, port })
 }
 
 /// Parse `LOCALFS_PORT=<n>` from a stdout line.
@@ -321,73 +348,69 @@ fn parse_port_line(line: &str) -> Option<u16> {
     line.trim().strip_prefix("LOCALFS_PORT=")?.parse().ok()
 }
 
-/// Resolve + start the server. Called once from `setup()`.
-pub fn start(app: &AppHandle, state: &S3LocalState) {
-    state.init(app);
-}
-
 // ---------------------------------------------------------------------------
 // Command surface
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize)]
-pub struct S3LocalStatus {
-    /// Whether the S3 endpoint is currently serving.
-    running: bool,
-    /// `http://127.0.0.1:<port>` when running.
-    endpoint: Option<String>,
-    /// Absolute path of the data root on disk.
-    root: Option<String>,
-    /// The local access key id (the secret is never returned over IPC).
-    access_key_id: Option<String>,
-    /// Why the server is not running, when `running` is false.
-    reason: Option<String>,
-}
-
-/// Status of the local S3 server (for the S3 tab header / settings).
+/// Ensure a localfs server is running for `projectDir`'s `.t-camelot/s3-local`
+/// data root and return its endpoint. The frontend calls this with its window's
+/// project root (the file-explorer root) so each project gets its own server +
+/// store. Idempotent per root.
 #[tauri::command]
-pub fn s3local_status(state: State<'_, S3LocalState>) -> S3LocalStatus {
-    state.status()
+pub fn s3local_ensure(
+    app: AppHandle,
+    state: State<'_, S3LocalState>,
+    project_dir: String,
+) -> Result<ServerInfo, String> {
+    state.ensure(&app, std::path::Path::new(&project_dir))
 }
 
-/// The endpoint URL, or `None` when not running.
-#[tauri::command]
-pub fn s3local_endpoint(state: State<'_, S3LocalState>) -> Option<String> {
-    state.status().endpoint
+/// Stable-per-root connection id for the seeded local S3 browser connection. The
+/// canonical data root is hashed into the id so each project gets its own
+/// connection entry (re-seeding the same project updates in place).
+fn local_conn_id(root: &str) -> String {
+    // Cheap stable hash of the root path (FNV-1a) -> hex; avoids a hashing dep.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in root.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("localfs-{h:016x}")
 }
 
-/// Stable connection id for the seeded local S3 browser connection. Fixed so
-/// re-seeding updates the same entry (e.g. when the ephemeral port changes
-/// across restarts) instead of piling up duplicates.
-const LOCAL_CONN_ID: &str = "localfs-builtin";
+/// A short display label for the project a local store belongs to — the project
+/// dir's last path segment (e.g. "w88_data"), so multiple local connections are
+/// distinguishable in the browser.
+fn project_label(root: &str) -> String {
+    // root is `<project>/.t-camelot/s3-local` (canonical). Walk up two segments.
+    let p = std::path::Path::new(root);
+    let project = p.parent().and_then(|p| p.parent());
+    project
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .map(|s| format!("Local · {s}"))
+        .unwrap_or_else(|| "Local (.t-camelot)".to_string())
+}
 
-/// Seed (or refresh) the local S3 server as a connection in the existing S3
-/// browser, so the S3 tab doubles as the file viewer. Path-style, `is_local`,
-/// pointing at the current loopback endpoint with the app-managed key. Idempotent
-/// by `LOCAL_CONN_ID`. Safe to call every boot — the port may change, so we
-/// always re-write the endpoint.
+/// Ensure the server for `projectDir` is up, then seed (or refresh) a browser
+/// connection pointing at it. Each project root gets its own `is_local`
+/// connection so the S3 tab shows the store for the active project.
 #[tauri::command]
 pub async fn s3local_seed_connection(
     app: AppHandle,
     state: State<'_, S3LocalState>,
     s3_state: State<'_, crate::modules::s3::S3State>,
     secrets: State<'_, crate::modules::secrets::SecretsState>,
+    project_dir: String,
 ) -> Result<(), String> {
-    let status = state.status();
-    let Some(endpoint) = status.endpoint else {
-        return Err(status.reason.unwrap_or_else(|| "local S3 server not running".into()));
-    };
-    let creds = state
-        .creds
-        .lock_safe()
-        .clone()
-        .ok_or("local S3 credentials unavailable")?;
+    let info = state.ensure(&app, std::path::Path::new(&project_dir))?;
+    let creds = state.creds(&app);
 
     let conn = crate::modules::s3::S3Connection {
-        id: LOCAL_CONN_ID.to_string(),
-        name: "Local (.t-camelot)".to_string(),
+        id: local_conn_id(&info.root),
+        name: project_label(&info.root),
         region: "us-east-1".to_string(),
-        endpoint: Some(endpoint),
+        endpoint: Some(info.endpoint),
         force_path_style: true,
         bucket: None,
         is_local: true,
@@ -414,20 +437,16 @@ pub async fn s3local_seed_connection(
 // connection, but they additionally only ever talk to the local endpoint.
 // ---------------------------------------------------------------------------
 
-/// Build an `aws-sdk-s3` client pointed at the running local endpoint, path-style,
-/// with the app-managed key. Errors if the server is not running.
-async fn local_client(state: &S3LocalState) -> Result<aws_sdk_s3::Client, String> {
+/// Build an `aws-sdk-s3` client pointed at `project_dir`'s running local server,
+/// path-style, with the app-managed key. Errors if no server is running for that
+/// project (the frontend must `s3local_ensure`/`s3local_seed_connection` first).
+fn local_client(
+    state: &S3LocalState,
+    project_dir: &str,
+) -> Result<aws_sdk_s3::Client, String> {
     use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
 
-    let status = state.status();
-    let endpoint = status
-        .endpoint
-        .ok_or_else(|| status.reason.unwrap_or_else(|| "local S3 server not running".into()))?;
-    let creds = state
-        .creds
-        .lock_safe()
-        .clone()
-        .ok_or("local S3 credentials unavailable")?;
+    let (endpoint, creds) = state.lookup(std::path::Path::new(project_dir))?;
 
     let provider = Credentials::new(
         creds.access_key_id,
@@ -451,13 +470,14 @@ fn aws_err<E: std::error::Error>(ctx: &str, e: E) -> String {
     format!("{ctx}: {}", DisplayErrorContext(&e))
 }
 
-/// Create a bucket on the local server.
+/// Create a bucket on `projectDir`'s local server.
 #[tauri::command]
 pub async fn s3local_create_bucket(
     state: State<'_, S3LocalState>,
+    project_dir: String,
     bucket: String,
 ) -> Result<(), String> {
-    let client = local_client(&state).await?;
+    let client = local_client(&state, &project_dir)?;
     client
         .create_bucket()
         .bucket(&bucket)
@@ -467,14 +487,15 @@ pub async fn s3local_create_bucket(
     Ok(())
 }
 
-/// Delete a bucket on the local server. S3 semantics: the bucket must be empty
-/// (a non-empty bucket yields `BucketNotEmpty` / 409, surfaced verbatim).
+/// Delete a bucket on `projectDir`'s local server. S3 semantics: the bucket must
+/// be empty (a non-empty bucket yields `BucketNotEmpty` / 409, surfaced verbatim).
 #[tauri::command]
 pub async fn s3local_delete_bucket(
     state: State<'_, S3LocalState>,
+    project_dir: String,
     bucket: String,
 ) -> Result<(), String> {
-    let client = local_client(&state).await?;
+    let client = local_client(&state, &project_dir)?;
     client
         .delete_bucket()
         .bucket(&bucket)
@@ -484,17 +505,16 @@ pub async fn s3local_delete_bucket(
     Ok(())
 }
 
-/// Stream a local file into an object on the local server. Reads `src_path` off
-/// disk and PUTs it; large files still go through a single PUT here (the s3s_fs
-/// server handles arbitrary sizes), which is fine for a loopback transfer.
+/// Stream a local file into an object on `projectDir`'s local server.
 #[tauri::command]
 pub async fn s3local_upload(
     state: State<'_, S3LocalState>,
+    project_dir: String,
     bucket: String,
     key: String,
     src_path: String,
 ) -> Result<(), String> {
-    let client = local_client(&state).await?;
+    let client = local_client(&state, &project_dir)?;
     let body = aws_sdk_s3::primitives::ByteStream::from_path(std::path::Path::new(&src_path))
         .await
         .map_err(|e| format!("reading {src_path}: {e}"))?;
@@ -509,14 +529,15 @@ pub async fn s3local_upload(
     Ok(())
 }
 
-/// Delete an object on the local server.
+/// Delete an object on `projectDir`'s local server.
 #[tauri::command]
 pub async fn s3local_delete_object(
     state: State<'_, S3LocalState>,
+    project_dir: String,
     bucket: String,
     key: String,
 ) -> Result<(), String> {
-    let client = local_client(&state).await?;
+    let client = local_client(&state, &project_dir)?;
     client
         .delete_object()
         .bucket(&bucket)

@@ -2,6 +2,13 @@ import { useEffect, useState } from "react";
 import { CloudServerIcon, Settings02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { S3ConnectionsDialog } from "./S3ConnectionsDialog";
 import { S3ObjectPreview } from "./S3ObjectPreview";
@@ -10,6 +17,9 @@ import { useS3Connections } from "./lib/useS3Connections";
 
 type Props = {
   visible: boolean;
+  /** This window's project root — threaded to the tree so its (local-only)
+   * mutations target this project's localfs server. `null` when no project. */
+  projectDir: string | null;
 };
 
 /** The object the user has selected in the tree, with the connection context
@@ -27,7 +37,7 @@ type Selection = {
  * `S3ConnectionsDialog`. When several connections exist, the first is the
  * default active one; a small picker lets the user switch.
  */
-export function S3Browser({ visible }: Props) {
+export function S3Browser({ visible, projectDir }: Props) {
   const { connections, loading, error } = useS3Connections();
   const [activeId, setActiveId] = useState<string | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null);
@@ -67,17 +77,21 @@ export function S3Browser({ visible }: Props) {
           className="shrink-0 text-muted-foreground"
         />
         {connections.length > 1 ? (
-          <select
-            value={activeId ?? ""}
-            onChange={(e) => setActiveId(e.target.value)}
-            className="h-6 rounded-sm border border-border/60 bg-card px-1.5 text-[12px] outline-none focus:border-ring"
-          >
-            {connections.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
+          <Select value={activeId ?? ""} onValueChange={setActiveId}>
+            <SelectTrigger
+              size="sm"
+              className="h-6 w-auto gap-1.5 px-1.5 text-[12px] font-medium text-foreground"
+            >
+              <SelectValue placeholder="Select connection" />
+            </SelectTrigger>
+            <SelectContent>
+              {connections.map((c) => (
+                <SelectItem key={c.id} value={c.id} className="text-[12px]">
+                  {c.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         ) : (
           <span className="truncate font-medium text-foreground/80">
             {active ? active.name : "S3"}
@@ -124,6 +138,7 @@ export function S3Browser({ visible }: Props) {
             <div className="w-[260px] shrink-0 border-r border-border/60">
               <S3Tree
                 connection={active}
+                projectDir={projectDir}
                 selectedKey={selection?.key ?? null}
                 onOpenObject={(connId, bucket, key) =>
                   setSelection({ connId, bucket, key })

@@ -50,13 +50,17 @@ type NodeState =
 type Props = {
   /** The active connection the tree browses. */
   connection: S3Connection;
+  /** This window's project root — passed to the `s3local_*` mutation commands so
+   * they target this project's per-project localfs server. Only used for the
+   * `is_local` connection. `null` when no project is open. */
+  projectDir: string | null;
   /** Called when an object (leaf) row is clicked. */
   onOpenObject: (connId: string, bucket: string, key: string) => void;
   /** The currently selected object key, for highlight. */
   selectedKey: string | null;
 };
 
-export function S3Tree({ connection, onOpenObject, selectedKey }: Props) {
+export function S3Tree({ connection, projectDir, onOpenObject, selectedKey }: Props) {
   // Per-node child cache keyed by a stable node id (see nodeId below). Reset
   // whenever the connection changes so stale buckets never bleed across.
   const [nodes, setNodes] = useState<Record<string, NodeState>>({});
@@ -101,39 +105,46 @@ export function S3Tree({ connection, onOpenObject, selectedKey }: Props) {
     [expanded, load],
   );
 
-  // Mutation actions, only built for the local server connection. `null` for
-  // remote connections → the read-only browser is unchanged for them.
-  const mutations: Mutations | null = connection.is_local
-    ? {
-        createBucket: async (name) => {
-          await invoke("s3local_create_bucket", { bucket: name });
-          reload("buckets", "", "");
-        },
-        deleteBucket: async (bucket) => {
-          await invoke("s3local_delete_bucket", { bucket });
-          reload("buckets", "", "");
-        },
-        upload: async (bucket, prefix) => {
-          const picked = await openFileDialog({ multiple: false });
-          if (!picked || Array.isArray(picked)) return;
-          // Object key = current prefix + the picked file's base name.
-          const base = picked.split(/[\\/]/).pop() ?? "file";
-          await invoke("s3local_upload", {
-            bucket,
-            key: `${prefix}${base}`,
-            srcPath: picked,
-          });
-          reload(`${bucket}::${prefix}`, bucket, prefix);
-        },
-        deleteObject: async (bucket, key) => {
-          await invoke("s3local_delete_object", { bucket, key });
-          // Reload the object's parent prefix (everything up to the last "/").
-          const slash = key.lastIndexOf("/");
-          const prefix = slash >= 0 ? key.slice(0, slash + 1) : "";
-          reload(`${bucket}::${prefix}`, bucket, prefix);
-        },
-      }
-    : null;
+  // Mutation actions, only built for the local server connection AND when a
+  // project is open (the mutations target this project's per-project localfs
+  // server via `projectDir`). `null` for remote connections → the read-only
+  // browser is unchanged for them.
+  const mutations: Mutations | null =
+    connection.is_local && projectDir
+      ? {
+          createBucket: async (name) => {
+            await invoke("s3local_create_bucket", {
+              projectDir,
+              bucket: name,
+            });
+            reload("buckets", "", "");
+          },
+          deleteBucket: async (bucket) => {
+            await invoke("s3local_delete_bucket", { projectDir, bucket });
+            reload("buckets", "", "");
+          },
+          upload: async (bucket, prefix) => {
+            const picked = await openFileDialog({ multiple: false });
+            if (!picked || Array.isArray(picked)) return;
+            // Object key = current prefix + the picked file's base name.
+            const base = picked.split(/[\\/]/).pop() ?? "file";
+            await invoke("s3local_upload", {
+              projectDir,
+              bucket,
+              key: `${prefix}${base}`,
+              srcPath: picked,
+            });
+            reload(`${bucket}::${prefix}`, bucket, prefix);
+          },
+          deleteObject: async (bucket, key) => {
+            await invoke("s3local_delete_object", { projectDir, bucket, key });
+            // Reload the object's parent prefix (everything up to the last "/").
+            const slash = key.lastIndexOf("/");
+            const prefix = slash >= 0 ? key.slice(0, slash + 1) : "";
+            reload(`${bucket}::${prefix}`, bucket, prefix);
+          },
+        }
+      : null;
 
   const toggle = useCallback(
     (id: string, bucket: string, prefix: string) => {
