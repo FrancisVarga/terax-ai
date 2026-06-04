@@ -4,17 +4,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, ChildKiller, MasterPty, PtySize};
-use tauri::ipc::{Channel, Response};
-use tauri::{AppHandle, Emitter};
 
 use super::agent_detect::AgentDetector;
 use super::da_filter::DaFilter;
 use super::shell_init;
+use super::sink::PtyOutputSink;
 #[cfg(windows)]
 use crate::modules::sync::MutexExt;
 use crate::modules::workspace::WorkspaceEnv;
 
-const AGENT_EVENT: &str = "terax:agent-signal";
+pub(super) const AGENT_EVENT: &str = "terax:agent-signal";
 
 // ESC (0x1b) introduces every escape/CSI/OSC sequence. The reader scans each
 // read for it once and hands the result to both filters (see the read loop).
@@ -106,13 +105,11 @@ impl Drop for ChildKillGuard {
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
     id: u32,
-    app: AppHandle,
     cols: u16,
     rows: u16,
     cwd: Option<String>,
     workspace: WorkspaceEnv,
-    on_data: Channel<Response>,
-    on_exit: Channel<i32>,
+    sink: Arc<dyn PtyOutputSink>,
 ) -> Result<(Arc<Session>, PtySize), String> {
     #[cfg(windows)]
     let _spawn_guard = CONPTY_LIFECYCLE_LOCK.lock_safe();
@@ -167,9 +164,8 @@ pub fn spawn(
     // no separate flusher thread (was 3 threads/shell, now 2). Removing the
     // cross-thread handoff also removes the head-of-line blocking that capped
     // throughput when many shells contended on the OS scheduler.
-    let on_data_reader = on_data.clone();
+    let sink_reader = sink.clone();
     let writer_for_da = writer.clone();
-    let app_reader = app.clone();
     let reader_thread = thread::Builder::new()
         .name("terax-pty-reader".into())
         .spawn(move || {
@@ -194,21 +190,15 @@ pub fn spawn(
             //     the next `reader.read()`, capping per-shell throughput at
             //     READ_BUF/FLUSH_COALESCE. Send immediately and let the pipe,
             //     not the timer, set the rate.
-            let flush = |pending: &mut Vec<u8>| -> bool {
+            let flush = |pending: &mut Vec<u8>| {
                 if pending.is_empty() {
-                    return true;
+                    return;
                 }
                 if pending.len() > FLUSH_ECHO_THRESHOLD && pending.len() < READ_BUF {
                     thread::sleep(FLUSH_COALESCE);
                 }
                 let chunk = std::mem::take(pending);
-                match on_data_reader.send(Response::new(chunk)) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        log::debug!("pty reader exiting, channel closed: {e}");
-                        false
-                    }
-                }
+                sink_reader.data(chunk);
             };
 
             // Append `bytes` to `pending`, enforcing the backpressure cap. On
@@ -242,7 +232,7 @@ pub fn spawn(
                         let chunk = &buf[..n];
                         let has_esc = chunk.contains(&ESC);
                         agent_detect.process(chunk, has_esc, |t| {
-                            let _ = app_reader.emit(AGENT_EVENT, t.into_signal(id));
+                            sink_reader.agent(t.into_signal(id));
                         });
                         // Fast path: no ESC and the DA filter holds no partial
                         // sequence, so there's nothing to parse or strip. Append
@@ -263,9 +253,7 @@ pub fn spawn(
                             }
                             push_pending(&mut pending, &filtered, &mut dropped_bytes);
                         }
-                        if !flush(&mut pending) {
-                            break;
-                        }
+                        flush(&mut pending);
                     }
                     Err(e) => {
                         log::debug!("pty reader ended: {e}");
@@ -274,7 +262,7 @@ pub fn spawn(
                 }
             }
             agent_detect.finish(|t| {
-                let _ = app_reader.emit(AGENT_EVENT, t.into_signal(id));
+                sink_reader.agent(t.into_signal(id));
             });
             // Final drain on EOF: the reader owns the buffer, so it sends the
             // tail itself. The waiter joins this thread before emitting the exit
@@ -315,9 +303,7 @@ pub fn spawn(
             if let Err(e) = reader_thread.join() {
                 log::error!("pty reader thread panicked: {e:?}");
             }
-            if let Err(e) = on_exit.send(code) {
-                log::debug!("pty exit send failed (channel closed): {e}");
-            }
+            sink.exit(code);
         })
         .map_err(|e| format!("spawn pty waiter thread: {e}"))?;
 

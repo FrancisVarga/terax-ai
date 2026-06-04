@@ -13,6 +13,7 @@ pub mod net;
 pub mod otel;
 pub mod proc;
 pub mod pty;
+pub mod rmux;
 pub mod s3;
 pub mod s3local;
 pub mod secrets;

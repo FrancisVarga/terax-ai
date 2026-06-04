@@ -1,0 +1,35 @@
+# Phase 0 spike (issue #109). Standalone crate, intentionally NOT a member of
+# the src-tauri workspace: a member would share the lockfile and trip the
+# build.rs externalBin assertion. Detached so the spike can never break `dev`.
+[package]
+name = "rmux-spike"
+version = "0.0.0"
+description = "Phase 0 survival + transport spike for terminal-rmux (#109)"
+edition = "2021"
+publish = false
+
+# Empty workspace table detaches this crate from src-tauri's workspace.
+[workspace]
+
+[[bin]]
+name = "rmux-spike-daemon"
+path = "src/daemon.rs"
+
+[[bin]]
+name = "rmux-spike-spawner"
+path = "src/spawner.rs"
+
+[[bin]]
+name = "rmux-spike-bench"
+path = "src/bench.rs"
+
+[dependencies]
+portable-pty = "0.9"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

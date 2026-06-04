@@ -1,0 +1,43 @@
+[package]
+name = "rmux-daemon"
+version = "0.29.0"
+description = "Out-of-process PTY daemon sidecar for Terax (terminal-rmux)"
+authors = ["crynta"]
+license = "Apache-2.0"
+edition = "2021"
+
+[[bin]]
+name = "rmux-daemon"
+path = "src/main.rs"
+
+# Empty table: detaches this crate from the parent `src-tauri` workspace so it is
+# not (yet) a member there. Phase 1 (#110) keeps the daemon standalone; wiring it
+# into the workspace + externalBin is #111.
+[workspace]
+
+[dependencies]
+# The shared PTY core lives in the `terax` package's library target, whose lib
+# name is `terax_lib`. `package = "terax"` points at the crate; code refers to it
+# by its lib name (`terax_lib::...`). The daemon reuses the exact shell-spawn +
+# reader code via this dep so the daemon and in-process paths can never diverge.
+terax_lib = { path = "..", package = "terax" }
+# `PtySize` for the resize verb. Same version as the parent crate so a single
+# `portable-pty` is shared across the daemon and `terax_lib`.
+portable-pty = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+futures-util = "0.3"
+# Shell output bytes are not UTF-8 safe; base64-encode them onto the SSE stream.
+# 0.22 is already resolved in the parent lock, so no new transitive crate.
+base64 = "0.22"
+tokio = { version = "1", default-features = false, features = [
+	"rt-multi-thread",
+	"net",
+	"macros",
+	# Broadcast channel fanning a pane's shell output to its `/events` subscribers.
+	"sync",
+] }
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
