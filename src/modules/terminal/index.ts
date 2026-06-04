@@ -7,6 +7,7 @@ export {
   injectCommand,
   leafIdForPty,
   markRmuxLeaf,
+  markRmuxReattach,
   reattachSession,
   respawnSession,
   unmarkRmuxLeaf,

@@ -82,6 +82,18 @@ export function unmarkRmuxLeaf(leafId: number): void {
   rmuxLeaves.delete(leafId);
 }
 
+// Leaves that must ATTACH to an existing daemon pane instead of spawning a fresh
+// shell. Registered (with the daemon pane id) BEFORE the leaf's session is
+// created, so `ensureSession` skips the eager open and reattaches instead. This
+// is what makes a session-switcher attach surface the live daemon pane rather
+// than a new local shell. The terminal-rmux module owns this map.
+const reattachLeaves = new Map<number, number>();
+
+export function markRmuxReattach(leafId: number, daemonPaneId: number): void {
+  rmuxLeaves.add(leafId);
+  reattachLeaves.set(leafId, daemonPaneId);
+}
+
 const readyLeaves = new Set<number>();
 const readyWaiters = new Map<
   number,
@@ -280,7 +292,21 @@ function ensureSession(leafId: number, initialCwd?: string): Session {
   // fonts, so gating it behind font loading just pads every new tab's boot by
   // the font-settle time. Early output before the slot binds lands in the
   // dormant ring (see deliverPtyBytes) and replays on bind, so nothing is lost.
-  openPtyEagerly(leafId, session);
+  //
+  // Exception: a leaf registered for reattach (a session-switcher attach to an
+  // EXISTING daemon pane) must NOT spawn a fresh shell — it attaches to the
+  // running pane, whose ring replays scrollback. Skip the eager open and
+  // reattach instead.
+  const reattachPaneId = reattachLeaves.get(leafId);
+  if (reattachPaneId !== undefined) {
+    reattachLeaves.delete(leafId);
+    // reattachSession looks the session up by leafId (already in `sessions`),
+    // wires the existing daemon pane, and replays its ring. Fire-and-forget,
+    // matching openPtyEagerly's non-blocking shape.
+    void reattachSession(leafId, reattachPaneId);
+  } else {
+    openPtyEagerly(leafId, session);
+  }
 
   // The slot bind is what actually needs fonts (correct cell metrics for fit),
   // so only the *visual* attach waits on them.

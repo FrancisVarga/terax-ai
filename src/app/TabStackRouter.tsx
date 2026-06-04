@@ -3,6 +3,7 @@ import { motion, useReducedMotion } from "motion/react";
 import { cn } from "@/lib/utils";
 import type { Tab } from "@/modules/tabs";
 import { TerminalStack, type TerminalPaneHandle } from "@/modules/terminal";
+import { RmuxTerminalStack } from "@/modules/terminal-rmux";
 import {
   AiDiffStack,
   EditorStack,
@@ -172,11 +173,31 @@ export function TabStackRouter({
   onOpenProjectDetail,
 }: TabStackRouterProps) {
   const isGitDiff = activeKind === "git-diff" || activeKind === "git-commit-file";
+  // Partition terminal tabs so each renders in exactly one stack. Plain terminal
+  // tabs spawn their own pty (in-process TerminalStack); rmux tabs (`t.rmux`
+  // set) defer their pty and reattach to a daemon pane (RmuxTerminalStack).
+  // Both mount inside the same terminal TabLayer so a window can hold both.
+  const plainTerminalTabs = tabs.filter(
+    (t) => t.kind === "terminal" && !t.rmux,
+  );
+  const rmuxTerminalTabs = tabs.filter(
+    (t) => t.kind === "terminal" && t.rmux,
+  );
   return (
     <div className="relative h-full min-h-0">
       <TabLayer visible={activeKind === "terminal"} padded>
         <TerminalStack
-          tabs={tabs}
+          tabs={plainTerminalTabs}
+          activeId={activeId}
+          registerHandle={registerTerminalHandle}
+          onSearchReady={onSearchReady}
+          onCwd={onTerminalCwd}
+          onExit={onLeafExit}
+          onFocusLeaf={onFocusLeaf}
+          onClosePane={onClosePane}
+        />
+        <RmuxTerminalStack
+          tabs={rmuxTerminalTabs}
           activeId={activeId}
           registerHandle={registerTerminalHandle}
           onSearchReady={onSearchReady}

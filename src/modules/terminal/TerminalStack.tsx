@@ -35,8 +35,16 @@ export function TerminalStack({
   onFocusLeaf,
   onClosePane,
 }: Props) {
+  // Exclude rmux (daemon-backed) terminal tabs: those render through
+  // RmuxTerminalStack so their leaves reattach to a daemon pane instead of
+  // spawning a local pty here. The router already pre-filters; this guard keeps
+  // the in-process stack correct even if an rmux tab leaks through.
   const terminals = useMemo(
-    () => tabs.filter((t) => t.kind === "terminal"),
+    () =>
+      tabs.filter(
+        (t): t is Extract<Tab, { kind: "terminal" }> =>
+          t.kind === "terminal" && !t.rmux,
+      ),
     [tabs],
   );
 

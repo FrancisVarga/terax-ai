@@ -11,7 +11,10 @@ import {
   type PaneNode,
   type SplitDir,
 } from "@/modules/terminal/lib/panes";
-import { disposeSession } from "@/modules/terminal/lib/useTerminalSession";
+import {
+  disposeSession,
+  markRmuxReattach,
+} from "@/modules/terminal/lib/useTerminalSession";
 
 // Matches the renderer slot pool size — over this we'd evict an active leaf.
 export const MAX_PANES_PER_TAB = 4;
@@ -25,6 +28,13 @@ export type TerminalTab = {
   activeLeafId: number;
   /** AI agent cannot read buffer / context of this terminal. */
   private?: boolean;
+  /**
+   * Present when this tab is an rmux (daemon-backed) terminal. Maps each leaf id
+   * to the daemon pane id it reattaches to. A tab with this set renders through
+   * RmuxTerminalStack (leaf attaches to the running daemon pane, close=detach)
+   * instead of the in-process TerminalStack. Absent for normal local terminals.
+   */
+  rmux?: { paneByLeaf: Record<number, number> };
 };
 
 export type EditorTab = {
@@ -422,6 +432,34 @@ export function useTabs(
       ]);
       setActiveId(tabId);
       return { tabId, leafIds: [left, right] as const };
+    },
+    [],
+  );
+
+  // Open a daemon-backed (rmux) terminal tab that ATTACHES to an existing
+  // daemon pane instead of spawning a fresh shell. The single leaf is marked
+  // for reattach BEFORE the tab is added, so when RmuxTerminalStack mounts the
+  // leaf its `ensureSession` reattaches to `daemonPaneId` rather than opening a
+  // new pty. The `rmux` field is what routes this tab through RmuxTerminalStack
+  // (see TabStackRouter). Returns the new tab id.
+  const addRmuxTerminalTab = useCallback(
+    (daemonPaneId: number, title: string): number => {
+      const tabId = nextIdRef.current++;
+      const leafId = nextIdRef.current++;
+      markRmuxReattach(leafId, daemonPaneId);
+      setTabs((t) => [
+        ...t,
+        {
+          id: tabId,
+          kind: "terminal",
+          title,
+          paneTree: { kind: "leaf", id: leafId },
+          activeLeafId: leafId,
+          rmux: { paneByLeaf: { [leafId]: daemonPaneId } },
+        },
+      ]);
+      setActiveId(tabId);
+      return tabId;
     },
     [],
   );
@@ -1379,6 +1417,7 @@ export function useTabs(
     newGridTab,
     newDuoTab,
     newPrivateTab,
+    addRmuxTerminalTab,
     openFileTab,
     pinTab,
     newPreviewTab,
