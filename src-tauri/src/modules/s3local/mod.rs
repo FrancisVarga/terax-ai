@@ -125,6 +125,10 @@ impl S3LocalState {
     /// else runs in-process (dev).
     fn ensure(&self, app: &AppHandle, project_dir: &std::path::Path) -> Result<ServerInfo, String> {
         let root = resolve_root(project_dir)?;
+        // Make sure the project never commits its local S3 store: append
+        // `.t-camelot/` to the project's `.gitignore` if it's not already
+        // ignored. Best-effort, idempotent (a no-op when kv already added it).
+        ensure_gitignore(project_dir);
         let creds = self.creds(app);
 
         // Fast path: already running for this root.
@@ -231,6 +235,31 @@ fn start_in_process(root: &std::path::Path, creds: &Credentials) -> Result<Serve
         port,
         stop: Mutex::new(Some(tx)),
     })
+}
+
+/// Ensure `project_dir`'s `.gitignore` ignores `.t-camelot/` so the local S3
+/// store (and other `.t-camelot/` machine-local state) is never committed.
+/// Idempotent + best-effort: matches either `.t-camelot/` or `.t-camelot`, and
+/// only appends when neither is present (so it co-exists with the kv module's
+/// identical guard). A missing `.gitignore` is created.
+fn ensure_gitignore(project_dir: &std::path::Path) {
+    let gitignore = project_dir.join(".gitignore");
+    let entry = ".t-camelot/";
+    let existing = std::fs::read_to_string(&gitignore).unwrap_or_default();
+    if existing
+        .lines()
+        .any(|l| l.trim() == entry || l.trim() == ".t-camelot")
+    {
+        return;
+    }
+    let mut next = existing;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str("\n# Terax machine-local project state (local S3 store, KV data) — never commit.\n");
+    next.push_str(entry);
+    next.push('\n');
+    let _ = std::fs::write(&gitignore, next);
 }
 
 /// Resolve `<project_dir>/.t-camelot/s3-local/`, creating it. `project_dir` is
