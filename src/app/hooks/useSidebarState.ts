@@ -151,8 +151,10 @@ export function useSidebarState({ explorerRef }: UseSidebarStateArgs) {
     if (!p) return;
     beginSidebarAnim();
     // `.resize()` (not `.expand()`) so the rail reopens at the stored width even
-    // on the first toggle.
-    if (p.getSize().asPercentage <= 0) p.resize(`${sidebarWidthRef.current}px`);
+    // on the first toggle. Floor the width at the min so a stale sub-min value
+    // can never resolve to a width the panel clamps straight back to collapsed.
+    if (p.getSize().asPercentage <= 0)
+      p.resize(`${Math.max(SIDEBAR_MIN_WIDTH, sidebarWidthRef.current)}px`);
     else p.collapse();
   }, [beginSidebarAnim]);
 
@@ -161,7 +163,9 @@ export function useSidebarState({ explorerRef }: UseSidebarStateArgs) {
     if (!p) return;
     beginSidebarAnim();
     if (p.getSize().asPercentage <= 0)
-      p.resize(`${rightSidebarWidthRef.current}px`);
+      p.resize(
+        `${Math.max(RIGHT_SIDEBAR_MIN_WIDTH, rightSidebarWidthRef.current)}px`,
+      );
     else p.collapse();
   }, [beginSidebarAnim]);
 
@@ -171,7 +175,10 @@ export function useSidebarState({ explorerRef }: UseSidebarStateArgs) {
       const collapsed = panel ? panel.getSize().asPercentage <= 0 : false;
       if (collapsed) {
         beginSidebarAnim();
-        if (panel) panel.resize(`${sidebarWidthRef.current}px`);
+        if (panel)
+          panel.resize(
+            `${Math.max(SIDEBAR_MIN_WIDTH, sidebarWidthRef.current)}px`,
+          );
         if (view !== sidebarView) persistSidebarView(view);
         return;
       }
@@ -225,7 +232,10 @@ export function useSidebarState({ explorerRef }: UseSidebarStateArgs) {
       const collapsed = panel ? panel.getSize().asPercentage <= 0 : false;
       if (collapsed) {
         beginSidebarAnim();
-        if (panel) panel.resize(`${rightSidebarWidthRef.current}px`);
+        if (panel)
+          panel.resize(
+            `${Math.max(RIGHT_SIDEBAR_MIN_WIDTH, rightSidebarWidthRef.current)}px`,
+          );
         if (view !== rightSidebarView) persistRightSidebarView(view);
         return;
       }
@@ -248,7 +258,9 @@ export function useSidebarState({ explorerRef }: UseSidebarStateArgs) {
       const panel = rightSidebarRef.current;
       if (panel && panel.getSize().asPercentage <= 0) {
         beginSidebarAnim();
-        panel.resize(`${rightSidebarWidthRef.current}px`);
+        panel.resize(
+          `${Math.max(RIGHT_SIDEBAR_MIN_WIDTH, rightSidebarWidthRef.current)}px`,
+        );
       }
       if (rightSidebarView !== "tasks") persistRightSidebarView("tasks");
       useTaskRunnerStore.getState().select(id);
@@ -289,7 +301,7 @@ export function useSidebarState({ explorerRef }: UseSidebarStateArgs) {
     if (sidebarView !== "explorer" || collapsed) {
       if (panel && collapsed) {
         beginSidebarAnim();
-        panel.resize(`${sidebarWidthRef.current}px`);
+        panel.resize(`${Math.max(SIDEBAR_MIN_WIDTH, sidebarWidthRef.current)}px`);
       }
       if (sidebarView !== "explorer") persistSidebarView("explorer");
       const active = document.activeElement;

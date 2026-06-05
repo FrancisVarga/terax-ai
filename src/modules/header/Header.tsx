@@ -53,6 +53,10 @@ type Props = {
   onOpenCcusage: () => void;
   onOpenGithubFeed: () => void;
   onClose: (id: number) => void;
+  /** Close every tab except the given one (context menu). */
+  onCloseOthers: (id: number) => void;
+  /** Close all tabs but the surviving home tab (context menu). */
+  onCloseAll: (id: number) => void;
   /** Promote a preview (transient) tab to persistent. */
   onPin: (id: number) => void;
   /** Drag-reorder a tab into another tab's slot. */
@@ -89,6 +93,8 @@ export function Header({
   onOpenCcusage,
   onOpenGithubFeed,
   onClose,
+  onCloseOthers,
+  onCloseAll,
   onPin,
   onReorder,
   onToggleSidebar,
@@ -280,6 +286,8 @@ export function Header({
           onOpenCcusage={onOpenCcusage}
           onOpenGithubFeed={onOpenGithubFeed}
           onClose={onClose}
+          onCloseOthers={onCloseOthers}
+          onCloseAll={onCloseAll}
           onPin={onPin}
           onReorder={onReorder}
           compact={compact}
