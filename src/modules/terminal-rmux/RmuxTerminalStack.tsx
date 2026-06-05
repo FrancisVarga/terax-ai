@@ -1,9 +1,12 @@
 import type { Tab } from "@/modules/tabs";
 import {
   PaneTreeView,
+  hasSession,
   leafIds,
+  markDeferredLeaf,
   markRmuxLeaf,
   reattachSession,
+  unmarkDeferredLeaf,
   unmarkRmuxLeaf,
   type TerminalPaneHandle,
 } from "@/modules/terminal";
@@ -22,6 +25,12 @@ type Props = {
   onFocusLeaf: (tabId: number, leafId: number) => void;
   /** Close a single split pane by its leaf id. */
   onClosePane: (leafId: number) => void;
+  /**
+   * Fired once a tab's `pendingAttach` daemon pane has been wired into its leaf
+   * (success or failure — either way the pending intent is consumed). The parent
+   * clears the tab's `pendingAttach` field so a re-render never re-triggers it.
+   */
+  onAttached?: (tabId: number, leafId: number) => void;
 };
 
 export type RmuxTerminalStackHandle = {
@@ -60,6 +69,7 @@ export const RmuxTerminalStack = forwardRef<RmuxTerminalStackHandle, Props>(
       onExit,
       onFocusLeaf,
       onClosePane,
+      onAttached,
     },
     ref,
   ) {
@@ -68,10 +78,26 @@ export const RmuxTerminalStack = forwardRef<RmuxTerminalStackHandle, Props>(
     [tabs],
   );
 
+  // Leaves awaiting a daemon-pane reattach: leafId -> { tabId, daemonPaneId }.
+  // Built from the tabs that still carry a `pendingAttach`; the target leaf is
+  // the tab's active leaf (an rmux attach tab opens single-leaf). getBundle reads
+  // this to DEFER the leaf's eager pty open BEFORE the pane mounts (so
+  // reattachSession can win the race), and an effect below performs the reattach.
+  const pending = useMemo(() => {
+    const m = new Map<number, { tabId: number; daemonPaneId: number }>();
+    for (const t of terminals) {
+      if (t.rmux && t.pendingAttach !== undefined) {
+        m.set(t.activeLeafId, { tabId: t.id, daemonPaneId: t.pendingAttach });
+      }
+    }
+    return m;
+  }, [terminals]);
+
   const registerRef = useRef(registerHandle);
   const searchReadyRef = useRef(onSearchReady);
   const cwdRef = useRef(onCwd);
   const exitRef = useRef(onExit);
+  const attachedRef = useRef(onAttached);
   useEffect(() => {
     registerRef.current = registerHandle;
   }, [registerHandle]);
@@ -84,6 +110,9 @@ export const RmuxTerminalStack = forwardRef<RmuxTerminalStackHandle, Props>(
   useEffect(() => {
     exitRef.current = onExit;
   }, [onExit]);
+  useEffect(() => {
+    attachedRef.current = onAttached;
+  }, [onAttached]);
 
   useImperativeHandle(
     ref,
@@ -102,6 +131,12 @@ export const RmuxTerminalStack = forwardRef<RmuxTerminalStackHandle, Props>(
       // TerminalPane mounts and eagerly opens the pty, so openPtyForSession
       // reads the rmux mark and picks detach mode for that pane's close().
       markRmuxLeaf(leafId);
+      // If this leaf is attach-destined, ALSO suppress its eager pty open here —
+      // before the pane mounts — so the reattach below wins the race instead of
+      // a fresh local shell. getBundle runs during render (ahead of child mount),
+      // which is the only window where this can land before openPtyEagerly fires.
+      // The reattach effect lifts the deferral (via reattachSession).
+      if (pending.has(leafId)) markDeferredLeaf(leafId);
       b = {
         setRef: (h) => registerRef.current(leafId, h),
         onSearch: (addon) => searchReadyRef.current(leafId, addon),
@@ -125,12 +160,56 @@ export const RmuxTerminalStack = forwardRef<RmuxTerminalStackHandle, Props>(
     }
   }, [terminals]);
 
+  // Drive the pending reattaches. For each leaf whose tab still carries a
+  // pendingAttach, wire the daemon pane in once the leaf has mounted, then notify
+  // the parent to clear the field. `attempted` dedupes: the effect re-runs on
+  // every tabs change (cwd at keystroke rate), but each leaf is reattached once.
+  //
+  // We do NOT gate on whenSessionReady here: a deferred leaf has no pty, so its
+  // OSC 133;B prompt marker never fires and that wait would only resolve on the
+  // 4s timeout. reattachSession needs only the session OBJECT (created the moment
+  // the pane mounts), so we retry on a rAF until it exists, then attach. The
+  // deferral (set in getBundle) keeps the local eager-open suppressed meanwhile.
+  const attempted = useRef(new Set<number>());
+  useEffect(() => {
+    for (const [leafId, { tabId, daemonPaneId }] of pending) {
+      if (attempted.current.has(leafId)) continue;
+      attempted.current.add(leafId);
+      let tries = 0;
+      const tryAttach = () => {
+        void (async () => {
+          // reattachSession resolves false when the session isn't there yet
+          // (pane not mounted) OR on a genuine failure; only the "not mounted"
+          // case is retryable, bounded so a never-mounting leaf can't spin.
+          const ok = await reattachSession(leafId, daemonPaneId);
+          // Retry ONLY while the pane hasn't mounted yet (no session object);
+          // once it exists, reattachSession has either attached or fallen back to
+          // a local shell, so we stop and clear the pending field.
+          if (!ok && tries < 60 && !hasSession(leafId)) {
+            tries++;
+            requestAnimationFrame(tryAttach);
+            return;
+          }
+          // Consumed (attached, failed-with-fallback, or gave up): clear the
+          // tab's pendingAttach so a re-render never re-enters this path.
+          attachedRef.current?.(tabId, leafId);
+        })();
+      };
+      tryAttach();
+    }
+  }, [pending]);
+
   // Drop every rmux mark this stack owns when it unmounts, so a leaf id reused
   // by the in-process TerminalStack later does not inherit detach-on-close.
   useEffect(() => {
     const map = bundles.current;
     return () => {
-      for (const id of map.keys()) unmarkRmuxLeaf(id);
+      for (const id of map.keys()) {
+        unmarkRmuxLeaf(id);
+        // A leaf still mid-defer (its attach never completed) must not leave the
+        // shared deferral set dirty, or a reused leaf id would stay blank.
+        unmarkDeferredLeaf(id);
+      }
       map.clear();
     };
   }, []);
