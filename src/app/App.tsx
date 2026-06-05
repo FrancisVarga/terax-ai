@@ -4,6 +4,7 @@ import { AppDialogs } from "./components/AppDialogs";
 import { AppLayout } from "./components/AppLayout";
 import { AppRightSidebar } from "./components/AppRightSidebar";
 import { AppSidebar } from "./components/AppSidebar";
+import { RmuxMessagesCoordinator } from "./components/RmuxMessagesCoordinator";
 import { RmuxSessionsCoordinator } from "./components/RmuxSessionsCoordinator";
 import { useAgentLaunchers } from "./hooks/useAgentLaunchers";
 import { useAiActions } from "./hooks/useAiActions";
@@ -1214,6 +1215,12 @@ export default function App() {
               flag off it is invisible and inert. See the component for the gate
               and attachRmuxSession for the honest attach scope. */}
           <RmuxSessionsCoordinator onAttach={attachRmuxSession} />
+
+          {/* rmux message-bus coordinator (#138). Fully self-contained: own
+              store, own live `terax:rmux-message` subscription, own daemon gate
+              (invisible until a delivered publish / inbox read / received event
+              proves a connected daemon). One-line mount, no props. */}
+          <RmuxMessagesCoordinator />
 
           <AppDialogs
             tabs={tabs}
