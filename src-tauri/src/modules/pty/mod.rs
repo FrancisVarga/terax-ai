@@ -167,7 +167,9 @@ pub async fn pty_open(
     let sink: Arc<dyn sink::PtyOutputSink> =
         Arc::new(sink::TauriChannelSink::new(app, on_data, on_exit));
     let session = tauri::async_runtime::spawn_blocking(move || {
-        session::spawn(id, cols, rows, cwd, workspace, sink).map(|(s, _)| s)
+        // In-process path: no daemon, so no pane-identifying env to inject (#139).
+        // An empty slice keeps this spawn byte-identical to the pre-#139 behavior.
+        session::spawn(id, cols, rows, cwd, workspace, &[], sink).map(|(s, _)| s)
     })
     .await
     .map_err(|e| {

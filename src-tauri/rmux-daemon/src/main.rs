@@ -20,6 +20,12 @@
 //! registry + session grouping, and the broadcast fan-out + ring that turn one
 //! shell's output into many attach subscribers with replay.
 
+// In-pane `rmux msg` CLI (#139). A second role of this binary: an agent runs it
+// INSIDE a pane's shell to drive the message bus over the daemon's loopback HTTP
+// API, with no Tauri UI. Kept in its own module so the server code above is
+// unaffected; reached only via the argv branch in `main`.
+mod msg;
+
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::io::Write;
@@ -203,14 +209,20 @@ struct DaemonState {
     // kind ever collides. Starts at 1 (the frontend treats 0 as "unset"). Ids are
     // never reused.
     next_id: AtomicU32,
+    // The daemon's own loopback URL (`http://127.0.0.1:<bound port>`), known only
+    // AFTER bind. Injected into each spawned pane's env as `RMUX_DAEMON_URL` (#139)
+    // so an in-pane `rmux msg` CLI can reach the bus without the Terax UI. Set once
+    // in `run()`; empty before that (no pane is ever spawned pre-bind).
+    daemon_url: String,
 }
 
 impl DaemonState {
-    fn new() -> Self {
+    fn new(daemon_url: String) -> Self {
         Self {
             panes: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             next_id: AtomicU32::new(1),
+            daemon_url,
         }
     }
 }
@@ -251,6 +263,20 @@ impl PtyOutputSink for PaneSink {
 }
 
 fn main() {
+    // One binary, two roles (#139). The DEFAULT role (no/other args) is the PTY
+    // daemon server — byte-identical to before. The `msg` SUBCOMMAND turns the
+    // SAME binary into an in-pane CLI an agent runs INSIDE a pane's shell to use
+    // the message bus without the Terax UI. Shipping it as a subcommand (not a new
+    // externalBin) avoids the WiX/placeholder-ordering traps a fresh sidecar hits.
+    //
+    // We branch on argv[1] BEFORE building the tokio runtime: the CLI talks to an
+    // already-running daemon over a tiny blocking std TcpStream HTTP client, so it
+    // needs no async runtime of its own. Only the server role spins up tokio.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("msg") {
+        std::process::exit(msg::run_cli(&args[2..]));
+    }
+
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -266,8 +292,6 @@ fn main() {
 }
 
 async fn run() {
-    let state = Arc::new(DaemonState::new());
-
     // Ephemeral port: the OS picks a free loopback port and we print it on
     // stdout so the parent app can read it back. Loopback-only is the trust
     // boundary; no port needs to be fixed or guessed.
@@ -286,6 +310,12 @@ async fn run() {
             std::process::exit(1);
         }
     };
+
+    // Build state AFTER bind so it carries the daemon's own loopback URL: each
+    // spawned pane gets `RMUX_DAEMON_URL` pointing here so an in-pane `rmux msg`
+    // CLI can reach the bus (#139). The URL can only be known once the OS has
+    // assigned the ephemeral port above.
+    let state = Arc::new(DaemonState::new(format!("http://127.0.0.1:{}", local.port())));
     // Machine-readable line the parent parses to learn the port, plus a human
     // line on stderr for log scraping. stdout MUST be flushed explicitly: when
     // the parent captures it via a pipe (not a tty) Rust block-buffers stdout,
@@ -484,10 +514,20 @@ async fn spawn_pane(
     let output = Arc::new(Mutex::new(PaneOutput { ring: Ring::new(), tx }));
     let sink: Arc<dyn PtyOutputSink> = Arc::new(PaneSink(output.clone()));
 
+    // Pane-identifying env (#139): the CLI inside a pane reads these to self-
+    // identify (`RMUX_PANE_ID` = this pane's id) and to find the bus
+    // (`RMUX_DAEMON_URL` = the daemon's loopback URL). Injected only on the daemon
+    // path — the in-process Tauri path passes `&[]`, so this is the seam that makes
+    // agent-to-agent messaging usable from a bare shell without the Terax UI.
+    let extra_env = vec![
+        ("RMUX_PANE_ID".to_string(), id.to_string()),
+        ("RMUX_DAEMON_URL".to_string(), state.daemon_url.clone()),
+    ];
+
     // Spawn the shell. `spawn_session` does blocking PTY setup; run it off the
     // async worker so the reactor thread is never blocked on ConPTY/openpty.
     let spawn = tokio::task::spawn_blocking(move || {
-        spawn_session(id, cols, rows, cwd, WorkspaceEnv::default(), sink).map(|(s, _)| s)
+        spawn_session(id, cols, rows, cwd, WorkspaceEnv::default(), &extra_env, sink).map(|(s, _)| s)
     })
     .await;
 
