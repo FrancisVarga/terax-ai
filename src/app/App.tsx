@@ -66,7 +66,11 @@ import {
   respawnSession,
   type TerminalPaneHandle,
 } from "@/modules/terminal";
-import { activeWindow, type Session as RmuxSession } from "@/modules/terminal-rmux";
+import {
+  activeWindow,
+  listSessions,
+  type Session as RmuxSession,
+} from "@/modules/terminal-rmux";
 import { ThemeProvider } from "@/modules/theme";
 import {
   getWslHome,
@@ -672,6 +676,56 @@ export default function App() {
     },
     [updateTab],
   );
+
+  // Auto-restore surviving rmux sessions on startup (#134). The rmux daemon is
+  // not killed on app shutdown (by design), so its panes — and the shells +
+  // agents running in them — keep living after the window closes. On the next
+  // launch we list the daemon's sessions and reattach EVERY surviving pane into
+  // its own tab, so the user reopens the app and finds their live terminals
+  // (and any Claude/agent chat in them) already restored — no manual click.
+  //
+  // The attach path is the #133 one (`attachRmuxSession` -> an rmux tab whose
+  // RmuxTerminalStack reattaches the daemon pane and replays its scrollback
+  // ring), so this effect adds no new attach logic; it only enumerates panes.
+  //
+  // Degrade-safe: `listSessions` returns [] when the daemon is absent (sidecar
+  // not staged) or has no survivors, so the common cold-start is a no-op and the
+  // seeded default shell stays. Runs EXACTLY once — a ref guard survives React
+  // StrictMode's dev double-mount so we never double-restore a pane.
+  const restoredRmuxRef = useRef(false);
+  useEffect(() => {
+    if (restoredRmuxRef.current) return;
+    restoredRmuxRef.current = true;
+    void (async () => {
+      let sessions: RmuxSession[];
+      try {
+        sessions = await listSessions();
+      } catch {
+        // Daemon unreachable -> nothing to restore; the default shell stands.
+        return;
+      }
+      // Flatten to (session, paneId) pairs across every window of every session,
+      // preserving order so the first surviving pane becomes the focused tab.
+      const panes: Array<{ session: RmuxSession; paneId: number }> = [];
+      for (const session of sessions) {
+        for (const window of session.windows) {
+          for (const pane of window.panes) {
+            panes.push({ session, paneId: pane.pane_id });
+          }
+        }
+      }
+      if (panes.length === 0) return;
+      // Reattach each surviving pane; attachRmuxSession focuses the tab it opens,
+      // so after the loop the LAST restored pane is active. That is fine — the
+      // user lands on a real restored session rather than the empty seed shell.
+      for (const { session, paneId } of panes) {
+        attachRmuxSession(session, paneId);
+      }
+      console.info(`[rmux] auto-restored ${panes.length} surviving pane(s)`);
+    })();
+    // attachRmuxSession is stable (useCallback); intentionally run once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Open a project in the current window: pin the explorer to the project
   // folder (so the file tree stays put even when a shell `cd`s elsewhere) and
