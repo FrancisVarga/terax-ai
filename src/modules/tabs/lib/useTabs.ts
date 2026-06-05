@@ -25,6 +25,21 @@ export type TerminalTab = {
   activeLeafId: number;
   /** AI agent cannot read buffer / context of this terminal. */
   private?: boolean;
+  /**
+   * When true this terminal tab is hosted by `RmuxTerminalStack` (daemon-backed)
+   * instead of the in-process `TerminalStack`. The router partitions terminal
+   * tabs on this flag; everything else about the tab is identical, so leaf ids,
+   * splits, cwd tracking and close behavior all work unchanged. Absent on every
+   * normal terminal tab, keeping the in-process path byte-for-byte unchanged.
+   */
+  rmux?: boolean;
+  /**
+   * Daemon pane id to reattach into this tab's active leaf once it mounts. The
+   * RmuxTerminalStack defers the leaf's eager pty open, wires this pane in via
+   * `reattachSession`, then asks the parent to clear this field. Cleared the
+   * moment the attach is consumed so a re-render never re-triggers it.
+   */
+  pendingAttach?: number;
 };
 
 export type EditorTab = {
@@ -244,6 +259,11 @@ export type TabPatch = Partial<{
   path: string;
   dirty: boolean;
   url: string;
+  /**
+   * Daemon pane id to (re)attach into a terminal tab's active leaf, or `null`
+   * to clear a consumed pending attach. Only meaningful for rmux terminal tabs.
+   */
+  pendingAttach: number | null;
 }>;
 
 function basename(path: string): string {
@@ -334,6 +354,36 @@ export function useTabs(
           cwd,
           paneTree: { kind: "leaf", id: leafId, cwd },
           activeLeafId: leafId,
+        },
+      ]);
+      setActiveId(tabId);
+      return { tabId, leafId };
+    },
+    [],
+  );
+
+  // Open an rmux (daemon-backed) terminal tab whose single leaf will reattach an
+  // existing daemon pane on mount instead of spawning a fresh local shell. The
+  // `rmux` flag routes the tab to RmuxTerminalStack; `pendingAttach` carries the
+  // daemon pane id that stack reattaches once the leaf is ready. Mirrors
+  // newAgentTab's shape (returns the tab id + its active leaf id) so the caller
+  // can drive the leaf if needed. Cleared via updateTab({ pendingAttach: null })
+  // once consumed — see attachRmuxSession in App.tsx.
+  const newRmuxAttachTab = useCallback(
+    (cwd: string | undefined, title: string, daemonPaneId: number) => {
+      const tabId = nextIdRef.current++;
+      const leafId = nextIdRef.current++;
+      setTabs((t) => [
+        ...t,
+        {
+          id: tabId,
+          kind: "terminal",
+          title,
+          cwd,
+          paneTree: { kind: "leaf", id: leafId, cwd },
+          activeLeafId: leafId,
+          rmux: true,
+          pendingAttach: daemonPaneId,
         },
       ]);
       setActiveId(tabId);
@@ -1139,8 +1189,20 @@ export function useTabs(
       t.map((x) => {
         if (x.id !== id) return x;
         if (x.kind === "terminal") {
+          // `pendingAttach: null` clears a consumed rmux attach (drop the field
+          // entirely so a re-render can't re-trigger it); a number sets it.
+          const { pendingAttach: _drop, ...rest } = x;
+          const attach =
+            patch.pendingAttach === undefined
+              ? x.pendingAttach !== undefined
+                ? { pendingAttach: x.pendingAttach }
+                : {}
+              : patch.pendingAttach === null
+                ? {}
+                : { pendingAttach: patch.pendingAttach };
           return {
-            ...x,
+            ...rest,
+            ...attach,
             ...(patch.title !== undefined && { title: patch.title }),
             ...(patch.cwd !== undefined && { cwd: patch.cwd }),
           };
@@ -1376,6 +1438,7 @@ export function useTabs(
     setActiveId,
     newTab,
     newAgentTab,
+    newRmuxAttachTab,
     newGridTab,
     newDuoTab,
     newPrivateTab,

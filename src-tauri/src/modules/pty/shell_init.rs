@@ -49,18 +49,24 @@ fn fish_init_script() -> &'static str {
     FISH_INIT_SCRIPT
 }
 
+/// `extra_env` is appended to the spawned shell's environment verbatim. It is the
+/// seam the out-of-process rmux daemon uses to inject pane-identifying vars
+/// (`RMUX_PANE_ID`, `RMUX_DAEMON_URL`) so an in-pane CLI agent can self-identify
+/// and reach the bus (#139). The in-process Tauri path passes an empty slice, so
+/// its spawn is byte-identical to before — only the daemon ever sets these.
 pub fn build_command(
     cwd: Option<String>,
     workspace: WorkspaceEnv,
+    extra_env: &[(String, String)],
 ) -> Result<CommandBuilder, String> {
     #[cfg(unix)]
     {
         let _ = workspace;
-        unix::build(cwd)
+        unix::build(cwd, extra_env)
     }
     #[cfg(windows)]
     {
-        windows::build(cwd, workspace)
+        windows::build(cwd, workspace, extra_env)
     }
 }
 
@@ -122,10 +128,16 @@ fn android_home_dir() -> Option<PathBuf> {
     None
 }
 
-fn apply_common(cmd: &mut CommandBuilder, cwd: Option<String>) {
+fn apply_common(cmd: &mut CommandBuilder, cwd: Option<String>, extra_env: &[(String, String)]) {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TERAX_TERMINAL", "1");
+    // Caller-supplied env (the daemon's pane-identifying RMUX_* vars, #139).
+    // Applied alongside the terminal vars so it lands for every shell kind that
+    // routes through apply_common. Empty for the in-process path.
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
     ensure_utf8_locale(cmd);
 
     let resolved_cwd = cwd
@@ -199,10 +211,13 @@ mod unix {
         }
     }
 
-    pub fn build(cwd: Option<String>) -> Result<CommandBuilder, String> {
+    pub fn build(
+        cwd: Option<String>,
+        extra_env: &[(String, String)],
+    ) -> Result<CommandBuilder, String> {
         let (shell, shell_path) = Shell::detect();
         let mut cmd = CommandBuilder::new(&shell_path);
-        super::apply_common(&mut cmd, cwd);
+        super::apply_common(&mut cmd, cwd, extra_env);
 
         match shell {
             Shell::Zsh => {
@@ -351,9 +366,13 @@ mod windows {
         args: Vec<String>,
     }
 
-    pub fn build(cwd: Option<String>, workspace: WorkspaceEnv) -> Result<CommandBuilder, String> {
+    pub fn build(
+        cwd: Option<String>,
+        workspace: WorkspaceEnv,
+        extra_env: &[(String, String)],
+    ) -> Result<CommandBuilder, String> {
         if let WorkspaceEnv::Wsl { distro } = workspace {
-            return build_wsl(cwd, distro);
+            return build_wsl(cwd, distro, extra_env);
         }
         let shell_path = super::windows_shell_path();
         let shell_name = shell_path
@@ -364,7 +383,7 @@ mod windows {
         let is_powershell = shell_name == "pwsh.exe" || shell_name == "powershell.exe";
 
         let mut cmd = CommandBuilder::new(&shell_path);
-        super::apply_common(&mut cmd, cwd);
+        super::apply_common(&mut cmd, cwd, extra_env);
 
         if is_powershell {
             match prepare_ps_profile() {
@@ -388,7 +407,11 @@ mod windows {
         Ok(cmd)
     }
 
-    fn build_wsl(cwd: Option<String>, distro: String) -> Result<CommandBuilder, String> {
+    fn build_wsl(
+        cwd: Option<String>,
+        distro: String,
+        extra_env: &[(String, String)],
+    ) -> Result<CommandBuilder, String> {
         crate::modules::workspace::validate_wsl_distro_name(&distro)?;
         let shell_path = crate::modules::workspace::wsl_login_shell(distro.clone())?;
         let shell_kind = ShellKind::from_path(&shell_path);
@@ -449,6 +472,13 @@ mod windows {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERAX_TERMINAL", "1");
+        // Caller-supplied env (#139). Set on the host `wsl.exe` command, mirroring
+        // the TERM/COLORTERM vars above. The in-process path passes none and the
+        // daemon only spawns Local (never WSL) panes, so this is a no-op today; it
+        // is wired for parity so a future daemon-over-WSL pane would carry the vars.
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
         super::ensure_utf8_locale(&mut cmd);
         log::info!("spawning WSL shell: {distro} ({shell_path})");
         Ok(cmd)

@@ -102,6 +102,11 @@ impl Drop for ChildKillGuard {
     }
 }
 
+/// `extra_env` is appended verbatim to the spawned shell's environment. The
+/// out-of-process rmux daemon passes the pane-identifying `RMUX_PANE_ID` /
+/// `RMUX_DAEMON_URL` vars here (#139) so an in-pane CLI agent can self-identify
+/// and reach the bus; the in-process Tauri path passes `&[]`, leaving its spawn
+/// byte-identical.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
     id: u32,
@@ -109,6 +114,7 @@ pub fn spawn(
     rows: u16,
     cwd: Option<String>,
     workspace: WorkspaceEnv,
+    extra_env: &[(String, String)],
     sink: Arc<dyn PtyOutputSink>,
 ) -> Result<(Arc<Session>, PtySize), String> {
     #[cfg(windows)]
@@ -123,7 +129,7 @@ pub fn spawn(
     };
     let pair = pty_system.openpty(size).map_err(|e| e.to_string())?;
 
-    let cmd = shell_init::build_command(cwd, workspace)?;
+    let cmd = shell_init::build_command(cwd, workspace, extra_env)?;
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     drop(pair.slave);
 

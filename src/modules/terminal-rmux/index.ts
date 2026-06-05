@@ -23,12 +23,18 @@ export {
   killSession,
   newWindow,
   splitWindow,
+  busPublish,
+  inboxList,
+  inboxAck,
+  type BusMessage,
+  type BusTarget,
   type DaemonPaneId,
   type DaemonSessionId,
   type DaemonWindowId,
   type NewSessionResult,
   type NewWindowResult,
   type Pane,
+  type PublishResult,
   type Session,
   type SplitDir,
   type SplitWindowResult,
@@ -40,3 +46,8 @@ export {
   paneCount,
   useSessionsStore,
 } from "./lib/sessions";
+export { allMessages, useMessagesStore } from "./lib/messages";
+// NOTE: the RmuxMessagesCoordinator (#138) lives in app/components and imports
+// this barrel for the store/types, so it is intentionally NOT re-exported here
+// (that would form an import cycle). App mounts it directly from its component
+// file, exactly as it does RmuxSessionsCoordinator.

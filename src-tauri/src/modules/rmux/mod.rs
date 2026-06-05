@@ -513,6 +513,60 @@ pub fn window_split_forwarded(rmux_state: &RmuxState, window_id: u32, dir: &str)
     )
 }
 
+// --- Message bus verb forwarding (#137) ---
+// These drive the daemon's #136 bus verbs (/bus/publish, /pane/<id>/inbox,
+// /pane/<id>/inbox/ack) so the frontend can fan out inter-pane messages and poll
+// per-pane inboxes. Same degrade contract as the session verbs: publish/ack are
+// writes and error when the daemon is absent; inbox_list is a read and degrades
+// to an empty `{messages:[]}` so a poller shows nothing instead of erroring.
+
+/// Publish a bus message. `to` is the daemon routing value (a pane id number,
+/// `{"session": name}`, `{"window": name}`, or `"*"`). Returns the daemon JSON
+/// `{delivered, message_id}`. Requires the daemon connected (a write).
+pub fn bus_publish_forwarded(
+    rmux_state: &RmuxState,
+    from: u32,
+    to: Value,
+    msg_type: &str,
+    payload: Value,
+    inject: bool,
+) -> Result<Value, String> {
+    let base_url = rmux_state
+        .base_url()
+        .ok_or_else(|| "rmux daemon not connected".to_string())?;
+    post_json_resp(
+        &format!("{base_url}/bus/publish"),
+        serde_json::json!({ "from": from, "to": to, "type": msg_type, "payload": payload, "inject": inject }),
+    )
+}
+
+/// Snapshot a pane's inbox (non-draining). Returns the daemon JSON
+/// `{messages: [...]}`, or `{messages: []}` if the daemon is not connected (so a
+/// poller degrades to "no messages" instead of erroring), mirroring
+/// `session_list_forwarded`.
+pub fn inbox_list_forwarded(rmux_state: &RmuxState, pane_id: u32) -> Result<Value, String> {
+    let Some(base_url) = rmux_state.base_url() else {
+        return Ok(serde_json::json!({ "messages": [] }));
+    };
+    get_json(&format!("{base_url}/pane/{pane_id}/inbox"))
+}
+
+/// Ack (drain) inbox messages. `ids` present drains those; `ids` absent drains
+/// all. Returns `{remaining}`. Requires the daemon connected (a write).
+pub fn inbox_ack_forwarded(
+    rmux_state: &RmuxState,
+    pane_id: u32,
+    ids: Option<Vec<u32>>,
+) -> Result<Value, String> {
+    let base_url = rmux_state
+        .base_url()
+        .ok_or_else(|| "rmux daemon not connected".to_string())?;
+    post_json_resp(
+        &format!("{base_url}/pane/{pane_id}/inbox/ack"),
+        serde_json::json!({ "ids": ids }),
+    )
+}
+
 /// Async JSON POST to `/pane/open`, returning the daemon pane id.
 async fn open_pane(
     base_url: &str,
@@ -546,6 +600,10 @@ async fn open_pane(
 const FRAME_DATA: u8 = 0;
 const FRAME_AGENT: u8 = 1;
 const FRAME_EXIT: u8 = 2;
+/// Bus message frame (#137): carries serialized `BusMessage` JSON; bridged to the
+/// `terax:rmux-message` Tauri event, exactly as `FRAME_AGENT` is bridged to
+/// `terax:agent-signal`.
+const FRAME_MSG: u8 = 3;
 const FRAME_HEADER_LEN: usize = 5;
 
 /// Connect to a pane's `/attach` binary stream and bridge each frame back onto
@@ -640,6 +698,15 @@ fn dispatch_frame(
                 let _ = app.emit("terax:agent-signal", v);
             }
         }
+        FRAME_MSG => {
+            // A bus message delivered to this pane (#137). Parse the serialized
+            // `BusMessage` JSON and surface it to the webview as a Tauri event,
+            // mirroring the agent-signal path. The durable copy already lives in
+            // the daemon's pane inbox; this is the live push.
+            if let Ok(v) = serde_json::from_slice::<Value>(&payload) {
+                let _ = app.emit("terax:rmux-message", v);
+            }
+        }
         FRAME_EXIT => {
             let code = if payload.len() == 4 {
                 i32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]])
@@ -712,6 +779,37 @@ pub fn rmux_window_split(
     dir: String,
 ) -> Result<Value, String> {
     window_split_forwarded(&rmux_state, window_id, &dir)
+}
+
+// --- Tauri commands for the message bus (#137) ---
+// Thin wrappers over the bus verb forwarders. Same degrade story as the session
+// commands: with the daemon absent, publish/ack error cleanly and inbox_list
+// returns an empty `{messages:[]}`.
+
+#[tauri::command]
+pub fn rmux_bus_publish(
+    rmux_state: tauri::State<RmuxState>,
+    from: u32,
+    to: Value,
+    msg_type: String,
+    payload: Value,
+    inject: Option<bool>,
+) -> Result<Value, String> {
+    bus_publish_forwarded(&rmux_state, from, to, &msg_type, payload, inject.unwrap_or(false))
+}
+
+#[tauri::command]
+pub fn rmux_inbox_list(rmux_state: tauri::State<RmuxState>, pane_id: u32) -> Result<Value, String> {
+    inbox_list_forwarded(&rmux_state, pane_id)
+}
+
+#[tauri::command]
+pub fn rmux_inbox_ack(
+    rmux_state: tauri::State<RmuxState>,
+    pane_id: u32,
+    ids: Option<Vec<u32>>,
+) -> Result<Value, String> {
+    inbox_ack_forwarded(&rmux_state, pane_id, ids)
 }
 
 #[cfg(test)]
@@ -962,6 +1060,92 @@ mod tests {
             false
         });
         assert!(seen, "late attach did not replay the marker from the ring");
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    // Message bus (#136/#137) end-to-end against a live daemon: open a pane,
+    // attach to its binary stream, publish a bus message TO that pane via
+    // /bus/publish, and assert a FRAME_MSG (kind 3) arrives carrying the message
+    // JSON. Exercises the real publish HTTP shape and the FRAME_MSG bridge wire
+    // contract (the same `take_frame` the production bridge uses).
+    #[test]
+    #[ignore = "requires a built rmux-daemon binary via RMUX_DAEMON_E2E"]
+    fn end_to_end_bus_message_arrives_as_frame_msg() {
+        let exe = match std::env::var("RMUX_DAEMON_E2E") {
+            Ok(p) => std::path::PathBuf::from(p),
+            Err(_) => return,
+        };
+        assert!(exe.is_file(), "RMUX_DAEMON_E2E does not point at a file: {}", exe.display());
+
+        let (child, port) = spawn_daemon(&exe).expect("spawn daemon + read port");
+        let base_url = format!("http://127.0.0.1:{port}");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        let pane = rt.block_on(open_pane(&base_url, 80, 24, None)).expect("open pane");
+
+        // Attach BEFORE publishing so the live broadcast reaches us (bus messages
+        // are broadcast-only, never ringed, so a late attach would miss them).
+        let attach_url = format!("{base_url}/pane/{pane}/attach");
+        let reader = rt.spawn(async move {
+            let resp = reqwest::Client::new().get(&attach_url).send().await.expect("attach");
+            assert!(resp.status().is_success());
+            use futures_util::StreamExt;
+            let mut stream = resp.bytes_stream();
+            let mut buf: Vec<u8> = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                let Some(chunk) = stream.next().await else { break };
+                let Ok(bytes) = chunk else { break };
+                buf.extend_from_slice(&bytes);
+                while let Some((kind, payload)) = take_frame(&mut buf) {
+                    if kind == FRAME_MSG {
+                        // The payload is the serialized BusMessage; assert it round
+                        // trips and carries our marker type.
+                        let v: Value = serde_json::from_slice(&payload).expect("msg json");
+                        if v.get("type").and_then(Value::as_str) == Some("e2e-ping") {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        });
+
+        // Give the subscriber a beat to connect before publishing.
+        std::thread::sleep(Duration::from_millis(400));
+
+        // Publish directly to the pane id via /bus/publish (the same HTTP shape
+        // `bus_publish_forwarded` produces). `from` is a fictitious sender; a
+        // direct pane-id target is delivered even to self, but here from != pane.
+        let publish_url = format!("{base_url}/bus/publish");
+        let published = rt.block_on(async {
+            reqwest::Client::new()
+                .post(&publish_url)
+                .json(&serde_json::json!({
+                    "from": 999,
+                    "to": pane,
+                    "type": "e2e-ping",
+                    "payload": { "hello": "world" },
+                    "inject": false
+                }))
+                .send()
+                .await
+                .expect("publish")
+                .error_for_status()
+                .expect("publish status")
+                .json::<Value>()
+                .await
+                .expect("publish json")
+        });
+        assert_eq!(published["delivered"].as_u64(), Some(1), "delivered to the one target pane");
+
+        let seen = rt.block_on(reader).expect("reader task");
+        assert!(seen, "did not observe the bus message as a FRAME_MSG on /attach");
 
         let _ = child.kill();
         let _ = child.wait();

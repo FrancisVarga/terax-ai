@@ -1,8 +1,10 @@
 import type { ComponentProps, ReactNode } from "react";
+import { useMemo } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { cn } from "@/lib/utils";
 import type { Tab } from "@/modules/tabs";
 import { TerminalStack, type TerminalPaneHandle } from "@/modules/terminal";
+import { RmuxTerminalStack } from "@/modules/terminal-rmux";
 import {
   AiDiffStack,
   EditorStack,
@@ -110,6 +112,8 @@ export type TabStackRouterProps = {
   onLeafExit: (leafId: number, code: number) => void;
   onFocusLeaf: (tabId: number, leafId: number) => void;
   onClosePane: (leafId: number) => void;
+  /** Clear a tab's `pendingAttach` once RmuxTerminalStack has consumed it. */
+  onRmuxAttached: (tabId: number, leafId: number) => void;
   registerEditorHandle: (id: number, handle: EditorPaneHandle | null) => void;
   onEditorDirty: (id: number, dirty: boolean) => void;
   onCloseEditorTab: (id: number) => void;
@@ -160,6 +164,7 @@ export function TabStackRouter({
   onLeafExit,
   onFocusLeaf,
   onClosePane,
+  onRmuxAttached,
   registerEditorHandle,
   onEditorDirty,
   onCloseEditorTab,
@@ -172,11 +177,28 @@ export function TabStackRouter({
   onOpenProjectDetail,
 }: TabStackRouterProps) {
   const isGitDiff = activeKind === "git-diff" || activeKind === "git-commit-file";
+
+  // Split the terminal tabs by host: rmux (daemon-backed) tabs go to
+  // RmuxTerminalStack, the rest to the in-process TerminalStack. Both stacks
+  // live inside the SAME terminal TabLayer and SHARE the leaf-id space + the one
+  // registerHandle map (handles are keyed by leaf id, so a tab in either stack
+  // registers normally). The in-process slice keeps the exact `tabs` array shape
+  // each stack expects (it filters kind==="terminal" internally), so a plain
+  // terminal tab's path stays byte-for-byte unchanged.
+  const inProcessTabs = useMemo(
+    () => tabs.filter((t) => t.kind !== "terminal" || !t.rmux),
+    [tabs],
+  );
+  const rmuxTabs = useMemo(
+    () => tabs.filter((t) => t.kind === "terminal" && t.rmux),
+    [tabs],
+  );
+
   return (
     <div className="relative h-full min-h-0">
       <TabLayer visible={activeKind === "terminal"} padded>
         <TerminalStack
-          tabs={tabs}
+          tabs={inProcessTabs}
           activeId={activeId}
           registerHandle={registerTerminalHandle}
           onSearchReady={onSearchReady}
@@ -184,6 +206,17 @@ export function TabStackRouter({
           onExit={onLeafExit}
           onFocusLeaf={onFocusLeaf}
           onClosePane={onClosePane}
+        />
+        <RmuxTerminalStack
+          tabs={rmuxTabs}
+          activeId={activeId}
+          registerHandle={registerTerminalHandle}
+          onSearchReady={onSearchReady}
+          onCwd={onTerminalCwd}
+          onExit={onLeafExit}
+          onFocusLeaf={onFocusLeaf}
+          onClosePane={onClosePane}
+          onAttached={onRmuxAttached}
         />
       </TabLayer>
       <TabLayer visible={activeKind === "editor"} padded>

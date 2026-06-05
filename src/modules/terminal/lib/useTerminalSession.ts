@@ -82,6 +82,25 @@ export function unmarkRmuxLeaf(leafId: number): void {
   rmuxLeaves.delete(leafId);
 }
 
+// Leaves whose eager pty open must be SUPPRESSED so a later reattachSession can
+// win. The reattach race: ensureSession eager-opens a local pty the instant a
+// TerminalPane mounts, and reattachSession bails on a leaf that already has one
+// (`if (s.pty || s.ptyOpening) return false`). For an attach-destined leaf the
+// RmuxTerminalStack marks it deferred BEFORE the pane mounts; openPtyEagerly
+// then skips the local spawn, leaving the leaf pty-less until reattachSession
+// wires the daemon pane in. reattachSession un-defers on success OR failure, so
+// a daemon-gone leaf falls back to a normal local open on its next attach pass
+// (no dead blank pane). Empty by default — the in-process path never touches it.
+const deferredLeaves = new Set<number>();
+
+export function markDeferredLeaf(leafId: number): void {
+  deferredLeaves.add(leafId);
+}
+
+export function unmarkDeferredLeaf(leafId: number): void {
+  deferredLeaves.delete(leafId);
+}
+
 const readyLeaves = new Set<number>();
 const readyWaiters = new Map<
   number,
@@ -190,6 +209,14 @@ export function clearFocusedTerminal(): boolean {
   return false;
 }
 
+// True once a leaf's Session object exists (its TerminalPane has mounted and run
+// ensureSession). Used by the rmux reattach retry to tell "pane not mounted yet"
+// (retry) apart from a real reattach failure (stop), since reattachSession
+// returns false for both.
+export function hasSession(leafId: number): boolean {
+  return sessions.has(leafId);
+}
+
 export function leafIdForPty(ptyId: number): number | null {
   for (const [leafId, s] of sessions) {
     if (s.pty?.id === ptyId) return leafId;
@@ -296,6 +323,11 @@ function ensureSession(leafId: number, initialCwd?: string): Session {
 // attachSession's own open guard (both check pty/ptyOpening/shellExited).
 function openPtyEagerly(leafId: number, s: Session): void {
   if (s.pty || s.ptyOpening || s.shellExited) return;
+  // Attach-destined leaf: skip the local spawn so reattachSession (which refuses
+  // a leaf that already has a pty) can wire the daemon pane in instead. The
+  // deferral is lifted by reattachSession on success or failure, so a leaf that
+  // never gets reattached still opens normally the next time attachSession runs.
+  if (deferredLeaves.has(leafId)) return;
   s.ptyOpening = true;
   openPtyForSession(leafId, s, s.initialCwd)
     .then((pty) => {
@@ -409,6 +441,11 @@ export async function reattachSession(
   daemonPaneId: number,
 ): Promise<boolean> {
   const s = sessions.get(leafId);
+  // Lift the eager-open deferral up front: from here on the leaf either gets the
+  // daemon pane wired in (success) or must be free to open a local shell on its
+  // next attach pass (every failure path below). Leaving it deferred would strand
+  // the leaf as a permanently blank pane — the explicit daemon-gone fallback.
+  unmarkDeferredLeaf(leafId);
   if (!s || s.disposed) return false;
   markRmuxLeaf(leafId);
   if (s.pty || s.ptyOpening) return false;
@@ -429,6 +466,13 @@ export async function reattachSession(
   } catch (e) {
     s.ptyOpening = false;
     console.error("[terax] reattach attachExistingPty failed:", e);
+    // Daemon-gone fallback: the pane we meant to reattach is unreachable, so
+    // drop the rmux mark (no daemon pane to detach to) and open a normal local
+    // shell now. Without this the leaf would sit blank — its eager open was
+    // deferred for an attach that just failed. unmarkDeferredLeaf already ran,
+    // so openPtyEagerly spawns instead of skipping.
+    unmarkRmuxLeaf(leafId);
+    openPtyEagerly(leafId, s);
     return false;
   }
   s.ptyOpening = false;
@@ -540,7 +584,11 @@ function attachSession(
   // re-acquire an already-bound slot.
   if (s.visibleNow && !s.hasSlot) bindLeafToSlot(leafId, s);
 
-  if (!s.pty && !s.ptyOpening && !s.shellExited) {
+  // Same deferral as openPtyEagerly: an attach-destined leaf must not spawn a
+  // local pty here either (attachSession runs again when the pane becomes
+  // visible), or it would beat reattachSession to the punch. reattachSession
+  // un-defers, so a never-reattached leaf opens on the following attach pass.
+  if (!s.pty && !s.ptyOpening && !s.shellExited && !deferredLeaves.has(leafId)) {
     s.ptyOpening = true;
     openPtyForSession(leafId, s, s.initialCwd)
       .then((pty) => {

@@ -4,6 +4,7 @@ import { AppDialogs } from "./components/AppDialogs";
 import { AppLayout } from "./components/AppLayout";
 import { AppRightSidebar } from "./components/AppRightSidebar";
 import { AppSidebar } from "./components/AppSidebar";
+import { RmuxMessagesCoordinator } from "./components/RmuxMessagesCoordinator";
 import { RmuxSessionsCoordinator } from "./components/RmuxSessionsCoordinator";
 import { useAgentLaunchers } from "./hooks/useAgentLaunchers";
 import { useAiActions } from "./hooks/useAiActions";
@@ -62,12 +63,10 @@ import {
   findLeafCwd,
   hasLeaf,
   leafIds,
-  reattachSession,
   respawnSession,
-  whenSessionReady,
   type TerminalPaneHandle,
 } from "@/modules/terminal";
-import { type Session as RmuxSession } from "@/modules/terminal-rmux";
+import { activeWindow, type Session as RmuxSession } from "@/modules/terminal-rmux";
 import { ThemeProvider } from "@/modules/theme";
 import {
   getWslHome,
@@ -97,6 +96,7 @@ export default function App() {
     setActiveId,
     newTab,
     newAgentTab,
+    newRmuxAttachTab,
     newGridTab,
     newDuoTab,
     newPrivateTab,
@@ -595,41 +595,35 @@ export default function App() {
     [newTab],
   );
 
-  // Attach an rmux session into a terminal tab (#132). HONEST SCOPE: this opens
-  // a fresh terminal tab and best-effort calls reattachSession once the leaf is
-  // ready. Today the main workspace renders the IN-PROCESS TerminalStack, whose
-  // leaves eagerly open their own pty; reattachSession refuses a leaf that
-  // already has a pty (see useTerminalSession), so against this stack the call
-  // is a no-op and the new tab is just a normal local shell. A working
-  // end-to-end attach needs the tab routed through RmuxTerminalStack (#131),
-  // which marks the leaf rmux and defers its pty so the reattach wins. Wiring
-  // that stack switch into TabStackRouter is the follow-up; this handler is the
-  // seam the switcher calls so that follow-up is a localized change here.
+  // Attach an rmux session into a live terminal tab (#133). Opens an rmux tab
+  // (routed to RmuxTerminalStack) whose single leaf reattaches a SURVIVING
+  // daemon pane instead of spawning a fresh local shell. The mechanism: the tab
+  // carries `pendingAttach = <pane id>` and the `rmux` flag; the stack defers the
+  // leaf's eager pty open and calls reattachSession, which now wins the race that
+  // made the old #132 path a no-op. `onRmuxAttached` clears pendingAttach once
+  // consumed.
+  //
+  // The switcher passes a concrete `daemonPaneId`; we prefer it and fall back to
+  // the session's first window's first pane only if it's somehow 0/missing.
   const attachRmuxSession = useCallback(
     (session: RmuxSession, daemonPaneId: number) => {
-      const tabId = newTab(inheritedCwdForNewTab());
-      const tab = tabsRef.current.find((x) => x.id === tabId);
-      // tabsRef is updated synchronously by useTabs' reducer ref, but the new
-      // tab may not be visible until the next tick; resolve its leaf via a
-      // microtask fallback.
-      const leafId =
-        tab && tab.kind === "terminal" ? tab.activeLeafId : undefined;
-      if (leafId === undefined) return;
-      void (async () => {
-        await whenSessionReady(leafId);
-        const ok = await reattachSession(leafId, daemonPaneId);
-        if (!ok) {
-          // Expected against the in-process stack (the leaf already has a pty).
-          // The tab still opened as a local shell; flag it so the gap is visible
-          // rather than silently swallowed.
-          console.warn(
-            `[terax] rmux attach no-op for session ${session.session_id} pane ${daemonPaneId}: ` +
-              "leaf already has a pty (in-process stack). Needs RmuxTerminalStack routing.",
-          );
-        }
-      })();
+      const paneId =
+        daemonPaneId || activeWindow(session)?.panes[0]?.pane_id;
+      if (paneId === undefined) return;
+      const title =
+        session.name ?? `session ${session.session_id}`;
+      newRmuxAttachTab(inheritedCwdForNewTab(), title, paneId);
     },
-    [newTab, inheritedCwdForNewTab],
+    [newRmuxAttachTab, inheritedCwdForNewTab],
+  );
+
+  // Clear a tab's pendingAttach once RmuxTerminalStack has wired (or fallen back
+  // on) the daemon pane, so the attach can't re-fire on a later re-render.
+  const handleRmuxAttached = useCallback(
+    (tabId: number, _leafId: number) => {
+      updateTab(tabId, { pendingAttach: null });
+    },
+    [updateTab],
   );
 
   // Open a project in the current window: pin the explorer to the project
@@ -1065,6 +1059,7 @@ export default function App() {
       onLeafExit={handleLeafExit}
       onFocusLeaf={handleFocusLeaf}
       onClosePane={closePaneByLeaf}
+      onRmuxAttached={handleRmuxAttached}
       registerEditorHandle={registerEditorHandle}
       onEditorDirty={handleEditorDirty}
       onCloseEditorTab={disposeTab}
@@ -1220,6 +1215,12 @@ export default function App() {
               flag off it is invisible and inert. See the component for the gate
               and attachRmuxSession for the honest attach scope. */}
           <RmuxSessionsCoordinator onAttach={attachRmuxSession} />
+
+          {/* rmux message-bus coordinator (#138). Fully self-contained: own
+              store, own live `terax:rmux-message` subscription, own daemon gate
+              (invisible until a delivered publish / inbox read / received event
+              proves a connected daemon). One-line mount, no props. */}
+          <RmuxMessagesCoordinator />
 
           <AppDialogs
             tabs={tabs}
