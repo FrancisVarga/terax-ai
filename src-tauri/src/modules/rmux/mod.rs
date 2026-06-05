@@ -9,10 +9,13 @@
 //! `u32` id, output still arrives on the same `Channel<Response>`, and agent
 //! signals still emit `terax:agent-signal`.
 //!
-//! The flag (`TERAX_RMUX_DAEMON=1`) defaults OFF, so the default dev/release path
-//! is unchanged. When ON but the daemon binary is not staged next to the app exe
-//! (the dev case — staging is #111), connection fails and `pty_open` falls back
-//! to the in-process path. Nothing about flag-on is allowed to break an open.
+//! Daemon forwarding defaults ON in every build so shipped desktop users get
+//! session survival with no configuration; `TERAX_RMUX_DAEMON=0` is the explicit
+//! kill-switch back to the in-process path. When ON but the daemon binary is not
+//! staged next to the app exe, `ensure_connected` fails and `pty_open` silently
+//! falls back to the in-process path — so the default-on flip can never break an
+//! open. In a release bundle the `rmux-daemon` sidecar IS staged (it's a Tauri
+//! `externalBin`, see tauri.conf.json), so a shipped build genuinely uses it.
 //!
 //! Lifetime note: unlike the otel sidecar, the daemon child is deliberately NOT
 //! killed on app shutdown — surviving Terax is the whole point. Phase 3 owns the
@@ -37,18 +40,26 @@ use crate::modules::sync::MutexExt;
 /// `externalBin` is #111; until then `find_sidecar` returns `None` in dev.
 const SIDECAR_BASE: &str = "rmux-daemon";
 
-/// Env var that turns daemon forwarding on. Any value other than exactly "1" is
-/// treated as off, so the default (unset) keeps the in-process path.
+/// Env var that turns daemon forwarding OFF. Daemon forwarding now defaults ON
+/// in every build (so shipped desktop users get session survival without setting
+/// anything), and this env var is the kill-switch: set it to exactly "0" to force
+/// the in-process path (debugging, or opting a machine out). Any other value (or
+/// unset) leaves the daemon path enabled.
 const FLAG_ENV: &str = "TERAX_RMUX_DAEMON";
 
 /// How long to wait for the daemon to print its `listening port=NNNN` line on
 /// stdout before giving up and falling back to in-process.
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// True when daemon forwarding is enabled for this process. Read per-call (cheap
-/// env lookup) so the flag can be toggled without a rebuild.
+/// True when daemon forwarding is enabled for this process. Defaults ON so a
+/// shipped build gets session survival with no env var; `TERAX_RMUX_DAEMON=0` is
+/// the explicit kill-switch (forces the in-process path). Read per-call (cheap
+/// env lookup) so the toggle takes effect without a rebuild. Note: even when ON,
+/// `ensure_connected` silently falls back to in-process if the `rmux-daemon`
+/// sidecar binary is not staged next to the app exe, so flipping this default
+/// can never break opening a terminal.
 pub fn daemon_enabled() -> bool {
-    std::env::var(FLAG_ENV).is_ok_and(|v| v == "1")
+    !std::env::var(FLAG_ENV).is_ok_and(|v| v == "0")
 }
 
 /// A connected daemon: its loopback base URL and the child handle. The child is
