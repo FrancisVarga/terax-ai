@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
 import {
   AiBrain01Icon,
+  ArrowDown01Icon,
   Cancel01Icon,
   ChartLineData01Icon,
   Clock01Icon,
@@ -81,6 +82,10 @@ type Props = {
   onOpenCcusage: () => void;
   onOpenGithubFeed: () => void;
   onClose: (id: number) => void;
+  /** Close every tab except `id` (right-click → Close others). */
+  onCloseOthers: (id: number) => void;
+  /** Close all tabs but the surviving home tab (right-click → Close all). */
+  onCloseAll: (id: number) => void;
   /** Pin (promote) a preview tab to persistent on double-click. */
   onPin: (id: number) => void;
   /** Drag-reorder: move tab `fromId` into the slot of `toId`. */
@@ -106,6 +111,8 @@ export function TabBar({
   onOpenCcusage,
   onOpenGithubFeed,
   onClose,
+  onCloseOthers,
+  onCloseAll,
   onPin,
   onReorder,
   compact,
@@ -116,6 +123,17 @@ export function TabBar({
   // dragOverId drives the drop-indicator styling; both reset on drag end.
   const dragIdRef = useRef<number | null>(null);
   const [dragOverId, setDragOverId] = useState<number | null>(null);
+  // True when the strip can't fit every tab, so some scroll off-screen. The
+  // scrollbar is hidden by design, so without this we'd leave overflow tabs
+  // unreachable; it gates the "all tabs" overflow dropdown into view.
+  const [isOverflowing, setIsOverflowing] = useState(false);
+  // Right-click tab context menu: the tab id it targets and where to anchor it.
+  // A single shared menu (rather than one per tab) keeps the per-tab
+  // `MotionTabsTrigger` as AnimatePresence's direct child — wrapping each tab in
+  // a Radix ContextMenu broke both tab selection and the menu's own actions.
+  const [menu, setMenu] = useState<{ id: number; x: number; y: number } | null>(
+    null,
+  );
 
   // Horizontal wheel scroll without holding shift.
   useEffect(() => {
@@ -130,6 +148,22 @@ export function TabBar({
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
+
+  // Track overflow so the jump-to-tab dropdown only appears when it's needed.
+  // ResizeObserver on the scroll container catches both window resizes and the
+  // content growing/shrinking as tabs open and close.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const measure = () =>
+      setIsOverflowing(el.scrollWidth > el.clientWidth + 1);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    const inner = el.firstElementChild;
+    if (inner) ro.observe(inner);
+    return () => ro.disconnect();
+  }, [tabs.length]);
 
   // Keep the active tab visible after selection / open.
   useEffect(() => {
@@ -195,6 +229,10 @@ export function TabBar({
                   key={t.id}
                   value={String(t.id)}
                   data-tab-id={t.id}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setMenu({ id: t.id, x: e.clientX, y: e.clientY });
+                  }}
                   // Enter: fade + grow from a hair narrower so a freshly opened
                   // tab eases in instead of snapping. Exit: collapse width to 0
                   // so the surviving tabs slide left to fill the gap. Reduced
@@ -389,7 +427,119 @@ export function TabBar({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        {/* Jump-to-tab overflow menu. Only mounts when the strip overflows —
+            the scrollbar is hidden, so this is the discoverable path to tabs
+            that have scrolled off-screen. Lists every tab; selecting one
+            activates it and scrolls it back into view. */}
+        {isOverflowing && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+                title="All tabs"
+              >
+                <HugeiconsIcon
+                  icon={ArrowDown01Icon}
+                  size={14}
+                  strokeWidth={2}
+                />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="max-h-80 min-w-52 overflow-y-auto">
+              <DropdownMenuLabel>Tabs ({tabs.length})</DropdownMenuLabel>
+              {tabs.map((t) => (
+                <DropdownMenuItem
+                  key={t.id}
+                  onSelect={() => {
+                    onSelect(t.id);
+                    // Defer until the selection re-render lands so the target
+                    // tab exists at its final position before scrolling.
+                    requestAnimationFrame(() => {
+                      scrollRef.current
+                        ?.querySelector<HTMLElement>(`[data-tab-id="${t.id}"]`)
+                        ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+                    });
+                  }}
+                  className={cn(
+                    t.id === activeId && "bg-accent/60 font-medium",
+                  )}
+                >
+                  <TabIcon tab={t} />
+                  <span className="flex-1 truncate">{labelFor(t)}</span>
+                  {tabs.length > 1 && (
+                    <span
+                      role="button"
+                      aria-label="Close tab"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onClose(t.id);
+                      }}
+                      className="ml-1 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                    >
+                      <HugeiconsIcon
+                        icon={Cancel01Icon}
+                        size={11}
+                        strokeWidth={2}
+                      />
+                    </span>
+                  )}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
       </div>
+      {/* Shared right-click tab menu. Rendered once and anchored to the cursor
+          via a zero-size fixed trigger, so the per-tab triggers stay simple
+          (just an onContextMenu that sets `menu`). Controlled open state closes
+          it on action or outside-click. */}
+      <DropdownMenu
+        open={menu !== null}
+        onOpenChange={(o) => {
+          if (!o) setMenu(null);
+        }}
+      >
+        <DropdownMenuTrigger asChild>
+          <span
+            aria-hidden
+            className="pointer-events-none fixed"
+            style={{ left: menu?.x ?? 0, top: menu?.y ?? 0 }}
+          />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="start"
+          className="min-w-44"
+          onCloseAutoFocus={(e) => e.preventDefault()}
+        >
+          <DropdownMenuItem
+            onSelect={() => {
+              if (menu) onClose(menu.id);
+            }}
+          >
+            Close
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            disabled={tabs.length <= 1}
+            onSelect={() => {
+              if (menu) onCloseOthers(menu.id);
+            }}
+          >
+            Close others
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            disabled={tabs.length <= 1}
+            onSelect={() => {
+              if (menu) onCloseAll(menu.id);
+            }}
+          >
+            Close all
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }

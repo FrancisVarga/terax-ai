@@ -71,7 +71,12 @@ export function AppLayout({
           collapsible
           collapsedSize={0}
           onResize={(size) => {
-            if (size.inPixels > 0) onSidebarResize(size.inPixels);
+            // Only persist genuine user widths. During a collapse animation the
+            // panel passes through tiny non-zero widths (e.g. 1px); those used
+            // to slip past a `> 0` guard and poison the stored width, so the
+            // next toggle re-opened to 1px (clamped back to collapsed → "won't
+            // open"). Anything below the min is never a real width.
+            if (size.inPixels >= SIDEBAR_MIN_WIDTH) onSidebarResize(size.inPixels);
           }}
         >
           {sidebar}
@@ -93,7 +98,10 @@ export function AppLayout({
           collapsible
           collapsedSize={0}
           onResize={(size) => {
-            if (size.inPixels > 0) onRightSidebarResize(size.inPixels);
+            // See the left sidebar's onResize: ignore sub-min widths emitted
+            // mid-collapse so the stored/reopen width never decays below the min.
+            if (size.inPixels >= RIGHT_SIDEBAR_MIN_WIDTH)
+              onRightSidebarResize(size.inPixels);
           }}
         >
           {rightSidebar}

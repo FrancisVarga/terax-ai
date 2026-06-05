@@ -124,6 +124,8 @@ export default function App() {
     openCommitHistoryTab,
     openCommitFileDiffTab,
     closeTab,
+    closeOtherTabs,
+    closeAllTabs,
     reorderTab,
     updateTab,
     selectByIndex,
@@ -471,6 +473,38 @@ export default function App() {
     [closeTab],
   );
 
+  // Context-menu bulk closes. Prune the tab-id-keyed handles for every removed
+  // tab (the same cleanup `disposeTab` does for one), then delegate the tab/PTY
+  // teardown to the hook. PTY leaf disposal + active-tab reassignment live in
+  // the hook; here we only clear the editor/preview ref maps.
+  const disposeOtherTabs = useCallback(
+    (keepId: number) => {
+      for (const t of tabs) {
+        if (t.id === keepId) continue;
+        editorRefs.current.delete(t.id);
+        previewRefs.current.delete(t.id);
+      }
+      closeOtherTabs(keepId);
+    },
+    [tabs, closeOtherTabs],
+  );
+
+  const disposeAllTabs = useCallback(
+    (fallbackId: number) => {
+      // The hook keeps the Projects tab when present, else `fallbackId`. Mirror
+      // that survivor choice so we don't prune the kept tab's refs.
+      const survivorId =
+        tabs.find((t) => t.kind === "projects")?.id ?? fallbackId;
+      for (const t of tabs) {
+        if (t.id === survivorId) continue;
+        editorRefs.current.delete(t.id);
+        previewRefs.current.delete(t.id);
+      }
+      closeAllTabs(fallbackId);
+    },
+    [tabs, closeAllTabs],
+  );
+
   // Drives session disposal off the pane tree, not React lifecycles —
   // split/unsplit re-mount components but the leaf is still live.
   const liveLeavesRef = useRef<Set<number>>(new Set());
@@ -501,6 +535,19 @@ export default function App() {
       disposeTab(id);
     },
     [tabs, disposeTab],
+  );
+
+  // Tab context-menu bulk closes. Unlike single close these don't gate on dirty
+  // editors — bulk close is an explicit, deliberate action — so unsaved editor
+  // tabs in the set are closed without a per-tab prompt.
+  const handleCloseOthers = useCallback(
+    (id: number) => disposeOtherTabs(id),
+    [disposeOtherTabs],
+  );
+
+  const handleCloseAll = useCallback(
+    (id: number) => disposeAllTabs(id),
+    [disposeAllTabs],
   );
 
   const confirmClose = useCallback(() => {
@@ -1123,6 +1170,8 @@ export default function App() {
             onOpenCcusage={() => openCcusageTab()}
             onOpenGithubFeed={() => openGithubFeedTab()}
             onClose={handleClose}
+            onCloseOthers={handleCloseOthers}
+            onCloseAll={handleCloseAll}
             onPin={pinTab}
             onReorder={reorderTab}
             onToggleSidebar={toggleSidebar}

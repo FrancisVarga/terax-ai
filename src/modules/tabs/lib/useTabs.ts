@@ -1184,6 +1184,47 @@ export function useTabs(
     for (const lid of toDispose) disposeSession(lid);
   }, []);
 
+  // Close every tab EXCEPT `keepId`. The kept tab becomes active. Disposes the
+  // PTY sessions of every terminal tab being removed (same per-leaf cleanup as
+  // `closeTab`, aggregated across all closed tabs so no shell leaks).
+  const closeOtherTabs = useCallback((keepId: number) => {
+    let toDispose: number[] = [];
+    setTabs((curr) => {
+      if (curr.length <= 1) return curr;
+      const keep = curr.find((t) => t.id === keepId);
+      if (!keep) return curr;
+      toDispose = curr.flatMap((t) =>
+        t.id !== keepId && t.kind === "terminal" ? leafIds(t.paneTree) : [],
+      );
+      setActiveId(keepId);
+      return [keep];
+    });
+    for (const lid of toDispose) disposeSession(lid);
+  }, []);
+
+  // Close all tabs but one (the list can never be empty). Keeps the Projects
+  // dashboard (id 1, no PTY) when present so the user lands on "home"; otherwise
+  // falls back to keeping `fallbackId` (the right-clicked tab). Disposes every
+  // removed terminal tab's PTY sessions.
+  const closeAllTabs = useCallback((fallbackId: number) => {
+    let toDispose: number[] = [];
+    setTabs((curr) => {
+      if (curr.length <= 1) return curr;
+      const survivor =
+        curr.find((t) => t.kind === "projects") ??
+        curr.find((t) => t.id === fallbackId) ??
+        curr[0];
+      toDispose = curr.flatMap((t) =>
+        t.id !== survivor.id && t.kind === "terminal"
+          ? leafIds(t.paneTree)
+          : [],
+      );
+      setActiveId(survivor.id);
+      return [survivor];
+    });
+    for (const lid of toDispose) disposeSession(lid);
+  }, []);
+
   const updateTab = useCallback((id: number, patch: TabPatch) => {
     setTabs((t) =>
       t.map((x) => {
@@ -1468,6 +1509,8 @@ export function useTabs(
     setAiDiffStatus,
     closeAiDiffTab,
     closeTab,
+    closeOtherTabs,
+    closeAllTabs,
     reorderTab,
     updateTab,
     selectByIndex,
