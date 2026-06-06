@@ -90,7 +90,7 @@ export const SHORTCUTS: Shortcut[] = [
     id: "commandPopup.open",
     label: "Show all commands",
     group: "General",
-    defaultBindings: [{ ctrl: true, shift: true, key: "p" }],
+    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "p" }],
   },
   {
     id: "shortcuts.open",
@@ -171,13 +171,13 @@ export const SHORTCUTS: Shortcut[] = [
     id: "tab.next",
     label: "Next tab",
     group: "Tabs",
-    defaultBindings: [{ ctrl: true, key: "Tab" }],
+    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "]" }],
   },
   {
     id: "tab.prev",
     label: "Previous tab",
     group: "Tabs",
-    defaultBindings: [{ ctrl: true, shift: true, key: "Tab" }],
+    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "[" }],
   },
   {
     id: "tab.selectByIndex",
@@ -226,7 +226,7 @@ export const SHORTCUTS: Shortcut[] = [
     id: "claude.goldenDuo",
     label: "Claude Golden Duo (split screen, claude in both)",
     group: "AI",
-    defaultBindings: [{ ctrl: true, shift: true, key: "t" }],
+    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "t" }],
   },
   {
     id: "claude.team",
