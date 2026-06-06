@@ -28,6 +28,15 @@ type Binding = {
   nonce: string;
   /** Called with an `ssh://alias/abs/path` URI whenever the remote cwd changes. */
   onRemoteCwd: (uri: string) => void;
+  /**
+   * Set true the first time a valid OSC 7704 payload (matching this leaf's
+   * nonce) is seen — i.e. the injected hook actually reached the remote shell,
+   * installed, and echoed back. The injector polls this to stop re-typing the
+   * hook: the install is racy (the first attempt can land in the *local* shell
+   * before ssh has handed off stdin), so we retry until this acks. Defaults to
+   * false; never reset for the life of the binding.
+   */
+  acked?: boolean;
 };
 
 const bindings = new Map<number, Binding>();
@@ -52,6 +61,17 @@ export function unbindRemoteCwd(leafId: number): void {
 
 export function getRemoteCwdBinding(leafId: number): Binding | undefined {
   return bindings.get(leafId);
+}
+
+/**
+ * Mark a binding as acked — called from the OSC 7704 handler the first time a
+ * nonce-matching payload arrives, proving the injected hook reached the remote
+ * shell. The injector's retry loop polls `getRemoteCwdBinding(leafId)?.acked`
+ * to stop re-typing. No-op if the leaf has no binding (already unbound).
+ */
+export function markRemoteCwdAcked(leafId: number): void {
+  const b = bindings.get(leafId);
+  if (b) b.acked = true;
 }
 
 /**
@@ -80,33 +100,67 @@ export function decodeRemoteCwd(encoded: string): string | null {
 
 /**
  * The shell snippet typed into the remote ssh session to install the precmd
- * hook. POSIX-shell first (bash/sh), with a zsh `precmd` branch. Best-effort:
- * unknown shells, `su`/`sudo -i`, subshells, and nested `ssh` may not carry the
- * hook — the explorer simply stops following cwd in those cases.
+ * hook. Emits two self-guarded statements on one typed line:
+ *
+ *   1. a POSIX form  (bash / zsh / sh)  guarded by `if command -v od …; then`
+ *   2. a fish form   (fish ≥ 3)         guarded by `if set -q FISH_VERSION`
+ *
+ * Each shell parses only its own statement and errors benignly on the other
+ * (the non-matching block lives inside a single-quoted `eval` string, so it is
+ * never parsed by the wrong shell — at worst one "unknown command" line). This
+ * is best-effort: `su`/`sudo -i`, subshells, nested `ssh`, PowerShell or cmd
+ * remotes may not carry the hook — the explorer simply stops following cwd.
  *
  * The hook prints OSC 7704 with the leaf nonce and a percent-encoded `$PWD`.
- * Percent-encoding is done in-shell (od + sed over each byte) so paths with
- * spaces, `%`, or unicode round-trip through decodeURIComponent on the JS side.
+ * Percent-encoding is done in-shell (od + tr + sed over each byte) so paths
+ * with spaces, `%`, or unicode round-trip through decodeURIComponent on the JS
+ * side. The hook runs once on install (so the explorer follows immediately) and
+ * then on every subsequent prompt — that first echo is also the injector's ack
+ * that the hook reached the remote shell (see markRemoteCwdAcked / connectSsh).
+ *
+ * IMPORTANT: keep the install idempotent. The injector retries this command
+ * until the OSC 7704 ack arrives, so it may run 2–3× on the remote; re-defining
+ * the functions and the `*__terax_pwd7704*` PROMPT_COMMAND guard make repeats
+ * harmless.
  */
 export function buildRemoteCwdHookCommand(nonce: string): string {
-  // The hook body. Single logical line of POSIX shell. Uses only POSIX builtins
-  // + od/sed/tr in the bash/sh branch; a zsh-specific branch registers a
-  // precmd. `__terax_enc` percent-encodes $PWD byte-by-byte so it is locale-
-  // and charset-safe.
-  const body = [
+  // --- POSIX body (bash / zsh / sh). Single logical line. ---
+  const posixBody = [
     `__terax_enc(){ od -An -tx1 -v 2>/dev/null | tr -d ' \\n' | sed 's/../%&/g'; }`,
     `__terax_pwd7704(){ printf '\\033]7704;${nonce};%s\\033\\\\' "$(printf %s "$PWD" | __terax_enc)"; }`,
     `if [ -n "$ZSH_VERSION" ]; then autoload -Uz add-zsh-hook 2>/dev/null; add-zsh-hook precmd __terax_pwd7704 2>/dev/null || precmd_functions+=(__terax_pwd7704); else case "$PROMPT_COMMAND" in *__terax_pwd7704*) :;; *) PROMPT_COMMAND="__terax_pwd7704\${PROMPT_COMMAND:+; $PROMPT_COMMAND}";; esac; fi`,
     `__terax_pwd7704`,
   ].join("; ");
 
-  // Wrap the body as a single-quoted argument to `eval`, gated by a POSIX
-  // `command -v` shell check. The point is cross-shell safety: on a POSIX shell
-  // (bash/zsh/sh) this evaluates the body in the CURRENT shell (so the precmd
-  // hook persists, unlike `sh -c` which would run in a throwaway subshell). On
-  // PowerShell / cmd / fish the function-definition syntax `(){}` is never
-  // parsed — it lives inside the single-quoted string — so the worst case is a
-  // single "command not recognized" line instead of a multi-line ParserError.
-  const escaped = body.replace(/'/g, `'\\''`);
-  return `command -v od >/dev/null 2>&1 && eval '${escaped}'`;
+  // --- fish body. fish has no POSIX `(){}`/`[ ]`/`case`; uses function…end,
+  // `--on-event fish_prompt` for the precmd hook, and `string escape`-free
+  // percent-encoding via the same external od|tr|sed pipeline. ---
+  const fishBody = [
+    `function __terax_enc; od -An -tx1 -v 2>/dev/null | tr -d ' \\n' | sed 's/../%&/g'; end`,
+    `function __terax_pwd7704 --on-event fish_prompt; printf '\\033]7704;${nonce};%s\\033\\\\' (printf %s "$PWD" | __terax_enc); end`,
+    `__terax_pwd7704`,
+  ].join("; ");
+
+  // Each body is wrapped as a single-quoted `eval` argument so the *other*
+  // shell never parses the function-definition syntax — it stays inert inside
+  // the quoted string and at worst fails at *runtime* (eval can't parse it),
+  // which is recoverable, instead of aborting the whole command line at PARSE
+  // time. That distinction matters for fish: fish's parser is eager, so a
+  // `if … then … fi` POSIX block would parse-abort the entire line and the
+  // fish block (second statement) would never run. Using the `&&` form keeps
+  // both blocks parseable by both shells:
+  //   • POSIX shell: runs the POSIX eval (installs); the fish `… ; end` line
+  //     runs `set` (ok) then hits `end` as an unknown command — benign runtime
+  //     error, POSIX block already installed.
+  //   • fish: `command -v od && eval 'POSIX…'` runs, but eval'ing POSIX
+  //     `(){}` fails at runtime (harmless); then `set -q FISH_VERSION && eval
+  //     'fish…'` installs the fish hook.
+  // `eval` runs in the CURRENT shell so the hook persists (unlike `sh -c`, a
+  // throwaway subshell).
+  const posixEscaped = posixBody.replace(/'/g, `'\\''`);
+  // Inside fish single quotes only \' and \\ are special; escape both.
+  const fishEscaped = fishBody.replace(/\\/g, `\\\\`).replace(/'/g, `\\'`);
+  const posix = `command -v od >/dev/null 2>&1 && eval '${posixEscaped}'`;
+  const fish = `set -q FISH_VERSION && eval '${fishEscaped}'`;
+  return `${posix}; ${fish}`;
 }

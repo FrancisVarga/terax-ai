@@ -9,7 +9,11 @@ import {
   registerPromptTracker,
   registerRemoteCwdHandler,
 } from "./osc-handlers";
-import { decodeRemoteCwd, getRemoteCwdBinding } from "./remote-cwd";
+import {
+  decodeRemoteCwd,
+  getRemoteCwdBinding,
+  markRemoteCwdAcked,
+} from "./remote-cwd";
 import { remoteUri } from "@/modules/explorer/lib/remote";
 import { attachExistingPty, openPty, rmuxPaneOf, type PtySession } from "./pty-bridge";
 import {
@@ -598,6 +602,11 @@ function bindLeafToSlot(leafId: number, s: Session): void {
         if (!binding || binding.nonce !== nonce) return;
         const path = decodeRemoteCwd(encodedPath);
         if (!path) return;
+        // A nonce-matching payload proves the injected hook reached the remote
+        // shell and echoed back — tell the injector's retry loop to stop
+        // re-typing the hook (it can't otherwise know the install landed
+        // remote vs in the local shell during the ssh handshake race).
+        markRemoteCwdAcked(leafId);
         binding.onRemoteCwd(remoteUri(binding.alias, path));
       });
       return [prompt.dispose, cwd, remoteCwd];

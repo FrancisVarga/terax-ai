@@ -192,7 +192,7 @@ function MessagesPanel({
   }, [messages]);
 
   return (
-    <div className="flex max-h-[32rem] min-h-0 flex-col">
+    <div className="flex min-w-0 max-h-[32rem] min-h-0 flex-col">
       <InboxViewer messages={messages} onClear={() => void onAck(paneIds)} />
       <div className="border-t border-border/60" />
       <ComposeForm onPublish={onPublish} />

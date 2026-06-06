@@ -12,6 +12,7 @@ import {
 import {
   bindRemoteCwd,
   buildRemoteCwdHookCommand,
+  getRemoteCwdBinding,
   newRemoteCwdNonce,
   unbindRemoteCwd,
   whenSessionReady,
@@ -95,20 +96,49 @@ export function useRemoteSession({
         // common shell, whereas a POSIX `exec "$SHELL" -l` wrapper breaks on
         // PowerShell. `cd` runs inside whatever login shell ssh launched.
         writeToSession(leafId, `${sshCommandFor(host)}\r`);
-        // Install the remote precmd hook after the ssh session is up. We can't
-        // detect the remote prompt precisely (no remote integration), so wait a
-        // beat past the local handshake before typing the one-liner. If remote
-        // cwd sync never installs (unknown shell, slow/auth-prompting login),
-        // the explorer simply stays put and the user browses manually.
+        // Install the remote precmd hook after the ssh session is up. We CAN'T
+        // detect the remote prompt precisely (no remote shell integration), and
+        // a single fixed delay is unreliable: a slower-than-expected login
+        // (password/key prompt, network latency, starship/zsh init) means the
+        // hook is typed while the LOCAL shell still owns stdin — it then runs
+        // against e.g. Windows PowerShell ("The module '/g' could not be
+        // loaded", a BackgroundJob on localhost) instead of the remote shell.
+        //
+        // Instead of guessing, we retry: type the hook, and because the hook
+        // emits its OSC 7704 immediately on install, a nonce-matching payload
+        // coming back is proof it landed on the REMOTE shell. The OSC 7704
+        // handler sets `binding.acked` (see useTerminalSession). We poll that
+        // flag and stop re-typing once it flips. A bounded retry count means an
+        // unknown/non-POSIX remote (PowerShell, cmd) that never acks just stops
+        // trying after a few seconds — the explorer stays put, no infinite spam.
         const hook = buildRemoteCwdHookCommand(nonce);
-        setTimeout(() => {
-          if (remoteCwdLeafRef.current === leafId) {
-            writeToSession(leafId, `${hook}\r`);
-            if (targetPath && targetPath !== "/") {
-              writeToSession(leafId, `cd ${quoteShellArg(targetPath)}\r`);
+        const REMOTE_HOOK_RETRIES = 8;
+        const REMOTE_HOOK_INTERVAL_MS = 700;
+        // First settle past the ssh handshake before the initial attempt so the
+        // common (fast) case usually lands on attempt 1 without spraying the
+        // local shell. Later attempts cover slow logins.
+        let attempts = 0;
+        let cdSent = false;
+        const tryInstall = () => {
+          // Leaf gone, or a later connect re-bound this ref → abandon.
+          if (remoteCwdLeafRef.current !== leafId) return;
+          // Already proven on the remote → install the cd (once) and stop. An
+          // in-flight timer scheduled just before the ack can land here too, so
+          // `cdSent` guards against a double `cd`.
+          if (getRemoteCwdBinding(leafId)?.acked) {
+            if (!cdSent && targetPath && targetPath !== "/") {
+              cdSent = true;
+              // Remote path: always POSIX-quote regardless of the local OS.
+              writeToSession(leafId, `cd ${quoteShellArg(targetPath, false)}\r`);
             }
+            return;
           }
-        }, 1200);
+          if (attempts >= REMOTE_HOOK_RETRIES) return;
+          attempts += 1;
+          writeToSession(leafId, `${hook}\r`);
+          setTimeout(tryInstall, REMOTE_HOOK_INTERVAL_MS);
+        };
+        setTimeout(tryInstall, 1200);
       })();
 
       // 2. In parallel, bring up an SFTP session and point the explorer at the

@@ -24,6 +24,7 @@ export {
   unbindRemoteCwd,
   newRemoteCwdNonce,
   buildRemoteCwdHookCommand,
+  getRemoteCwdBinding,
 } from "./lib/remote-cwd";
 export {
   probeGpuStatus,

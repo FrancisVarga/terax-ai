@@ -4,6 +4,7 @@ import {
   buildRemoteCwdHookCommand,
   decodeRemoteCwd,
   getRemoteCwdBinding,
+  markRemoteCwdAcked,
   newRemoteCwdNonce,
   unbindRemoteCwd,
 } from "./remote-cwd";
@@ -50,6 +51,20 @@ describe("remote cwd bindings — leaf-scoped, lifecycle-bound", () => {
     unbindRemoteCwd(99);
     expect(getRemoteCwdBinding(99)).toBeUndefined();
   });
+
+  it("markRemoteCwdAcked flips the binding's acked flag (retry-loop signal)", () => {
+    const onRemoteCwd = vi.fn();
+    bindRemoteCwd(100, { alias: "box", nonce: "n1", onRemoteCwd });
+    expect(getRemoteCwdBinding(100)?.acked).toBeFalsy();
+    markRemoteCwdAcked(100);
+    expect(getRemoteCwdBinding(100)?.acked).toBe(true);
+    unbindRemoteCwd(100);
+  });
+
+  it("markRemoteCwdAcked is a no-op for an unbound leaf", () => {
+    expect(() => markRemoteCwdAcked(12345)).not.toThrow();
+    expect(getRemoteCwdBinding(12345)).toBeUndefined();
+  });
 });
 
 describe("newRemoteCwdNonce", () => {
@@ -66,5 +81,26 @@ describe("buildRemoteCwdHookCommand", () => {
     expect(cmd).toContain("7704;DEADBEEF;");
     expect(cmd).toContain("ZSH_VERSION"); // zsh branch present
     expect(cmd).toContain("PROMPT_COMMAND"); // bash/sh branch present
+  });
+
+  it("includes a fish branch guarded by FISH_VERSION", () => {
+    const cmd = buildRemoteCwdHookCommand("CAFE");
+    expect(cmd).toContain("set -q FISH_VERSION");
+    expect(cmd).toContain("--on-event fish_prompt"); // fish precmd equivalent
+    // The nonce must appear in both the POSIX and fish OSC 7704 emitters.
+    const occurrences = cmd.split("7704;CAFE;").length - 1;
+    expect(occurrences).toBe(2);
+  });
+
+  it("guards both blocks with the && form so fish doesn't parse-abort", () => {
+    const cmd = buildRemoteCwdHookCommand("X");
+    // The OUTER guards (the part fish/PowerShell actually parse) must be the
+    // `&&` form, not `if … then … fi`. An eager fish parser aborts the whole
+    // line on a top-level POSIX `if/then/fi`. (The zsh branch DOES use if/fi,
+    // but it lives inside the single-quoted eval string — never parsed by the
+    // wrong shell.)
+    expect(cmd).toContain("command -v od >/dev/null 2>&1 && eval '");
+    expect(cmd).toContain("set -q FISH_VERSION && eval '");
+    expect(cmd).not.toContain("if command -v od");
   });
 });
