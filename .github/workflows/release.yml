@@ -24,9 +24,18 @@ jobs:
           # `--features sql` compiles DuckDB into the release (CSV/Parquet SQL
           # editor). DuckDB is OFF by default so `tauri dev` skips its bundled
           # C++ amalgamation (issue #72); release builds opt back in here.
+          #
+          # The explicit `--target x86_64-pc-windows-msvc` (the host triple, so NOT
+          # a cross-compile) is what makes this row fast: the sidecar scripts build
+          # the 4 Rust sidecar crates into `target\<triple>\release\`, and without a
+          # matching `--target` here tauri-action would build terax into the bare
+          # `target\release\` — a DIFFERENT dir — so the whole shared dep tree
+          # (arrow/aws/russh/duckdb) compiled TWICE (~22m sidecars + ~33m tauri).
+          # Sharing one target dir collapses that to a single dep compile. The
+          # macOS rows already do this via their cross-compile targets.
           - platform: windows-latest
-            args: "--features sql"
-            rust-target: ""
+            args: "--features sql --target x86_64-pc-windows-msvc"
+            rust-target: "x86_64-pc-windows-msvc"
           # macOS Apple Silicon. macos-14 runners are arm64, so this is a native
           # build (no cross-compile). The explicit target makes the sidecar
           # output path deterministic and matches what the sidecar scripts stage.
