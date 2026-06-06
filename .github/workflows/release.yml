@@ -4,13 +4,15 @@ on:
   push:
     tags:
       - "v*"
-    # Build (but do not release) on main so swatinem/rust-cache populates a cache
-    # on the DEFAULT branch. GitHub Actions cache scope is per-ref: sibling v*
+    # Build (but do not release) on the DEFAULT branch (dev) so swatinem/rust-cache
+    # populates a cache there. GitHub Actions cache scope is per-ref: sibling v*
     # tags can't read each other's cache, but every ref (including each tag) CAN
-    # read the default-branch cache. Without this, each release recompiles the
-    # whole dep tree cold (~27m). The release step is gated on the tag ref below.
+    # read the default-branch cache. This MUST match the repo default branch (dev);
+    # warming a non-default branch is a silent no-op — tags only read down to the
+    # default. Without this, each release recompiles the whole dep tree cold (~55m
+    # on Windows, ~24m on macOS). The release step is gated on the tag ref below.
     branches:
-      - main
+      - dev
   workflow_dispatch:
 
 jobs:
@@ -138,8 +140,8 @@ jobs:
           # exhaust → 403. Pass the per-job token to lift the cap to 5000 req/hr.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # main-branch runs stop here: the cache is already populated above by the
-      # cargo compile that tauri-action would do, so on main we run a plain
+      # default-branch (dev) runs stop here: the cache is already populated above by
+      # the cargo compile that tauri-action would do, so on dev we run a plain
       # release build purely to warm the cache (no release artifacts/publish).
       # `--features sql` compiles DuckDB into release builds (the CSV/Parquet SQL
       # editor). It is OFF by default so `tauri dev` skips DuckDB's bundled C++
@@ -148,8 +150,8 @@ jobs:
       # cache this warms matches what tauri-action compiles on the tag run — the
       # Intel row cross-compiles x86_64, so warming the host arm64 cache would
       # miss. --no-bundle skips artifact creation; we only want the dep compile.
-      - name: Warm cache (main only, no release)
-        if: github.ref == 'refs/heads/main'
+      - name: Warm cache (default branch only, no release)
+        if: github.ref == 'refs/heads/dev'
         run: pnpm tauri build --no-bundle ${{ matrix.args }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
