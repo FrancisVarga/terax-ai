@@ -2,8 +2,8 @@ pub mod modules;
 
 use modules::sync::MutexExt;
 use modules::{
-    agent, agentscan, bunqueue, ccusage, cleanup, crash, docker, fs, git, gpu, kv, net, otel, pty,
-    rmux, s3, s3local, secrets, shell, ssh, workspace,
+    agent, agentscan, bunqueue, ccusage, cleanup, crash, docker, extfmt, fs, git, gpu, kv, net,
+    otel, pty, rmux, s3, s3local, secrets, shell, ssh, workspace,
 };
 use std::collections::HashMap;
 #[cfg(desktop)]
@@ -675,6 +675,7 @@ pub fn run() {
             fs::grep::fs_grep,
             fs::grep::fs_glob,
             fs::grep::fs_glob_rg,
+            extfmt::format_nix,
             git::commands::git_resolve_repo,
             git::commands::git_panel_snapshot,
             git::commands::git_status,

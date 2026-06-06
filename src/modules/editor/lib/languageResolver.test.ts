@@ -71,6 +71,43 @@ describe("resolveLanguage comment tokens (Ctrl+/ support)", () => {
     expect((await commentTokensFor("script.sh"))?.line).toBe("#");
   });
 
+  it("resolves a language for .nix files", async () => {
+    expect(await resolveLanguage("flake.nix")).not.toBeNull();
+    expect(await resolveLanguage("shell.nix")).not.toBeNull();
+  });
+
+  it("gives .nix files # line and /* */ block comment tokens", async () => {
+    const t = await commentTokensFor("default.nix");
+    expect(t?.line).toBe("#");
+    expect(t?.block).toEqual({ open: "/*", close: "*/" });
+  });
+
+  it("tokenizes a Nix sample without stalling (forward progress)", async () => {
+    // A StreamParser that ever returns a token without advancing the stream
+    // throws "Stream parser - no progress" inside highlightTree. Drive the
+    // resolved language over a sample touching strings, antiquotation, paths,
+    // multiline strings and comments to assert it always advances.
+    const { ensureSyntaxTree } = await import("@codemirror/language");
+    const ext = await resolveLanguage("flake.nix");
+    const doc = [
+      "# a comment",
+      "/* block",
+      "   comment */",
+      "{ pkgs ? import <nixpkgs> {} }:",
+      "rec {",
+      '  name = "hello-${pkgs.version}";',
+      "  src = ./src;",
+      "  text = ''",
+      "    multi ${line}",
+      "  '';",
+      "  flag = true;",
+      "}",
+    ].join("\n");
+    const state = EditorState.create({ doc, extensions: ext ? [ext] : [] });
+    // Force a full parse; throws if the parser stalls.
+    expect(() => ensureSyntaxTree(state, doc.length, 5000)).not.toThrow();
+  });
+
   it("falls back to # for unknown extensions (all regular files)", async () => {
     expect((await commentTokensFor("weird.xyzlang"))?.line).toBe("#");
   });

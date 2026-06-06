@@ -82,6 +82,133 @@ const batchLoader: LanguageLoader = () => Promise.resolve(batchParser);
 const iniLoader: LanguageLoader = () =>
   import("@codemirror/legacy-modes/mode/properties").then((m) => m.properties);
 
+// Nix has no legacy mode in @codemirror/legacy-modes and no @codemirror/lang-nix
+// pack ships in this repo, so this minimal StreamParser highlights the language's
+// core surface: `#` and `/* */` comments, the `let in rec inherit with …` keyword
+// set, `"..."` and `''...''` (multiline) strings with `${…}` antiquotation, paths
+// (`./x`, `/x`, `~/x`, `<nixpkgs>`), numbers, and attribute keys before `=`/`?`.
+// State carries the open string/comment kind across lines for multiline tokens.
+type NixState = {
+  // null = code; "dq" = inside "..."; "ind" = inside ''...''; "block" = /* */
+  mode: null | "dq" | "ind" | "block";
+};
+
+const NIX_KEYWORDS =
+  /^(?:let|in|rec|inherit|with|assert|if|then|else|or|import)\b/;
+const NIX_ATOMS = /^(?:true|false|null)\b/;
+
+type NixStream = {
+  eatSpace: () => boolean;
+  peek: () => string | void;
+  match: (re: RegExp | string, consume?: boolean) => unknown;
+  next: () => string | void;
+  skipToEnd: () => void;
+};
+
+// Scanner kept separate from the parser literal so the multiline modes
+// ("block", "dq", "ind") re-enter it cleanly at the start of each new line.
+function nixScan(stream: NixStream, state: NixState): string | null {
+  // Inside a block comment: consume until */ (may span more lines).
+  if (state.mode === "block") {
+    if (stream.match(/^.*?\*\//)) state.mode = null;
+    else stream.skipToEnd();
+    return "comment";
+  }
+  // Inside a double-quoted string: scan to the closing `"`, honoring `\`
+  // escapes. `${…}` antiquotation is kept inside the string token (not
+  // re-highlighted as code) — simpler and avoids zero-width token hangs.
+  if (state.mode === "dq") {
+    while (stream.peek() != null) {
+      if (stream.match(/^\\./)) continue; // escape
+      if (stream.match('"')) {
+        state.mode = null;
+        return "string";
+      }
+      stream.next();
+    }
+    return "string";
+  }
+  // Inside an indented string ''…'': `''` both escapes and terminates.
+  if (state.mode === "ind") {
+    while (stream.peek() != null) {
+      if (stream.match(/^''(?:\$|'|\\.)/)) continue; // ''$ ''' ''\ escapes
+      if (stream.match("''")) {
+        state.mode = null;
+        return "string";
+      }
+      stream.next();
+    }
+    return "string";
+  }
+
+  if (stream.eatSpace()) return null;
+
+  // Comments
+  if (stream.match(/^#.*/)) return "comment";
+  if (stream.match("/*")) {
+    state.mode = "block";
+    if (stream.match(/^.*?\*\//)) state.mode = null;
+    else stream.skipToEnd();
+    return "comment";
+  }
+
+  // Strings
+  if (stream.match('"')) {
+    state.mode = "dq";
+    return "string";
+  }
+  if (stream.match("''")) {
+    state.mode = "ind";
+    return "string";
+  }
+
+  // Antiquotation braces — surface them as operators; the body re-scans as code.
+  if (stream.match("${")) return "operator";
+
+  // Paths: ./x  ../x  /abs/x  ~/x  and search paths <nixpkgs>
+  if (stream.match(/^<[A-Za-z0-9._\-+/]+>/)) return "string";
+  if (stream.match(/^(?:[A-Za-z0-9._\-+]*)?\/[A-Za-z0-9._\-+/]+/)) {
+    return "string";
+  }
+
+  // Numbers (int + float)
+  if (stream.match(/^-?\d+(?:\.\d+)?/)) return "number";
+
+  // Keywords / atoms
+  if (stream.match(NIX_ATOMS)) return "atom";
+  if (stream.match(NIX_KEYWORDS)) return "keyword";
+
+  // `builtins` namespace
+  if (stream.match(/^builtins\b/)) return "variableName.standard";
+
+  // Identifiers — flag attribute keys (followed by `=` or `?`) as definitions.
+  const id = stream.match(/^[A-Za-z_][A-Za-z0-9_'-]*/) as RegExpMatchArray | null;
+  if (id) {
+    // Look ahead past spaces for an assignment to mark it as a property name.
+    const after = stream.match(/^\s*[=?]/, false);
+    return after ? "propertyName" : "variableName";
+  }
+
+  // Operators / punctuation
+  if (stream.match(/^(?:\|\||&&|==|!=|<=|>=|->|\+\+|\/\/|[-+*/<>=!?.:@])/)) {
+    return "operator";
+  }
+  if (stream.match(/^[{}()[\];,]/)) return null;
+
+  stream.next();
+  return null;
+}
+
+const nixParser = {
+  startState: (): NixState => ({ mode: null }),
+  token: nixScan,
+  languageData: {
+    commentTokens: { line: "#", block: { open: "/*", close: "*/" } },
+  },
+};
+
+const nixLoader: LanguageLoader = () => Promise.resolve(nixParser);
+
 /**
  * Extension → loader. Each loader is a dynamic import so language packs
  * only enter the bundle when a matching file is opened.
@@ -195,6 +322,9 @@ const loaders: Record<string, LanguageLoader> = {
   properties: propertiesLoader,
   editorconfig: propertiesLoader,
   gitconfig: propertiesLoader,
+
+  // Nix (hand-rolled StreamParser above; no upstream pack/legacy mode)
+  nix: nixLoader,
 
   // Misc legacy modes
   lua: () => import("@codemirror/legacy-modes/mode/lua").then((m) => m.lua),

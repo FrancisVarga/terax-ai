@@ -170,14 +170,16 @@ export function useAppShortcuts({
             }
             // Success feedback so the command never feels like a no-op — a file
             // that's already formatted otherwise gives zero signal. Distinguish
-            // the engine: Prettier (full reformat) vs CodeMirror reindent
-            // (fallback for languages Prettier can't parse).
-            toast.success(
+            // the engine: Prettier (full reformat), a native sidecar (nixfmt &
+            // co.), or CodeMirror reindent (fallback for languages neither can
+            // parse / when the native tool isn't installed).
+            const engineLabel =
               res.engine === "prettier"
                 ? "Formatted with Prettier"
-                : "Reindented",
-              { id: toastId },
-            );
+                : res.engine === "native"
+                  ? "Formatted"
+                  : "Reindented";
+            toast.success(engineLabel, { id: toastId });
           })
           .catch((e: unknown) => {
             clearTimeout(slow);

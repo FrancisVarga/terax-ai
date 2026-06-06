@@ -28,6 +28,7 @@ import { vscodeKeymap } from "./lib/vscodeKeymap";
 
 initVimGlobals();
 import { resolveLanguage } from "./lib/languageResolver";
+import { formatWithNative } from "./lib/extFormat";
 import { formatWithPrettierAsync } from "./lib/formatAsync";
 import { useDocument } from "./lib/useDocument";
 import { inlineCompletion } from "./lib/autocomplete/inlineExtension";
@@ -48,15 +49,16 @@ export type EditorPaneHandle = {
   undo: () => void;
   redo: () => void;
   /**
-   * Reformat the whole document. Uses Prettier for supported languages and
-   * falls back to CodeMirror's reindent for the rest. Resolves to a status so
-   * the caller can surface success/failure; never throws.
+   * Reformat the whole document. Uses Prettier for supported languages, a
+   * native sidecar formatter (e.g. nixfmt) for languages with no in-browser
+   * formatter, and falls back to CodeMirror's reindent for the rest. Resolves
+   * to a status so the caller can surface success/failure; never throws.
    */
   format: () => Promise<FormatResult>;
 };
 
 export type FormatResult =
-  | { ok: true; engine: "prettier" | "reindent" }
+  | { ok: true; engine: "prettier" | "native" | "reindent" }
   | { ok: false; message: string };
 
 type Props = {
@@ -285,24 +287,35 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
           if (!view) return { ok: false, message: "Editor not ready" };
 
           const source = view.state.doc.toString();
+
+          // Try Prettier first, then a native sidecar (e.g. nixfmt) for
+          // languages Prettier doesn't cover. Both share the same contract:
+          // a string = formatted, null = "not my language / tool absent"
+          // (fall through), a throw = the tool ran and failed (surface it).
           let formatted: string | null;
+          let engine: "prettier" | "native" = "prettier";
           try {
             formatted = await formatWithPrettierAsync(path, source);
+            if (formatted == null) {
+              formatted = await formatWithNative(path, source);
+              if (formatted != null) engine = "native";
+            }
           } catch (e) {
-            // Prettier throws on syntax errors — surface, don't clobber.
+            // Prettier/nixfmt throw on syntax errors — surface, don't clobber.
             return {
               ok: false,
               message: e instanceof Error ? e.message : String(e),
             };
           }
 
-          // The async import may outlive this pane; re-read the live view and
-          // bail if the buffer changed underneath us (avoid a stale overwrite).
+          // The async import/IPC may outlive this pane; re-read the live view
+          // and bail if the buffer changed underneath us (avoid a stale
+          // overwrite).
           const live = cmRef.current?.view;
           if (!live) return { ok: false, message: "Editor not ready" };
 
           if (formatted == null) {
-            // No Prettier parser for this language — reindent in place.
+            // No Prettier parser and no native formatter — reindent in place.
             indentSelection({ state: live.state, dispatch: live.dispatch });
             return { ok: true, engine: "reindent" };
           }
@@ -312,7 +325,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
           }
           if (formatted === source) {
             // Already formatted — no transaction, no dirty flag.
-            return { ok: true, engine: "prettier" };
+            return { ok: true, engine };
           }
 
           // Replace the whole doc in one transaction. This fires CodeMirror's
@@ -329,7 +342,7 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
             },
             scrollIntoView: true,
           });
-          return { ok: true, engine: "prettier" };
+          return { ok: true, engine };
         },
       }),
       [path],

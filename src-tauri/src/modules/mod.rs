@@ -5,6 +5,7 @@ pub mod ccusage;
 pub mod cleanup;
 pub mod crash;
 pub mod docker;
+pub mod extfmt;
 pub mod fs;
 pub mod git;
 pub mod gpu;
