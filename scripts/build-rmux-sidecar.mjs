@@ -47,7 +47,16 @@ function hostTriple() {
 }
 
 const argTriple = process.argv.find((a) => a.startsWith("--target="));
-const triple = argTriple ? argTriple.slice("--target=".length) : hostTriple();
+// Resolution order: explicit `--target=` flag wins; else the TERAX_SIDECAR_TARGET
+// env var (set so the pnpm `pretauri` hook — which tauri-action runs and we can't
+// pass CLI args to — builds the right triple on cross-compile rows); else host.
+// MUST mirror the sibling sidecar scripts: if rmux builds for the host triple
+// while bunqueue/otel/kv/localfs staged for the cross target, the terax build.rs
+// externalBin assertion (triggered by `cargo build -p rmux-daemon`) fails on the
+// peer sidecars that were never staged for rmux's host triple.
+const triple = argTriple
+  ? argTriple.slice("--target=".length)
+  : process.env.TERAX_SIDECAR_TARGET || hostTriple();
 
 if (!existsSync(OUT_DIR)) mkdirSync(OUT_DIR, { recursive: true });
 
