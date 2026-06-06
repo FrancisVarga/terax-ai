@@ -197,27 +197,38 @@ export function TabStackRouter({
   return (
     <div className="relative h-full min-h-0">
       <TabLayer visible={activeKind === "terminal"} padded>
-        <TerminalStack
-          tabs={inProcessTabs}
-          activeId={activeId}
-          registerHandle={registerTerminalHandle}
-          onSearchReady={onSearchReady}
-          onCwd={onTerminalCwd}
-          onExit={onLeafExit}
-          onFocusLeaf={onFocusLeaf}
-          onClosePane={onClosePane}
-        />
-        <RmuxTerminalStack
-          tabs={rmuxTabs}
-          activeId={activeId}
-          registerHandle={registerTerminalHandle}
-          onSearchReady={onSearchReady}
-          onCwd={onTerminalCwd}
-          onExit={onLeafExit}
-          onFocusLeaf={onFocusLeaf}
-          onClosePane={onClosePane}
-          onAttached={onRmuxAttached}
-        />
+        {/* Two sibling stacks (in-process + rmux) share this one layer. They
+            MUST overlap, not stack: each stack root is `h-full`, so in normal
+            flow they'd sum to 2× the layer height — the empty stack still
+            renders a full-height blank block — overflowing the absolute layer
+            and bubbling a scrollable "void" up to the workspace panel's
+            overflow:auto. Absolutely positioning both makes them occupy the
+            same box; only one holds the active tab's content at a time. */}
+        <div className="pointer-events-none absolute inset-0 [&_*]:pointer-events-auto">
+          <TerminalStack
+            tabs={inProcessTabs}
+            activeId={activeId}
+            registerHandle={registerTerminalHandle}
+            onSearchReady={onSearchReady}
+            onCwd={onTerminalCwd}
+            onExit={onLeafExit}
+            onFocusLeaf={onFocusLeaf}
+            onClosePane={onClosePane}
+          />
+        </div>
+        <div className="pointer-events-none absolute inset-0 [&_*]:pointer-events-auto">
+          <RmuxTerminalStack
+            tabs={rmuxTabs}
+            activeId={activeId}
+            registerHandle={registerTerminalHandle}
+            onSearchReady={onSearchReady}
+            onCwd={onTerminalCwd}
+            onExit={onLeafExit}
+            onFocusLeaf={onFocusLeaf}
+            onClosePane={onClosePane}
+            onAttached={onRmuxAttached}
+          />
+        </div>
       </TabLayer>
       <TabLayer visible={activeKind === "editor"} padded>
         <EditorStack

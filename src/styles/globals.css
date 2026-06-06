@@ -223,6 +223,10 @@ html[data-chrome="borderless"] #settings-root {
 .xterm-viewport {
   scrollbar-width: none !important;
   -ms-overflow-style: none !important;
+  /* Trap wheel momentum at the scroll boundary. Without this, scrolling past
+   * the last line chains to an ancestor scroll container, scrolling the whole
+   * terminal pane out of view ("scroll past the shell into the void"). */
+  overscroll-behavior: contain !important;
 }
 .xterm .xterm-viewport::-webkit-scrollbar,
 .xterm-viewport::-webkit-scrollbar {

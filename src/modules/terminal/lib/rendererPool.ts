@@ -284,6 +284,34 @@ function createSlot(): Slot {
 
 type PickResult = { slot: Slot; previousLeafId: number | null };
 
+// Fit the grid, then snap the host's height to the rendered grid height so the
+// xterm viewport has zero leftover px below the last row.
+//
+// Why this is needed: the host fills its container at height:100%, but the grid
+// is only rows*cellHeight tall. FitAddon floors rows, so the container is almost
+// never an exact multiple of the cell height — the remainder (0..cellHeight-1 px)
+// becomes empty space the .xterm-viewport can scroll into, letting the user
+// "scroll down past the shell" into a blank gap below the prompt. Pinning the
+// host to the measured .xterm-screen height removes that gap entirely, so the
+// viewport's scroll range matches the content exactly.
+function fitSlot(slot: Slot): void {
+  // Reset the host to fill its container BEFORE fitting. snapHostToGrid (below)
+  // pins host.height to a px grid height; left in place, the next fit would
+  // measure rows against that stale height instead of the real container box.
+  slot.host.style.height = "100%";
+  try {
+    slot.fitAddon.fit();
+  } catch {}
+  snapHostToGrid(slot);
+}
+
+function snapHostToGrid(slot: Slot): void {
+  const screen = slot.term.element?.querySelector<HTMLElement>(".xterm-screen");
+  if (!screen) return;
+  const gridH = screen.offsetHeight;
+  if (gridH > 0) slot.host.style.height = `${gridH}px`;
+}
+
 function isAltScreen(s: Slot): boolean {
   try {
     return s.term.buffer.active.type === "alternate";
@@ -468,7 +496,7 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   } catch {}
 
   setupResizeObserver(slot, p);
-  slot.fitAddon.fit();
+  fitSlot(slot);
   slot.lastCols = slot.term.cols;
   slot.lastRows = slot.term.rows;
   slot.lastW = p.container.clientWidth;
@@ -547,7 +575,7 @@ function rewireSlot(slot: Slot, p: AcquireParams): void {
     p.container.appendChild(slot.host);
   }
   setupResizeObserver(slot, p);
-  slot.fitAddon.fit();
+  fitSlot(slot);
   slot.lastW = p.container.clientWidth;
   slot.lastH = p.container.clientHeight;
   if (slot.term.cols !== p.cols || slot.term.rows !== p.rows) {
@@ -605,7 +633,7 @@ function setupResizeObserver(slot: Slot, p: AcquireParams): void {
       slot.lastW = w;
       slot.lastH = h;
       if (w <= 0 || h <= 0) return; // nothing to fit against yet
-      slot.fitAddon.fit();
+      fitSlot(slot);
       if (slot.ptyTimer) clearTimeout(slot.ptyTimer);
       slot.ptyTimer = setTimeout(flushPty, PTY_RESIZE_DEBOUNCE_MS);
     }, FIT_DEBOUNCE_MS);
@@ -846,7 +874,7 @@ export function applyFontSize(size: number): void {
   for (const slot of slots) {
     if (slot.term.options.fontSize === size) continue;
     slot.term.options.fontSize = size;
-    slot.fitAddon.fit();
+    fitSlot(slot);
     if (slot.currentLeafId !== null) {
       slot.lastCols = slot.term.cols;
       slot.lastRows = slot.term.rows;
@@ -860,7 +888,7 @@ export function applyLetterSpacing(spacing: number): void {
   for (const slot of slots) {
     if (slot.term.options.letterSpacing === spacing) continue;
     slot.term.options.letterSpacing = spacing;
-    slot.fitAddon.fit();
+    fitSlot(slot);
   }
 }
 
@@ -869,7 +897,7 @@ export function applyFontFamily(family: string): void {
   for (const slot of slots) {
     if (slot.term.options.fontFamily === resolved) continue;
     slot.term.options.fontFamily = resolved;
-    slot.fitAddon.fit();
+    fitSlot(slot);
     if (slot.currentLeafId !== null) {
       slot.lastCols = slot.term.cols;
       slot.lastRows = slot.term.rows;
@@ -909,9 +937,7 @@ export function focusSlot(leafId: number): void {
 export function refitLeaf(leafId: number): void {
   const slot = slots.find((s) => s.currentLeafId === leafId);
   if (!slot) return;
-  try {
-    slot.fitAddon.fit();
-  } catch {}
+  fitSlot(slot);
   if (slot.term.cols !== slot.lastCols || slot.term.rows !== slot.lastRows) {
     slot.lastCols = slot.term.cols;
     slot.lastRows = slot.term.rows;
