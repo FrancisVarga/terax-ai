@@ -16,7 +16,7 @@
     "preview": "vite preview",
     "pretauri": "node scripts/build-all-sidecars.mjs",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev",
+    "tauri:dev": "tauri dev -c src-tauri/tauri.conf.dev.json -- --bin terax-dbg",
     "tauri:build": "tauri build --features sql",
     "test": "vitest run",
     "test:watch": "vitest",
