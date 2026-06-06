@@ -11,7 +11,7 @@ import {
 } from "./osc-handlers";
 import { decodeRemoteCwd, getRemoteCwdBinding } from "./remote-cwd";
 import { remoteUri } from "@/modules/explorer/lib/remote";
-import { attachExistingPty, openPty, type PtySession } from "./pty-bridge";
+import { attachExistingPty, openPty, rmuxPaneOf, type PtySession } from "./pty-bridge";
 import {
   acquireSlot,
   applyBackgroundActive,
@@ -99,6 +99,60 @@ export function markDeferredLeaf(leafId: number): void {
 
 export function unmarkDeferredLeaf(leafId: number): void {
   deferredLeaves.delete(leafId);
+}
+
+// leafId -> daemon pane id, for rmux (daemon-backed) leaves only. Populated once
+// per leaf the moment its pty resolves (eager open in detach mode, OR a reattach)
+// — the daemon pane id is immutable for the life of the attach, so this is a
+// one-shot fetch, never a hot path. Empty for every in-process leaf. Read by the
+// titlebar (via RmuxTerminalStack's subscription) to label a pane with its
+// daemon pane id instead of the local leaf id.
+const daemonPanes = new Map<number, number>();
+const daemonPaneListeners = new Set<() => void>();
+// Monotonic version of the daemon-pane map, bumped on every real change. Serves
+// as the useSyncExternalStore snapshot: a number is referentially stable between
+// changes (a Map snapshot would tear-loop), and consumers read entries live via
+// getDaemonPane during render.
+let daemonPaneVersion = 0;
+
+function notifyDaemonPanes(): void {
+  daemonPaneVersion++;
+  for (const fn of daemonPaneListeners) fn();
+}
+
+export function getDaemonPane(leafId: number): number | undefined {
+  return daemonPanes.get(leafId);
+}
+
+export function daemonPanesVersion(): number {
+  return daemonPaneVersion;
+}
+
+// Subscribe to daemon-pane-map changes (add on attach, drop on dispose). Returns
+// an unsubscribe. Used by RmuxTerminalStack to mirror the map into render state.
+export function subscribeDaemonPanes(fn: () => void): () => void {
+  daemonPaneListeners.add(fn);
+  return () => {
+    daemonPaneListeners.delete(fn);
+  };
+}
+
+// Resolve and cache a leaf's daemon pane id from its live local pty id. No-op if
+// the leaf isn't daemon-backed (lookup returns null) or the value is unchanged.
+// Failures are swallowed: a missing label must never break the terminal.
+function refreshDaemonPane(leafId: number, localPtyId: number): void {
+  void rmuxPaneOf(localPtyId)
+    .then((paneId) => {
+      if (paneId === null) return;
+      if (daemonPanes.get(leafId) === paneId) return;
+      daemonPanes.set(leafId, paneId);
+      notifyDaemonPanes();
+    })
+    .catch(() => {});
+}
+
+function clearDaemonPane(leafId: number): void {
+  if (daemonPanes.delete(leafId)) notifyDaemonPanes();
 }
 
 const readyLeaves = new Set<number>();
@@ -339,6 +393,9 @@ function openPtyEagerly(leafId: number, s: Session): void {
       s.pty = pty;
       if (s.cols > 0 && s.rows > 0) pty.resize(s.cols, s.rows);
       flushInputQueue(s);
+      // Daemon-backed (detach-mode) opens forward to a daemon pane; cache its id
+      // for the titlebar. A normal local open returns null here and is ignored.
+      if (rmuxLeaves.has(leafId)) refreshDaemonPane(leafId, pty.id);
     })
     .catch((e) => {
       s.ptyOpening = false;
@@ -485,6 +542,10 @@ export async function reattachSession(
   s.pty = pty;
   if (s.cols > 0 && s.rows > 0) pty.resize(s.cols, s.rows);
   flushInputQueue(s);
+  // Cache the daemon pane id for the titlebar. We already know it (it's the arg),
+  // but resolve via the live pty mapping so a daemon-side remap can't desync the
+  // label — and so this path matches the eager-open path exactly.
+  refreshDaemonPane(leafId, pty.id);
   return true;
 }
 
@@ -669,6 +730,7 @@ export function disposeSession(leafId: number): void {
   writeQueues.delete(leafId);
   writeScheduled.delete(leafId);
   sessions.delete(leafId);
+  clearDaemonPane(leafId);
   readyLeaves.delete(leafId);
   const waiters = readyWaiters.get(leafId);
   if (waiters) {

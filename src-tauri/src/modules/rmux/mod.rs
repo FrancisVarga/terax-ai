@@ -898,6 +898,15 @@ pub fn rmux_inbox_ack(
     inbox_ack_forwarded(&rmux_state, pane_id, ids)
 }
 
+/// Resolve the daemon pane id a terax-facing pty id forwards to. Returns `None`
+/// for an in-process (non-daemon-backed) pty, or one whose mapping is gone
+/// (closed/detached). Read-only lookup over the live forward map — the frontend
+/// uses it once per rmux leaf to label its titlebar with the daemon pane id.
+#[tauri::command]
+pub fn rmux_pane_of(rmux_state: tauri::State<RmuxState>, id: u32) -> Option<u32> {
+    rmux_state.pane_of(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

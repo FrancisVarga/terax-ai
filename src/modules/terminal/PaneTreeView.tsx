@@ -32,6 +32,13 @@ type Props = {
    * tab stays chromeless.
    */
   split?: boolean;
+  /**
+   * Resolve a leaf's rmux daemon pane id for its titlebar badge. Supplied only
+   * by the daemon-backed stack (RmuxTerminalStack); the in-process TerminalStack
+   * omits it, so those panes fall back to showing the local leaf id. Returns
+   * undefined until the leaf's pty has resolved and reported its daemon pane.
+   */
+  daemonPaneId?: (leafId: number) => number | undefined;
 };
 
 export function PaneTreeView({
@@ -42,6 +49,7 @@ export function PaneTreeView({
   onClosePane,
   getBundle,
   split,
+  daemonPaneId,
 }: Props) {
   // Root call: derive split-ness once and recurse with it fixed.
   const isSplit = split ?? leafIds(node).length > 1;
@@ -51,6 +59,11 @@ export function PaneTreeView({
   if (node.kind === "leaf") {
     const focused = node.id === activeLeafId;
     const b = getBundle(node.id);
+    // Daemon-backed panes label with their rmux pane id (stable across detach/
+    // reattach, shared with the session switcher); in-process panes show their
+    // local leaf id. Undefined while an rmux pane's pty is still resolving — fall
+    // back to the leaf id so the badge is never blank.
+    const badgeId = daemonPaneId?.(node.id) ?? node.id;
     return (
       <motion.div
         // A freshly split pane fades + lifts in on mount. We deliberately do
@@ -87,7 +100,7 @@ export function PaneTreeView({
           >
             <span className="flex min-w-0 flex-1 items-center gap-1 truncate">
               <span className="shrink-0 font-mono text-[10px] tabular-nums opacity-60">
-                #{node.id}
+                #{badgeId}
               </span>
               <span className="min-w-0 truncate">
                 {paneTitle(node.id, node.cwd)}
@@ -142,6 +155,7 @@ export function PaneTreeView({
               onClosePane={onClosePane}
               getBundle={getBundle}
               split={isSplit}
+              daemonPaneId={daemonPaneId}
             />
           </ResizablePanel>
         </Fragment>

@@ -650,6 +650,7 @@ pub fn run() {
             modules::rmux::rmux_bus_publish,
             modules::rmux::rmux_inbox_list,
             modules::rmux::rmux_inbox_ack,
+            modules::rmux::rmux_pane_of,
             fs::tree::list_subdirs,
             fs::tree::fs_read_dir,
             fs::file::fs_read_file,

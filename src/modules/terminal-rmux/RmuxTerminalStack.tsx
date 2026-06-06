@@ -1,17 +1,28 @@
 import type { Tab } from "@/modules/tabs";
 import {
   PaneTreeView,
+  daemonPanesVersion,
+  getDaemonPane,
   hasSession,
   leafIds,
   markDeferredLeaf,
   markRmuxLeaf,
   reattachSession,
+  subscribeDaemonPanes,
   unmarkDeferredLeaf,
   unmarkRmuxLeaf,
   type TerminalPaneHandle,
 } from "@/modules/terminal";
 import type { SearchAddon } from "@xterm/addon-search";
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useSyncExternalStore,
+} from "react";
 import type { DaemonPaneId } from "./lib/rmux-client";
 
 type Props = {
@@ -120,6 +131,16 @@ export const RmuxTerminalStack = forwardRef<RmuxTerminalStackHandle, Props>(
       reattach: (leafId: number, daemonPaneId: DaemonPaneId) =>
         reattachSession(leafId, daemonPaneId),
     }),
+    [],
+  );
+
+  // Re-render this stack whenever a leaf's daemon pane id resolves or clears, so
+  // the titlebar badge can swap the local leaf id for the rmux daemon pane id.
+  // The snapshot is a monotonic version (stable between changes — a Map snapshot
+  // would tear-loop); the resolver below reads the live entry during render.
+  useSyncExternalStore(subscribeDaemonPanes, daemonPanesVersion);
+  const resolveDaemonPane = useCallback(
+    (leafId: number) => getDaemonPane(leafId),
     [],
   );
 
@@ -235,6 +256,7 @@ export const RmuxTerminalStack = forwardRef<RmuxTerminalStackHandle, Props>(
               onFocusLeaf={(leafId) => onFocusLeaf(t.id, leafId)}
               onClosePane={onClosePane}
               getBundle={getBundle}
+              daemonPaneId={resolveDaemonPane}
             />
           </div>
         );

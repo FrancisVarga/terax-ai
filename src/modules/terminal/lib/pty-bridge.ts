@@ -95,6 +95,14 @@ export async function attachExistingPty(
   return buildSession(id, "detach", releaseHandlers);
 }
 
+// Resolve the daemon pane id a local pty id forwards to. Returns null for an
+// in-process pty (no daemon mapping) or one whose mapping is gone. Used once per
+// rmux leaf to surface the daemon pane id in its titlebar — never on a hot path.
+export async function rmuxPaneOf(localPtyId: number): Promise<number | null> {
+  const paneId = await invoke<number | null>("rmux_pane_of", { id: localPtyId });
+  return paneId ?? null;
+}
+
 function buildSession(
   id: number,
   closeMode: CloseMode,

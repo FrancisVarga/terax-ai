@@ -3,7 +3,9 @@ export { TerminalStack } from "./TerminalStack";
 export { PaneTreeView } from "./PaneTreeView";
 export {
   clearFocusedTerminal,
+  daemonPanesVersion,
   disposeSession,
+  getDaemonPane,
   hasSession,
   injectCommand,
   leafIdForPty,
@@ -11,6 +13,7 @@ export {
   markRmuxLeaf,
   reattachSession,
   respawnSession,
+  subscribeDaemonPanes,
   unmarkDeferredLeaf,
   unmarkRmuxLeaf,
   whenSessionReady,
