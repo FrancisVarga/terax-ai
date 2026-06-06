@@ -59,3 +59,7 @@ src-tauri/.cargo/
 # Compiled Vite config artifacts (source is vite.config.ts)
 vite.config.js
 vite.config.d.ts
+
+# Bare Tauri prod exe (Cargo [[bin]] name) leaks to repo root when run/copied
+# from here. Anchored to root so it never shadows the crates/terax source dir.
+/terax
