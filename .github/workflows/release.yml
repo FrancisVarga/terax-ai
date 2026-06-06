@@ -27,8 +27,27 @@ jobs:
           - platform: windows-latest
             args: "--features sql"
             rust-target: ""
+          # macOS Apple Silicon. macos-14 runners are arm64, so this is a native
+          # build (no cross-compile). The explicit target makes the sidecar
+          # output path deterministic and matches what the sidecar scripts stage.
+          - platform: macos-14
+            args: "--features sql --target aarch64-apple-darwin"
+            rust-target: "aarch64-apple-darwin"
+          # macOS Intel. macos-14 runners are arm64; building x86_64 here is a
+          # cross-compile (the Apple toolchain ships both slices, so no extra SDK
+          # is needed — only the rustup target, added below).
+          - platform: macos-14
+            args: "--features sql --target x86_64-apple-darwin"
+            rust-target: "x86_64-apple-darwin"
 
     runs-on: ${{ matrix.platform }}
+    env:
+      # The pnpm `pretauri` hook (run by tauri-action and the warm-cache step) can't
+      # take CLI args, so it reads this to stage sidecars for the right triple. On
+      # the Windows row rust-target is empty, so the hook falls back to host — its
+      # native triple — which is correct. The macOS rows set it to the cross/native
+      # target so the bundled sidecars match the `--target` passed to tauri build.
+      TERAX_SIDECAR_TARGET: ${{ matrix.rust-target }}
     steps:
       - uses: actions/checkout@v4
 
@@ -67,8 +86,13 @@ jobs:
           # Cache the build script + proc-macro outputs too, not just deps.
           cache-all-crates: true
 
+      # pnpm-workspace.yaml pins supportedArchitectures to win32/x64 for local
+      # Windows dev. On the macOS runners, add the host (darwin/arm64) set via the
+      # --os/--cpu install flags so the darwin-native optionals (rollup, esbuild,
+      # sharp) that vite/tauri need get installed alongside the pinned set. The
+      # Windows row keeps the bare install (its pin already matches the runner).
       - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile ${{ runner.os == 'macOS' && '--os current --cpu current' || '' }}
 
       # bunqueue is Bun-only and absent from packaged builds; compile it (and its
       # workers) into standalone sidecars so tauri-action can bundle them via
@@ -83,9 +107,13 @@ jobs:
       # `--features sql` compiles DuckDB into release builds (the CSV/Parquet SQL
       # editor). It is OFF by default so `tauri dev` skips DuckDB's bundled C++
       # amalgamation (issue #72); release/CI opts back in here.
+      # Pass the SAME args as the release step (incl. the per-row --target) so the
+      # cache this warms matches what tauri-action compiles on the tag run — the
+      # Intel row cross-compiles x86_64, so warming the host arm64 cache would
+      # miss. --no-bundle skips artifact creation; we only want the dep compile.
       - name: Warm cache (main only, no release)
         if: github.ref == 'refs/heads/main'
-        run: pnpm tauri build --no-bundle --features sql
+        run: pnpm tauri build --no-bundle ${{ matrix.args }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""

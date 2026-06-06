@@ -101,6 +101,18 @@ Latest installers are on the [Releases](https://github.com/crynta/terax-ai/relea
 - Default shell detection: `pwsh.exe` (PowerShell 7+) -> `powershell.exe` (Windows PowerShell 5.1) -> `cmd.exe`.
 - WSL is a first-class workspace environment, not a wrapped subprocess.
 
+### macOS notes
+
+- Universal coverage ships as two builds: **Apple Silicon** (`aarch64`) and **Intel** (`x86_64`). Pick the `.dmg` matching your Mac (Apple menu -> About This Mac).
+- Terax isn't notarized yet, so Gatekeeper quarantines it on first launch ("Terax is damaged" or "cannot be opened"). Clear the quarantine flag once after installing to `/Applications`:
+
+  ```sh
+  xattr -dr com.apple.quarantine /Applications/Terax.app
+  ```
+
+  Alternatively, right-click the app -> **Open** -> **Open** to bypass Gatekeeper for that build.
+- Requires macOS 13 (Ventura) or newer.
+
 ### Linux notes
 
 - **Arch / AUR:** `yay -S terax-bin` (or `paru`, etc.). Tracks the latest release.

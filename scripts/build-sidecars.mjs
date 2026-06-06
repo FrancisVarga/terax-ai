@@ -96,7 +96,12 @@ function hostTriple() {
 }
 
 const argTriple = process.argv.find((a) => a.startsWith("--target="));
-const triple = argTriple ? argTriple.slice("--target=".length) : hostTriple();
+// Resolution order: explicit `--target=` flag wins; else the TERAX_SIDECAR_TARGET
+// env var (set so the pnpm `pretauri` hook — which tauri-action runs and we can't
+// pass CLI args to — stages the right triple on cross-compile rows); else host.
+const triple = argTriple
+  ? argTriple.slice("--target=".length)
+  : process.env.TERAX_SIDECAR_TARGET || hostTriple();
 const bunTarget = TRIPLE_TO_BUN[triple];
 if (!bunTarget) {
   console.error(`Unsupported target triple: ${triple}`);

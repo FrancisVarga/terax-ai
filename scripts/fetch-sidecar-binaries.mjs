@@ -239,7 +239,13 @@ const wantedTools = args
   .filter((a) => a.startsWith("--tool="))
   .map((a) => a.slice("--tool=".length));
 
-const triples = all ? TRIPLES : [argTriple ? argTriple.slice("--target=".length) : hostTriple()];
+// Single-triple resolution order: explicit `--target=` flag wins; else the
+// TERAX_SIDECAR_TARGET env var (so the pnpm `pretauri` hook stages the right
+// triple on cross-compile rows); else host. `--all` overrides everything.
+const singleTriple = argTriple
+  ? argTriple.slice("--target=".length)
+  : process.env.TERAX_SIDECAR_TARGET || hostTriple();
+const triples = all ? TRIPLES : [singleTriple];
 const toolNames = wantedTools.length ? wantedTools : Object.keys(TOOLS);
 
 for (const name of toolNames) {
