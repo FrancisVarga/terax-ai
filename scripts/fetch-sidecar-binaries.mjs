@@ -51,7 +51,19 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
 const OUT_DIR = join(ROOT, "src-tauri", "binaries");
-const UA = { "User-Agent": "terax-fetch-sidecar-binaries" };
+/**
+ * Request headers for GitHub. Unauthenticated calls share a 60 req/hr/IP budget
+ * — on hosted CI that pool is drained by other jobs on the same runner IP,
+ * surfacing as a 403 on `releases/latest`. When a token is present (CI sets
+ * `GITHUB_TOKEN`; local `gh` sets `GH_TOKEN`) we send it to lift the cap to
+ * 5000 req/hr. A bad token returns 401, not 403, so the unauthenticated
+ * fallback stays correct.
+ */
+const GH_TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "";
+const UA = {
+  "User-Agent": "terax-fetch-sidecar-binaries",
+  ...(GH_TOKEN ? { Authorization: `Bearer ${GH_TOKEN}` } : {}),
+};
 
 /** Every triple we may stage, keyed for per-tool asset lookups. */
 const TRIPLES = [

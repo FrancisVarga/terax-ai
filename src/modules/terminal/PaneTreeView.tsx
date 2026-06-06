@@ -85,8 +85,13 @@ export function PaneTreeView({
             }
             title={node.cwd}
           >
-            <span className="min-w-0 flex-1 truncate">
-              {paneTitle(node.id, node.cwd)}
+            <span className="flex min-w-0 flex-1 items-center gap-1 truncate">
+              <span className="shrink-0 font-mono text-[10px] tabular-nums opacity-60">
+                #{node.id}
+              </span>
+              <span className="min-w-0 truncate">
+                {paneTitle(node.id, node.cwd)}
+              </span>
             </span>
             <button
               type="button"

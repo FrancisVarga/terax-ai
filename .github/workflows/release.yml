@@ -100,6 +100,11 @@ jobs:
       # triple; pass the matrix target for cross-compile rows.
       - name: Build bunqueue sidecars
         run: pnpm build:sidecars ${{ matrix.rust-target != '' && format('--target={0}', matrix.rust-target) || '' }}
+        env:
+          # fetch-sidecar-binaries.mjs hits the GitHub releases API (rg, s5cmd).
+          # Unauthenticated calls share a 60 req/hr/IP budget that hosted runners
+          # exhaust → 403. Pass the per-job token to lift the cap to 5000 req/hr.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # main-branch runs stop here: the cache is already populated above by the
       # cargo compile that tauri-action would do, so on main we run a plain
