@@ -63,6 +63,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Windows Defender real-time protection scans every file write. A cargo
+      # build emits millions of small .rlib/.rmeta/incremental files (plus the
+      # MSVC linker's temp objects), each triggering a scan — the dominant reason
+      # windows-latest Rust builds run far slower than macOS. Exclude the build
+      # output dirs + the toolchain processes up front. Admin is required;
+      # hosted runners have it, so guard on Windows and continue-on-error so a
+      # self-hosted/non-admin runner degrades to "slow but works" instead of
+      # failing the release.
+      - name: Exclude build dirs from Windows Defender
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}\src-tauri\target"
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
+          Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP"
+          Add-MpPreference -ExclusionProcess "cargo.exe"
+          Add-MpPreference -ExclusionProcess "rustc.exe"
+          Add-MpPreference -ExclusionProcess "link.exe"
+
       - uses: pnpm/action-setup@v6
         with:
           version: 10
