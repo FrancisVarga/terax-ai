@@ -42,11 +42,14 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     env:
-      # The pnpm `pretauri` hook (run by tauri-action and the warm-cache step) can't
-      # take CLI args, so it reads this to stage sidecars for the right triple. On
-      # the Windows row rust-target is empty, so the hook falls back to host — its
-      # native triple — which is correct. The macOS rows set it to the cross/native
-      # target so the bundled sidecars match the `--target` passed to tauri build.
+      # Fallback triple for any sidecar build that runs without an explicit
+      # `--target=` (resolution order in the sidecar scripts: --target= flag >
+      # this env > host triple). The explicit "Build bunqueue sidecars" step below
+      # passes --target= directly so this is normally redundant there, but it keeps
+      # the right triple if any sidecar step is invoked arg-less. The `pretauri`
+      # lifecycle hook was REMOVED (it double-built sidecars inside tauri-action and
+      # misfired the triple on cross-compile rows); sidecars are now staged ONCE by
+      # the explicit step before tauri-action's arg-less `pnpm tauri build` runs.
       TERAX_SIDECAR_TARGET: ${{ matrix.rust-target }}
     steps:
       - uses: actions/checkout@v4

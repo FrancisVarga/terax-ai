@@ -251,9 +251,10 @@ const wantedTools = args
   .filter((a) => a.startsWith("--tool="))
   .map((a) => a.slice("--tool=".length));
 
-// Single-triple resolution order: explicit `--target=` flag wins; else the
-// TERAX_SIDECAR_TARGET env var (so the pnpm `pretauri` hook stages the right
-// triple on cross-compile rows); else host. `--all` overrides everything.
+// Single-triple resolution order: explicit `--target=` flag wins (the
+// `build:sidecars` chain and the CI step both pass it); else the
+// TERAX_SIDECAR_TARGET env var (fallback for arg-less cross-compile runs); else
+// host. `--all` overrides everything.
 const singleTriple = argTriple
   ? argTriple.slice("--target=".length)
   : process.env.TERAX_SIDECAR_TARGET || hostTriple();

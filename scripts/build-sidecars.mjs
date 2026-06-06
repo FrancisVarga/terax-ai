@@ -96,9 +96,9 @@ function hostTriple() {
 }
 
 const argTriple = process.argv.find((a) => a.startsWith("--target="));
-// Resolution order: explicit `--target=` flag wins; else the TERAX_SIDECAR_TARGET
-// env var (set so the pnpm `pretauri` hook — which tauri-action runs and we can't
-// pass CLI args to — stages the right triple on cross-compile rows); else host.
+// Resolution order: explicit `--target=` flag wins (the `build:sidecars` chain and
+// the CI step both pass it); else the TERAX_SIDECAR_TARGET env var (a fallback for
+// an arg-less invocation on a cross-compile row); else the host triple.
 const triple = argTriple
   ? argTriple.slice("--target=".length)
   : process.env.TERAX_SIDECAR_TARGET || hostTriple();
@@ -143,7 +143,7 @@ if (!existsSync(OUT_DIR)) mkdirSync(OUT_DIR, { recursive: true });
  * the chain fails on the sidecars staged AFTER it — e.g. otel-collector (built
  * 3rd) aborts because kv-server (4th) and localfs (5th) aren't staged yet.
  *
- * `build-sidecars.mjs` runs FIRST in both `build:sidecars` and `pretauri`, and
+ * `build-sidecars.mjs` runs FIRST in the `build:sidecars` chain, and
  * builds bunqueue with the bun bundler (no cargo, no build.rs), so staging all
  * placeholders here guarantees the full externalBin set is present before any
  * cargo build runs — order-independent and robust to future reordering. Each

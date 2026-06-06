@@ -14,10 +14,9 @@
     "build:rmux-sidecar": "node scripts/build-rmux-sidecar.mjs",
     "fetch:sidecars": "node scripts/fetch-sidecar-binaries.mjs",
     "preview": "vite preview",
-    "pretauri": "node scripts/build-all-sidecars.mjs",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev -c src-tauri/tauri.conf.dev.json -- --bin terax-dbg",
-    "tauri:build": "tauri build --features sql",
+    "tauri:dev": "pnpm build:sidecars && tauri dev -c src-tauri/tauri.conf.dev.json -- --bin terax-dbg",
+    "tauri:build": "pnpm build:sidecars && tauri build --features sql",
     "test": "vitest run",
     "test:watch": "vitest",
     "seed:otel": "node scripts/otel-seed.mjs"

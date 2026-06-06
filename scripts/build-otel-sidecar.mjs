@@ -16,7 +16,7 @@
  * opentelemetry-proto, all in the default build. The workspace shares one
  * `target/` dir, so the output path is unchanged.
  *
- * Run via: `pnpm build:otel-sidecar` (called from `pretauri`). Run BEFORE
+ * Run via: `pnpm build:otel-sidecar` (or the `build:sidecars` chain). Run BEFORE
  * `pnpm tauri build`. Cross-compile by passing --target=<triple>; defaults to
  * the host triple.
  */
@@ -50,9 +50,9 @@ function hostTriple() {
 }
 
 const argTriple = process.argv.find((a) => a.startsWith("--target="));
-// Resolution order: explicit `--target=` flag wins; else the TERAX_SIDECAR_TARGET
-// env var (set so the pnpm `pretauri` hook — which tauri-action runs and we can't
-// pass CLI args to — stages the right triple on cross-compile rows); else host.
+// Resolution order: explicit `--target=` flag wins (the `build:sidecars` chain and
+// the CI step both pass it); else the TERAX_SIDECAR_TARGET env var (a fallback for
+// an arg-less invocation on a cross-compile row); else the host triple.
 const triple = argTriple
   ? argTriple.slice("--target=".length)
   : process.env.TERAX_SIDECAR_TARGET || hostTriple();

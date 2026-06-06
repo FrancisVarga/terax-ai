@@ -14,7 +14,7 @@
  * amalgamation is never pulled into the sidecar. The workspace shares one
  * `target/` dir, so the output path is unchanged.
  *
- * Run via the `build:sidecars` / `pretauri` chain, BEFORE `pnpm tauri build`.
+ * Run via the `build:sidecars` chain, BEFORE `pnpm tauri build`.
  * Cross-compile by passing --target=<triple>; defaults to the host triple.
  */
 
@@ -47,9 +47,9 @@ function hostTriple() {
 }
 
 const argTriple = process.argv.find((a) => a.startsWith("--target="));
-// Resolution order: explicit `--target=` flag wins; else the TERAX_SIDECAR_TARGET
-// env var (set so the pnpm `pretauri` hook — which tauri-action runs and we can't
-// pass CLI args to — builds the right triple on cross-compile rows); else host.
+// Resolution order: explicit `--target=` flag wins (the `build:sidecars` chain and
+// the CI step both pass it); else the TERAX_SIDECAR_TARGET env var (a fallback for
+// an arg-less invocation on a cross-compile row); else the host triple.
 // MUST mirror the sibling sidecar scripts: if rmux builds for the host triple
 // while bunqueue/otel/kv/localfs staged for the cross target, the terax build.rs
 // externalBin assertion (triggered by `cargo build -p rmux-daemon`) fails on the

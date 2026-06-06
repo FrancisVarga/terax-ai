@@ -1,7 +1,7 @@
 /**
  * Orchestrate the full sidecar build in the one correct order, so `build:sidecars`
- * and `pretauri` stay one-liners instead of a duplicated `A && B && C && ...`
- * chain that has to be edited in two places every time a sidecar is added.
+ * stays a one-liner instead of a duplicated `A && B && C && ...` chain that has to
+ * be edited in two places every time a sidecar is added.
  *
  * Order matters and is encoded here once:
  *  1. build-sidecars       - compiles the Bun sidecars AND stages zero-byte
@@ -19,7 +19,8 @@
  * stdio are preserved; a non-zero exit stops the run, matching the old `&&` chain.
  * Pass-through args (e.g. --target=<triple>) are forwarded to every step.
  *
- * Run via: `pnpm build:sidecars` (and automatically by `pretauri`).
+ * Run via: `pnpm build:sidecars` (chained into `tauri:build`/`tauri:dev`, and run
+ * explicitly as the "Build bunqueue sidecars" CI step before tauri-action).
  */
 
 import { spawnSync } from "node:child_process";

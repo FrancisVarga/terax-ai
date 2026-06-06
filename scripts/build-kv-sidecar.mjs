@@ -8,7 +8,7 @@
  * with `terax_lib`'s DEFAULT features only (no `--features sql`, so the DuckDB
  * C++ amalgamation is never pulled in). The workspace shares one `target/` dir.
  *
- * Run via: `pnpm build:kv-sidecar` (called from `pretauri`). Run BEFORE
+ * Run via: `pnpm build:kv-sidecar` (or the `build:sidecars` chain). Run BEFORE
  * `pnpm tauri build`. Cross-compile by passing --target=<triple>; defaults to
  * the host triple.
  */
@@ -42,9 +42,9 @@ function hostTriple() {
 }
 
 const argTriple = process.argv.find((a) => a.startsWith("--target="));
-// Resolution order: explicit `--target=` flag wins; else the TERAX_SIDECAR_TARGET
-// env var (set so the pnpm `pretauri` hook — which tauri-action runs and we can't
-// pass CLI args to — stages the right triple on cross-compile rows); else host.
+// Resolution order: explicit `--target=` flag wins (the `build:sidecars` chain and
+// the CI step both pass it); else the TERAX_SIDECAR_TARGET env var (a fallback for
+// an arg-less invocation on a cross-compile row); else the host triple.
 const triple = argTriple
   ? argTriple.slice("--target=".length)
   : process.env.TERAX_SIDECAR_TARGET || hostTriple();
