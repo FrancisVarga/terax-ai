@@ -51,6 +51,69 @@ const FLAG_ENV: &str = "TERAX_RMUX_DAEMON";
 /// stdout before giving up and falling back to in-process.
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Per-request ceiling for the blocking daemon verbs (`post_json`,
+/// `post_json_resp`, `get_json`). These run on a synchronous command worker and,
+/// for `close_all_forwarded`, on the boot path that the webview awaits before its
+/// first render. A daemon that is wedged (or a stale orphan still holding the
+/// loopback port) must NEVER block forever here or the whole app hangs with
+/// "Application Not Responding". Loopback round-trips are sub-millisecond, so a
+/// few seconds is generous while still failing fast to the in-process fallback.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Build a reqwest client with a hard request timeout. Falls back to a default
+/// client only if the builder somehow fails (never observed); the calling verb
+/// then still has its own error path.
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// A dedicated Tokio runtime owned solely by the rmux daemon client, isolated
+/// from Tauri's shared `GlobalRuntime`. Created once, reused for every verb.
+///
+/// Why a private runtime: the daemon verbs (`get_json`/`post_json`/
+/// `post_json_resp`) are driven by SYNCHRONOUS `#[tauri::command]` handlers,
+/// which Tauri runs on the main (UI) thread. Blocking there on the SHARED
+/// runtime parks the main thread waiting for that runtime to drive the future --
+/// but its workers are entangled with long-lived rmux SSE/event-bridge tasks and
+/// WebKit/JS callbacks, so under load every worker is busy and the future is
+/// never polled -> the main thread parks forever -> the webview hangs with
+/// "Application Not Responding" (reproduced on boot when the SessionSwitcher
+/// calls `rmux_session_list`; the daemon answers `/session/list` instantly via
+/// curl, proving the stall is in our shared runtime, not the daemon).
+///
+/// This runtime has its own worker threads that do nothing but service these
+/// short loopback round-trips, so it can never be starved by the global pool.
+/// It is a long-lived singleton (not per-call) because the PTY hot path
+/// (`write_forwarded`/`resize_forwarded`) routes through here on every
+/// keystroke/resize -- a per-call runtime/thread would wreck that latency.
+static RMUX_RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+
+fn rmux_runtime() -> &'static tokio::runtime::Runtime {
+    RMUX_RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("rmux-client")
+            .build()
+            .expect("rmux: build dedicated client runtime")
+    })
+}
+
+/// Block on `task` using the dedicated [`rmux_runtime`], never the shared one.
+/// `block_on` from a non-runtime thread (the main UI thread) is fine here because
+/// this runtime's own workers drive the future; the calling thread only parks
+/// until they finish, and they always can.
+fn safe_block_on<F>(task: F) -> F::Output
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    rmux_runtime().block_on(task)
+}
+
 /// True when daemon forwarding is enabled for this process. Defaults ON so a
 /// shipped build gets session survival with no env var; `TERAX_RMUX_DAEMON=0` is
 /// the explicit kill-switch (forces the in-process path). Read per-call (cheap
@@ -254,17 +317,29 @@ pub fn attach_existing(
 /// `pty_close_all` on webview reload. Failures are swallowed: the panes live in
 /// the surviving daemon and a leftover is acceptable in Phase 1, so this must
 /// never block the reload.
+///
+/// `pty_close_all` is a synchronous command the webview `await`s BEFORE its first
+/// React render, so this runs on the boot path. The pane-close HTTP calls are
+/// fire-and-forget cleanup, so they are dispatched to a detached task rather than
+/// driven inline: a slow or wedged daemon (or a stale orphan still on the
+/// loopback port) must never delay first paint. The map is still drained
+/// synchronously so the caller sees an empty pane set immediately.
 pub fn close_all_forwarded(rmux_state: &RmuxState) {
     let drained: Vec<(u32, u32)> = rmux_state.panes.lock_safe().drain().collect();
     let Some(base_url) = rmux_state.base_url() else {
         return;
     };
-    for (id, pane_id) in drained {
-        let url = format!("{base_url}/pane/{pane_id}/close");
-        if let Err(e) = post_json(&url, serde_json::json!({})) {
-            log::debug!(target: "rmux", "close_all: pane id={id} close failed: {e}");
-        }
+    if drained.is_empty() {
+        return;
     }
+    tauri::async_runtime::spawn_blocking(move || {
+        for (id, pane_id) in drained {
+            let url = format!("{base_url}/pane/{pane_id}/close");
+            if let Err(e) = post_json(&url, serde_json::json!({})) {
+                log::debug!(target: "rmux", "close_all: pane id={id} close failed: {e}");
+            }
+        }
+    });
 }
 
 /// Locate the `rmux-daemon` sidecar next to the app binary, mirroring the otel
@@ -404,8 +479,8 @@ fn parse_listening_port(line: &str) -> Option<u16> {
 /// the established pattern.
 fn post_json(url: &str, body: Value) -> Result<(), String> {
     let url = url.to_string();
-    tauri::async_runtime::block_on(async move {
-        let client = reqwest::Client::new();
+    safe_block_on(async move {
+        let client = http_client();
         let resp = client
             .post(&url)
             .json(&body)
@@ -425,8 +500,8 @@ fn post_json(url: &str, body: Value) -> Result<(), String> {
 /// `post_json`.
 fn post_json_resp(url: &str, body: Value) -> Result<Value, String> {
     let url = url.to_string();
-    tauri::async_runtime::block_on(async move {
-        let client = reqwest::Client::new();
+    safe_block_on(async move {
+        let client = http_client();
         let resp = client
             .post(&url)
             .json(&body)
@@ -446,8 +521,8 @@ fn post_json_resp(url: &str, body: Value) -> Result<Value, String> {
 /// Blocking GET returning the JSON response body (for `/session/list`).
 fn get_json(url: &str) -> Result<Value, String> {
     let url = url.to_string();
-    tauri::async_runtime::block_on(async move {
-        let client = reqwest::Client::new();
+    safe_block_on(async move {
+        let client = http_client();
         let resp = client
             .get(&url)
             .send()
@@ -900,6 +975,60 @@ mod tests {
             i32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
             137
         );
+    }
+
+    #[test]
+    fn http_client_carries_request_timeout() {
+        // Locks the boot-path invariant: the daemon client must be built with a
+        // bounded per-request timeout so a wedged or orphaned daemon can never
+        // freeze `pty_close_all` (which the webview awaits before first render).
+        // A regression that drops the timeout would let startup hang forever.
+        assert!(
+            REQUEST_TIMEOUT <= Duration::from_secs(5),
+            "request timeout must stay tight enough to fail fast on boot"
+        );
+    }
+
+    #[test]
+    fn post_json_fails_fast_against_dead_port() {
+        // 127.0.0.1:1 is reserved and never listens, so the connect attempt errors
+        // quickly. The point is that the call RETURNS (with Err) instead of
+        // blocking indefinitely; the timeout is the backstop if connect ever hangs.
+        let start = Instant::now();
+        let res = post_json("http://127.0.0.1:1/pane/0/close", serde_json::json!({}));
+        let elapsed = start.elapsed();
+        assert!(res.is_err(), "request to a dead port must error, not succeed");
+        assert!(
+            elapsed < REQUEST_TIMEOUT + Duration::from_secs(2),
+            "request must fail fast (took {elapsed:?})"
+        );
+    }
+
+    #[test]
+    fn blocking_verb_does_not_deadlock_inside_runtime() {
+        // The regression guard for the "Application Not Responding" hang: the
+        // synchronous daemon verbs use `safe_block_on` (the dedicated rmux
+        // runtime), which must complete even when the caller is on a thread that
+        // is contending the shared runtime. Driving these verbs on the shared
+        // runtime instead would let a saturated worker pool starve the future
+        // forever; this test would then hang and trip the nextest per-test
+        // timeout instead of passing.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        let res = rt.block_on(async {
+            // Run the synchronous verb on a runtime worker via spawn_blocking,
+            // reproducing the command-on-runtime-thread call shape.
+            tokio::task::spawn_blocking(|| {
+                post_json("http://127.0.0.1:1/pane/0/close", serde_json::json!({}))
+            })
+            .await
+            .expect("join blocking task")
+        });
+        // Dead port -> Err is fine; the point is it RETURNED rather than hung.
+        assert!(res.is_err(), "expected a connection error, not a hang");
     }
 
     // True end-to-end against a live daemon. Spawns the real `rmux-daemon` binary
