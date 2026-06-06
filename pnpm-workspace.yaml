@@ -8,8 +8,14 @@ allowBuilds:
   msw: true
   sharp: false
 
+# Materialize native optional-deps for every release target (release.yml:
+# windows-latest x64, macos-14 arm64, macos-14 x64) so a plain `pnpm install`
+# keeps all platform binaries. Without this, a one-off `--os` flag prunes the
+# host-arch binaries (e.g. @tauri-apps/cli-darwin-arm64) and breaks the CLI.
 supportedArchitectures:
   os:
     - win32
+    - darwin
   cpu:
     - x64
+    - arm64
