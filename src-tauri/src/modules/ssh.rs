@@ -1,5 +1,5 @@
 use russh::client::{self, Handle, Handler};
-use russh::keys::key;
+use russh::keys::{PrivateKeyWithHashAlg, PublicKey};
 use russh::{ChannelMsg, Sig};
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::FileType;
@@ -520,13 +520,16 @@ struct ClientHandler {
     port: u16,
 }
 
-#[async_trait::async_trait]
+// russh 0.61's `Handler` trait uses native `async fn` (RPITIT), not
+// `#[async_trait]`. Annotating the impl with async_trait now desugars to a boxed
+// future whose lifetimes no longer match the trait (E0195), so the attribute is
+// gone and `check_server_key` stays a plain `async fn`.
 impl Handler for ClientHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &key::PublicKey,
+        server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
         // Use an explicit `~/.ssh/known_hosts` path: russh-keys' built-in
         // `known_hosts_path()` resolves to `~/ssh/known_hosts` (no dot) on
@@ -632,6 +635,7 @@ fn whoami() -> String {
 #[cfg(unix)]
 async fn try_agent_auth(handle: &mut Handle<ClientHandler>, user: &str) -> bool {
     use russh::keys::agent::client::AgentClient;
+    use russh::keys::agent::AgentIdentity;
 
     let mut agent = match AgentClient::connect_env().await {
         Ok(a) => a,
@@ -642,13 +646,21 @@ async fn try_agent_auth(handle: &mut Handle<ClientHandler>, user: &str) -> bool 
         Ok(ids) => ids,
         Err(_) => return false,
     };
-    for key in identities {
-        // `authenticate_future` moves the agent in and hands it back so the same
-        // connection can sign the next identity; thread it through the loop.
-        let (returned, result) = handle.authenticate_future(user, key, agent).await;
-        agent = returned;
-        if let Ok(true) = result {
-            return true;
+    for identity in identities {
+        // russh 0.61 removed `authenticate_future`. The agent now acts as a
+        // `Signer`: hand its public key to `authenticate_publickey_with` and let
+        // the agent sign the challenge over the same `&mut agent` borrow. Only
+        // plain public-key identities are tried here; agent certificates are not
+        // part of this milestone's key-auth path.
+        let AgentIdentity::PublicKey { key, .. } = identity else {
+            continue;
+        };
+        match handle
+            .authenticate_publickey_with(user, key, None, &mut agent)
+            .await
+        {
+            Ok(res) if res.success() => return true,
+            _ => continue,
         }
     }
     false
@@ -708,9 +720,13 @@ async fn authenticate(
             Err(_) => continue,
         };
         tried += 1;
-        match handle.authenticate_publickey(user, Arc::new(key)).await {
-            Ok(true) => return Ok(()),
-            Ok(false) => continue,
+        // russh 0.61: authenticate_publickey takes a PrivateKeyWithHashAlg (None
+        // = default hash; for RSA this maps to legacy sha-rsa) and returns an
+        // AuthResult, so success is `.success()` rather than a bare bool.
+        let key = PrivateKeyWithHashAlg::new(Arc::new(key), None);
+        match handle.authenticate_publickey(user, key).await {
+            Ok(res) if res.success() => return Ok(()),
+            Ok(_) => continue,
             Err(e) => return Err(format!("auth error: {e}")),
         }
     }
@@ -2258,5 +2274,60 @@ mod tests {
         assert_eq!(remote_rel("/srv/app/", "/srv/app/x"), "x");
         // A path outside the root is returned unchanged.
         assert_eq!(remote_rel("/srv/app", "/etc/passwd"), "/etc/passwd");
+    }
+
+    // Locks the host-key-verification invariant that `check_server_key` is built
+    // on across the russh 0.45 -> 0.61 upgrade: the SFTP path refuses any host
+    // whose key is NOT recorded in known_hosts (no in-app prompt, fail closed),
+    // and accepts a host only on an exact match. This is the MITM guard; a
+    // regression here would silently trust unknown/changed server keys.
+    #[test]
+    fn known_hosts_refuses_unknown_and_accepts_match() {
+        use russh::keys::{check_known_hosts_path, PrivateKey};
+        use std::io::Write;
+
+        // A real server key (ed25519) and its public half, as russh 0.61 types.
+        // `rand::rng()` yields a `ThreadRng: CryptoRng`, the bound `random` wants.
+        let server_key = PrivateKey::random(
+            &mut rand::rng(),
+            russh::keys::Algorithm::Ed25519,
+        )
+        .expect("generate ed25519 test key");
+        let server_pub = server_key.public_key();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let kh = dir.path().join("known_hosts");
+
+        // Empty known_hosts: an unknown host must be refused (Ok(false)), never
+        // trusted by default.
+        std::fs::File::create(&kh).expect("create known_hosts");
+        assert_eq!(
+            check_known_hosts_path("known.example.com", 22, server_pub, &kh).ok(),
+            Some(false),
+            "unknown host must not be trusted"
+        );
+
+        // Record the exact key for the host, then the same host+key must verify.
+        let line = format!(
+            "known.example.com {}\n",
+            server_pub.to_openssh().expect("encode openssh pubkey")
+        );
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&kh)
+            .expect("append known_hosts");
+        f.write_all(line.as_bytes()).expect("write known_hosts");
+        assert_eq!(
+            check_known_hosts_path("known.example.com", 22, server_pub, &kh).ok(),
+            Some(true),
+            "recorded host+key must verify"
+        );
+
+        // A DIFFERENT host name with that recorded key is still unknown.
+        assert_eq!(
+            check_known_hosts_path("evil.example.com", 22, server_pub, &kh).ok(),
+            Some(false),
+            "key recorded for another host must not authorize a new host"
+        );
     }
 }
