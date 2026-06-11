@@ -8226,7 +8226,7 @@ dependencies = [
 
 [[package]]
 name = "terax"
-version = "0.44.2"
+version = "0.50.0"
 dependencies = [
  "arrow",
  "async-trait",
