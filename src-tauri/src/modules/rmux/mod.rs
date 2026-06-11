@@ -371,14 +371,16 @@ fn spawn_daemon(exe: &std::path::Path) -> Result<(Arc<SharedChild>, u16), String
     Ok((child, port))
 }
 
-/// Build the daemon `Command` with stdio + console-hide applied. Detach flags are
-/// added by the platform spawn helpers so the Windows breakaway retry can vary
-/// only that flag.
+/// Build the daemon `Command` with stdio configured. Creation flags (console
+/// hiding + detach) are set in one place by the platform spawn helpers:
+/// `Command::creation_flags` REPLACES the stored flags rather than ORing them,
+/// so a `hide_console` here would be silently wiped by the later
+/// `creation_flags(detached_flags(..))` call (the bug that made the daemon pop
+/// a visible terminal window).
 fn base_command(exe: &std::path::Path) -> Command {
     let mut cmd = Command::new(exe);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
-    crate::modules::proc::hide_console(&mut cmd);
     cmd
 }
 
@@ -451,16 +453,18 @@ fn read_ready_port(child: &SharedChild) -> Result<u16, String> {
 /// plus, when permitted, `CREATE_BREAKAWAY_FROM_JOB` (the child escapes an
 /// inherited kill-on-close Job Object). `DETACHED_PROCESS` is deliberately NOT
 /// used: it severs the child's stdio, which would break the piped-stdout port
-/// handshake `read_ready_port` depends on. `hide_console` already suppresses a
-/// console window, so the daemon runs windowless without detaching its pipes.
+/// handshake `read_ready_port` depends on. `CREATE_NO_WINDOW` gives the child a
+/// hidden console instead, so the daemon runs windowless without detaching its
+/// pipes — it must be ORed here because `creation_flags` replaces, not merges.
 #[cfg(windows)]
 fn detached_flags(breakaway: bool) -> u32 {
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     if breakaway {
-        CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB
+        CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB
     } else {
-        CREATE_NEW_PROCESS_GROUP
+        CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     }
 }
 
