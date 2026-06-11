@@ -751,6 +751,10 @@ async fn open_conn(alias: &str) -> Result<Arc<RemoteConn>, String> {
 
     let config = Arc::new(client::Config {
         inactivity_timeout: Some(Duration::from_secs(3600)),
+        // russh defaults nodelay to false; Nagle + delayed-ACK adds tens of ms
+        // to every write-write-read exchange, and this workload (exec, SFTP,
+        // git plumbing) is exactly that shape. OpenSSH sets TCP_NODELAY too.
+        nodelay: true,
         ..Default::default()
     });
 
