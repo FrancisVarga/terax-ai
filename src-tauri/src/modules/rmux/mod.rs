@@ -60,14 +60,21 @@ const READY_TIMEOUT: Duration = Duration::from_secs(5);
 /// few seconds is generous while still failing fast to the in-process fallback.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Build a reqwest client with a hard request timeout. Falls back to a default
-/// client only if the builder somehow fails (never observed); the calling verb
-/// then still has its own error path.
-fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+/// The shared daemon HTTP client, with a hard request timeout. A single
+/// `OnceLock` instance so the connection pool (keep-alive) survives across
+/// calls: `pty_write` routes through here on EVERY keystroke, and a per-call
+/// client meant a fresh TCP connect per event (plus Windows TIME_WAIT churn on
+/// large pastes / agent-driven input). Falls back to a default client only if
+/// the builder somehow fails (never observed); the calling verb then still has
+/// its own error path.
+fn http_client() -> &'static reqwest::Client {
+    static RMUX_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    RMUX_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
 }
 
 /// A dedicated Tokio runtime owned solely by the rmux daemon client, isolated
