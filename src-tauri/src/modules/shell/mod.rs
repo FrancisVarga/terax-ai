@@ -66,14 +66,14 @@ pub async fn shell_run_command(
             .clamp(1, MAX_TIMEOUT_SECS),
     );
 
-    // The blocking spawn + wait runs on a worker thread so the Tauri async
-    // runtime stays unblocked.
-    let (tx, rx) = mpsc::channel::<Result<CommandOutput, String>>();
-    thread::spawn(move || {
-        let _ = tx.send(run_blocking(trimmed, cwd_path, workspace, dur));
-    });
-
-    rx.recv().map_err(|e| e.to_string())?
+    // run_blocking spawns + waits synchronously, so it must live on the
+    // blocking pool: awaiting spawn_blocking yields this future while the
+    // command runs. A bare `rx.recv()` here would pin a tokio worker for up
+    // to MAX_TIMEOUT_SECS, and enough concurrent tool calls would starve the
+    // whole shared runtime.
+    tauri::async_runtime::spawn_blocking(move || run_blocking(trimmed, cwd_path, workspace, dur))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 pub(crate) fn run_blocking_inner(
@@ -217,11 +217,12 @@ pub async fn shell_session_run(
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
             .clamp(1, MAX_TIMEOUT_SECS),
     );
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = tx.send(session.run(command, cwd, workspace, dur));
-    });
-    rx.recv().map_err(|e| e.to_string())?
+    // Same shape as shell_run_command: session.run blocks for the command's
+    // lifetime, so it goes to the blocking pool instead of pinning a tokio
+    // worker behind a synchronous channel receive.
+    tauri::async_runtime::spawn_blocking(move || session.run(command, cwd, workspace, dur))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
