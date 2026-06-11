@@ -176,7 +176,7 @@ pub fn set_mobile_home(dir: PathBuf) {
     let _ = MOBILE_HOME.set(dir);
 }
 
-fn resolve_launch_dir() -> PathBuf {
+pub fn resolve_launch_dir() -> PathBuf {
     if let Some(cwd) = launch_cwd_snapshot() {
         return cwd;
     }

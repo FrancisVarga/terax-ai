@@ -381,6 +381,13 @@ fn spawn_main_window(app: &tauri::AppHandle, dir: Option<String>) -> Result<(), 
 
     let window = builder.build().map_err(|e| e.to_string())?;
 
+    if let Some(key) = dir_key.clone() {
+        app.state::<ProjectWindows>()
+            .0
+            .lock_safe()
+            .insert(key, label.clone());
+    }
+
     #[cfg(target_os = "linux")]
     {
         let _ = window.set_decorations(false);
@@ -532,9 +539,8 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 let handle = app.handle();
-                let main_dir = workspace::launch_cwd_snapshot()
-                    .map(|p| normalize_dir_key(&modules::fs::to_canon(&p)))
-                    .unwrap_or_default();
+                let main_dir =
+                    normalize_dir_key(&modules::fs::to_canon(&workspace::resolve_launch_dir()));
                 app.state::<OpenWindows>()
                     .0
                     .lock_safe()
