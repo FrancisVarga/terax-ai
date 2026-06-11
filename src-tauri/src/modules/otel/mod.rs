@@ -180,13 +180,19 @@ impl OtelState {
     /// Run one query: either against the local store (in-process) or by proxying
     /// to the sidecar's query HTTP API. The dispatch shape (`QueryRequest` ->
     /// JSON) is shared with the sidecar so the two transports cannot drift.
-    fn query(&self, req: QueryRequest) -> Result<Value, String> {
+    ///
+    /// Async on purpose: the sidecar proxy awaits the HTTP round trip directly
+    /// (no block_on), and the in-process rusqlite dispatch runs on the blocking
+    /// pool so a slow SQLite query never stalls an async worker.
+    async fn query(&self, req: QueryRequest) -> Result<Value, String> {
         if let Some(base) = self.query_base() {
-            return proxy_query(&base, &req);
+            return proxy_query(&base, &req).await;
         }
-        // In-process: dispatch directly against the local store.
+        // In-process: dispatch against the local store off the async runtime.
         let store = self.local_store().expect("local store in in-process mode");
-        collector::dispatch_query(&store, req)
+        tauri::async_runtime::spawn_blocking(move || collector::dispatch_query(&store, req))
+            .await
+            .map_err(|e| e.to_string())?
     }
 }
 
@@ -256,32 +262,43 @@ fn event_sink(app: AppHandle) -> Arc<dyn IngestSink> {
     })
 }
 
-/// Blocking HTTP proxy of one query command to the sidecar. Runs the async
-/// reqwest call on the Tauri runtime via `block_on` — `otel_*` commands already
-/// execute on Tauri's command worker threads, so blocking here is fine and keeps
-/// the command bodies synchronous (matching their original signatures).
-fn proxy_query(base: &str, req: &QueryRequest) -> Result<Value, String> {
+/// Shared query-API client with a hard timeout: a wedged sidecar must surface
+/// an error within seconds instead of hanging the caller indefinitely. One
+/// `OnceLock` instance so keep-alive connections are reused across the ~4Hz
+/// dashboard refresh instead of a fresh TCP connect per query. The SSE event
+/// bridge deliberately does NOT use this client — a per-request timeout would
+/// kill its long-lived stream.
+fn query_client() -> &'static reqwest::Client {
+    static OTEL_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    OTEL_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
+/// HTTP proxy of one query command to the sidecar, awaited on the caller's
+/// runtime (the commands are async fns; no block_on anywhere in this path).
+async fn proxy_query(base: &str, req: &QueryRequest) -> Result<Value, String> {
     let url = format!("{base}{QUERY_PREFIX}{}", req_path(req));
     let body = serde_json::to_value(req).map_err(|e| e.to_string())?;
-    tauri::async_runtime::block_on(async move {
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(&url)
-            .json(&body)
-            .send()
+    let resp = query_client()
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("otel sidecar request failed: {e}"))?;
+    if resp.status().is_success() {
+        resp.json::<Value>()
             .await
-            .map_err(|e| format!("otel sidecar request failed: {e}"))?;
-        if resp.status().is_success() {
-            resp.json::<Value>()
-                .await
-                .map_err(|e| format!("otel sidecar bad response: {e}"))
-        } else {
-            // The sidecar maps a query error to a non-2xx with the message body;
-            // surface it verbatim so the Query page shows the SQL guard error.
-            let msg = resp.text().await.unwrap_or_default();
-            Err(msg)
-        }
-    })
+            .map_err(|e| format!("otel sidecar bad response: {e}"))
+    } else {
+        // The sidecar maps a query error to a non-2xx with the message body;
+        // surface it verbatim so the Query page shows the SQL guard error.
+        let msg = resp.text().await.unwrap_or_default();
+        Err(msg)
+    }
 }
 
 /// The URL path component for a request — the snake_case command name, matching
@@ -370,96 +387,147 @@ fn from_json<T: serde::de::DeserializeOwned>(v: Value) -> T {
     serde_json::from_value(v).expect("otel result deserializes into its own type")
 }
 
+// The commands are async fns (awaiting the backend directly) and return
+// `Result` because Tauri requires async commands that borrow `State` to do so.
+// Error semantics are unchanged for the dashboard polls: query failures still
+// collapse to the type's default via `unwrap_or_default`, so a hiccup renders
+// an empty panel instead of rejecting the invoke. Only `otel_query` (the Query
+// page) propagates errors, as before.
+
 #[tauri::command]
-pub fn otel_counts(state: State<'_, OtelState>) -> OtelCounts {
-    from_json(state.query(QueryRequest::Counts).unwrap_or_default())
+pub async fn otel_counts(state: State<'_, OtelState>) -> Result<OtelCounts, String> {
+    Ok(from_json(
+        state.query(QueryRequest::Counts).await.unwrap_or_default(),
+    ))
 }
 
 #[tauri::command]
-pub fn otel_services(state: State<'_, OtelState>) -> Vec<String> {
-    from_json(state.query(QueryRequest::Services).unwrap_or_default())
+pub async fn otel_services(state: State<'_, OtelState>) -> Result<Vec<String>, String> {
+    Ok(from_json(
+        state.query(QueryRequest::Services).await.unwrap_or_default(),
+    ))
 }
 
 #[tauri::command]
-pub fn otel_traces(state: State<'_, OtelState>, query: Option<TraceQuery>) -> Vec<TraceSummary> {
-    from_json(state.query(QueryRequest::Traces { query }).unwrap_or_default())
+pub async fn otel_traces(
+    state: State<'_, OtelState>,
+    query: Option<TraceQuery>,
+) -> Result<Vec<TraceSummary>, String> {
+    Ok(from_json(
+        state
+            .query(QueryRequest::Traces { query })
+            .await
+            .unwrap_or_default(),
+    ))
 }
 
 #[tauri::command]
-pub fn otel_trace_spans(state: State<'_, OtelState>, trace_id: String) -> Vec<SpanRow> {
-    from_json(
+pub async fn otel_trace_spans(
+    state: State<'_, OtelState>,
+    trace_id: String,
+) -> Result<Vec<SpanRow>, String> {
+    Ok(from_json(
         state
             .query(QueryRequest::TraceSpans { trace_id })
+            .await
             .unwrap_or_default(),
-    )
+    ))
 }
 
 #[tauri::command]
-pub fn otel_logs(state: State<'_, OtelState>, query: Option<LogQuery>) -> Vec<LogRow> {
-    from_json(state.query(QueryRequest::Logs { query }).unwrap_or_default())
+pub async fn otel_logs(
+    state: State<'_, OtelState>,
+    query: Option<LogQuery>,
+) -> Result<Vec<LogRow>, String> {
+    Ok(from_json(
+        state
+            .query(QueryRequest::Logs { query })
+            .await
+            .unwrap_or_default(),
+    ))
 }
 
 #[tauri::command]
-pub fn otel_metric_names(state: State<'_, OtelState>) -> Vec<serde_json::Value> {
-    from_json(state.query(QueryRequest::MetricNames).unwrap_or_default())
+pub async fn otel_metric_names(
+    state: State<'_, OtelState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    Ok(from_json(
+        state
+            .query(QueryRequest::MetricNames)
+            .await
+            .unwrap_or_default(),
+    ))
 }
 
 #[tauri::command]
-pub fn otel_metric_series(
+pub async fn otel_metric_series(
     state: State<'_, OtelState>,
     name: String,
     limit: Option<i64>,
-) -> Vec<MetricRow> {
-    from_json(
+) -> Result<Vec<MetricRow>, String> {
+    Ok(from_json(
         state
             .query(QueryRequest::MetricSeries { name, limit })
+            .await
             .unwrap_or_default(),
-    )
+    ))
 }
 
 #[tauri::command]
-pub fn otel_service_map(state: State<'_, OtelState>, since_ms: Option<i64>) -> model::ServiceMap {
-    from_json(
-        state
-            .query(QueryRequest::ServiceMap { since_ms })
-            .unwrap_or_default(),
-    )
-}
-
-#[tauri::command]
-pub fn otel_db_queries(
+pub async fn otel_service_map(
     state: State<'_, OtelState>,
     since_ms: Option<i64>,
-) -> Vec<model::DbStatement> {
-    from_json(
+) -> Result<model::ServiceMap, String> {
+    Ok(from_json(
+        state
+            .query(QueryRequest::ServiceMap { since_ms })
+            .await
+            .unwrap_or_default(),
+    ))
+}
+
+#[tauri::command]
+pub async fn otel_db_queries(
+    state: State<'_, OtelState>,
+    since_ms: Option<i64>,
+) -> Result<Vec<model::DbStatement>, String> {
+    Ok(from_json(
         state
             .query(QueryRequest::DbQueries { since_ms })
+            .await
             .unwrap_or_default(),
-    )
+    ))
 }
 
 #[tauri::command]
-pub fn otel_attribute_keys(state: State<'_, OtelState>) -> Vec<String> {
-    from_json(state.query(QueryRequest::AttributeKeys).unwrap_or_default())
+pub async fn otel_attribute_keys(state: State<'_, OtelState>) -> Result<Vec<String>, String> {
+    Ok(from_json(
+        state
+            .query(QueryRequest::AttributeKeys)
+            .await
+            .unwrap_or_default(),
+    ))
 }
 
 #[tauri::command]
-pub fn otel_attr_breakdown(
+pub async fn otel_attr_breakdown(
     state: State<'_, OtelState>,
     key: String,
     since_ms: Option<i64>,
     limit: Option<i64>,
-) -> Vec<model::AttrGroup> {
-    from_json(
+) -> Result<Vec<model::AttrGroup>, String> {
+    Ok(from_json(
         state
             .query(QueryRequest::AttrBreakdown { key, since_ms, limit })
+            .await
             .unwrap_or_default(),
-    )
+    ))
 }
 
 #[tauri::command]
-pub fn otel_clear(state: State<'_, OtelState>) {
-    let _ = state.query(QueryRequest::Clear);
+pub async fn otel_clear(state: State<'_, OtelState>) -> Result<(), String> {
+    let _ = state.query(QueryRequest::Clear).await;
+    Ok(())
 }
 
 /// Run a read-only SELECT against the telemetry store (the Query page). Returns
@@ -467,12 +535,12 @@ pub fn otel_clear(state: State<'_, OtelState>) {
 /// read-only guard or fails to execute. `limit` caps returned rows (default
 /// 1000); `offset` windows the result for infinite-scroll paging (default 0).
 #[tauri::command]
-pub fn otel_query(
+pub async fn otel_query(
     state: State<'_, OtelState>,
     sql: String,
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<QueryResult, String> {
-    let v = state.query(QueryRequest::Query { sql, limit, offset })?;
+    let v = state.query(QueryRequest::Query { sql, limit, offset }).await?;
     Ok(from_json(v))
 }
