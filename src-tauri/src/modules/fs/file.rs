@@ -43,7 +43,8 @@ pub struct FileStat {
     pub kind: StatKind,
 }
 
-#[tauri::command]
+// (async): reads up to MAX_READ_BYTES; off the main thread.
+#[tauri::command(async)]
 pub fn fs_read_file(path: String, workspace: Option<WorkspaceEnv>) -> Result<ReadResult, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     let p = resolve_path(&path, &workspace);
@@ -98,7 +99,8 @@ fn write_atomic(target: &Path, content: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-#[tauri::command]
+// (async): atomic write + fsync of arbitrary-size saves; off the main thread.
+#[tauri::command(async)]
 pub fn fs_write_file(
     path: String,
     content: String,

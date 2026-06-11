@@ -56,7 +56,8 @@ pub fn fs_rename(from: String, to: String, workspace: Option<WorkspaceEnv>) -> R
 /// Refuses to overwrite an existing target — the data-loss guard, matching
 /// `fs_rename`. Symlinks are copied as links, never followed into their
 /// target, so a copy can't silently duplicate or escape a linked tree.
-#[tauri::command]
+// (async): recursive copy can move arbitrary amounts of data; off the main thread.
+#[tauri::command(async)]
 pub fn fs_copy(from: String, to: String, workspace: Option<WorkspaceEnv>) -> Result<(), String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     let from_p = resolve_path(&from, &workspace);
@@ -104,7 +105,8 @@ fn copy_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Resu
 
 /// Deletes a file or directory (recursively for dirs). Callers are
 /// responsible for confirming destructive operations with the user.
-#[tauri::command]
+// (async): recursive delete of arbitrary trees; off the main thread.
+#[tauri::command(async)]
 pub fn fs_delete(path: String, workspace: Option<WorkspaceEnv>) -> Result<(), String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     let p = resolve_path(&path, &workspace);

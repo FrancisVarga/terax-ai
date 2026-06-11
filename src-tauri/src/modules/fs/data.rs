@@ -90,7 +90,8 @@ fn clamp_limit(limit: u32) -> u32 {
 
 /// List user-facing table and view names in a SQLite database, alphabetically.
 /// Internal `sqlite_*` bookkeeping tables are filtered out.
-#[tauri::command]
+// (async): opens + queries a SQLite file; off the main thread.
+#[tauri::command(async)]
 pub fn data_sqlite_tables(
     path: String,
     workspace: Option<WorkspaceEnv>,
@@ -132,7 +133,8 @@ fn verified_table_name(conn: &rusqlite::Connection, table: &str) -> Result<Strin
     .map_err(|_| format!("no such table: {table}"))
 }
 
-#[tauri::command]
+// (async): pages through a SQLite table (search scans rows); off the main thread.
+#[tauri::command(async)]
 pub fn data_sqlite_rows(
     path: String,
     table: String,
@@ -255,7 +257,8 @@ fn sqlite_value_to_string(row: &rusqlite::Row, idx: usize) -> Option<String> {
 /// Preview a CSV file. The first record is treated as the header row. Parsing
 /// is intentionally minimal but RFC-4180-aware (handles quoted fields with
 /// embedded commas, quotes, and newlines) — no external crate needed.
-#[tauri::command]
+// (async): parses the CSV up to the requested page; off the main thread.
+#[tauri::command(async)]
 pub fn data_csv_preview(
     path: String,
     limit: u32,
@@ -384,7 +387,8 @@ fn parse_csv(text: &str) -> Vec<Vec<String>> {
 /// Preview a Parquet file via the Arrow reader. We stream record batches and
 /// stop once `offset + limit` rows have been seen, so a huge file is never
 /// fully materialized just to show the first page.
-#[tauri::command]
+// (async): decodes Arrow record batches; off the main thread.
+#[tauri::command(async)]
 pub fn data_parquet_preview(
     path: String,
     limit: u32,
@@ -715,7 +719,9 @@ fn count_sql(user_sql: &str) -> String {
 /// page of results plus the total row count, mirroring the browse-mode preview
 /// commands so the grid pages identically. SQLite uses `rusqlite`; CSV/Parquet
 /// use an in-memory DuckDB exposing the file as view `data`.
-#[tauri::command]
+// (async): runs arbitrary user SQL (rusqlite / in-memory DuckDB) — unbounded
+// duration; must never run on the main thread.
+#[tauri::command(async)]
 pub fn data_query(
     path: String,
     format: DataFormat,
@@ -789,7 +795,9 @@ pub enum ExportFormat {
 /// `dest_path` is taken verbatim from a native save dialog the user picked, so
 /// it is intentionally *not* run through `resolve_path` (it's an output target
 /// the user explicitly chose, not a workspace-relative read).
-#[tauri::command]
+// (async): runs user SQL and writes the full result set (csv/xlsx) to disk —
+// unbounded duration; must never run on the main thread.
+#[tauri::command(async)]
 pub fn data_export(
     path: String,
     format: DataFormat,

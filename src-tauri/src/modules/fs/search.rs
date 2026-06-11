@@ -42,7 +42,8 @@ const PRUNE_DIRS: &[&str] = &[
     "__pycache__",
 ];
 
-#[tauri::command]
+// (async): walks up to MAX_SCAN entries; keep it off the main thread.
+#[tauri::command(async)]
 pub fn fs_search(
     root: String,
     query: String,
@@ -143,7 +144,8 @@ pub struct ListFilesResult {
     pub truncated: bool,
 }
 
-#[tauri::command]
+// (async): full-tree walk; keep it off the main thread.
+#[tauri::command(async)]
 pub fn fs_list_files(
     root: String,
     limit: Option<usize>,

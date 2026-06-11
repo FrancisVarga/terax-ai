@@ -74,7 +74,8 @@ pub struct DirEntry {
 /// Lists immediate children of `path`. Dirs first, then files, each sorted
 /// case-insensitively. Dot-prefixed entries (files and dirs) are hidden unless
 /// `show_hidden` is set.
-#[tauri::command]
+// (async): directory IO (slow on network drives / WSL mounts); off the main thread.
+#[tauri::command(async)]
 pub fn fs_read_dir(
     path: String,
     show_hidden: bool,

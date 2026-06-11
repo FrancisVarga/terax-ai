@@ -44,7 +44,9 @@ fn build_globset(patterns: &[String]) -> Result<Option<GlobSet>, String> {
     Ok(Some(set))
 }
 
-#[tauri::command]
+// (async): the parallel walker is waited on by the calling thread; without
+// this that wait lands on the main thread (see fs_glob_rg's rationale).
+#[tauri::command(async)]
 pub fn fs_grep(
     pattern: String,
     root: String,
@@ -180,7 +182,8 @@ pub struct GlobResponse {
     pub truncated: bool,
 }
 
-#[tauri::command]
+// (async): glob walk over the workspace; off the main thread.
+#[tauri::command(async)]
 pub fn fs_glob(
     pattern: String,
     root: String,
